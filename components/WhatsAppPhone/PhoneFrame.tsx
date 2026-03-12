@@ -10,6 +10,7 @@ import {
   Wifi,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { ChatBubble, TypingBubble } from "./ChatBubble";
 import { ChatInput } from "./ChatInput";
 import { useLiveChat } from "./useLiveChat";
@@ -56,15 +57,18 @@ export function PhoneFrame() {
       document.body.style.overflow = "hidden";
       document.body.style.position = "fixed";
       document.body.style.width = "100%";
+      document.body.style.height = "100%";
     } else {
       document.body.style.overflow = "";
       document.body.style.position = "";
       document.body.style.width = "";
+      document.body.style.height = "";
     }
     return () => {
       document.body.style.overflow = "";
       document.body.style.position = "";
       document.body.style.width = "";
+      document.body.style.height = "";
     };
   }, [isFullscreen]);
 
@@ -72,8 +76,8 @@ export function PhoneFrame() {
     if (!isFullscreen || !window.visualViewport) return;
 
     const handleResize = () => {
-      const offset =
-        window.innerHeight - (window.visualViewport?.height ?? window.innerHeight);
+      const vvHeight = window.visualViewport?.height ?? window.innerHeight;
+      const offset = window.innerHeight - vvHeight;
       setKeyboardOffset(Math.max(0, offset));
     };
 
@@ -91,7 +95,7 @@ export function PhoneFrame() {
   const openFullscreen = useCallback(() => {
     if (isMobile) {
       setIsFullscreen(true);
-      setTimeout(() => inputRef.current?.focus(), 100);
+      setTimeout(() => inputRef.current?.focus(), 150);
     }
   }, [isMobile]);
 
@@ -100,19 +104,6 @@ export function PhoneFrame() {
     setKeyboardOffset(0);
     inputRef.current?.blur();
   }, []);
-
-  const statusBar = (
-    <div className="phone-statusbar">
-      <span className="phone-status-time">9:41</span>
-      <div className="phone-status-icons" aria-hidden="true">
-        <div className="phone-signal">
-          <span /><span /><span /><span />
-        </div>
-        <Wifi size={13} strokeWidth={2.1} />
-        <span className="phone-battery" />
-      </div>
-    </div>
-  );
 
   const header = (
     <div className="whatsapp-header">
@@ -173,47 +164,61 @@ export function PhoneFrame() {
           <Mic size={19} strokeWidth={2} />
         </button>
       </div>
-      <div className="phone-home-indicator" />
     </div>
   );
 
-  if (isFullscreen) {
-    return (
-      <div
-        className="phone-fullscreen"
-        style={{ paddingBottom: keyboardOffset }}
-        aria-modal="true"
-        role="dialog"
-        aria-label="Chat con Agente Prisma"
-      >
-        {statusBar}
-        {header}
-        <button
-          type="button"
-          className="fullscreen-exit-btn"
-          onClick={closeFullscreen}
+  const fullscreenOverlay = isFullscreen
+    ? createPortal(
+        <div
+          className="phone-fullscreen"
+          style={{ paddingBottom: keyboardOffset }}
+          aria-modal="true"
+          role="dialog"
+          aria-label="Chat con Agente Prisma"
         >
-          Salir — presiona aquí
-        </button>
-        {thread}
-        {inputBar}
-      </div>
-    );
-  }
+          <div className="fullscreen-top-safe" />
+          {header}
+          <button
+            type="button"
+            className="fullscreen-exit-btn"
+            onClick={closeFullscreen}
+          >
+            Salir — presiona aquí
+          </button>
+          {thread}
+          {inputBar}
+          <div className="fullscreen-bottom-safe" />
+        </div>,
+        document.body,
+      )
+    : null;
 
   return (
-    <div
-      className="phone-shell"
-      aria-label="Demo del agente en un clon de WhatsApp"
-      onClick={isMobile ? openFullscreen : undefined}
-      style={isMobile ? { cursor: "pointer" } : undefined}
-    >
-      <div className="phone-frame">
-        {statusBar}
-        {header}
-        {thread}
-        {inputBar}
+    <>
+      <div
+        className="phone-shell"
+        aria-label="Demo del agente en un clon de WhatsApp"
+        onClick={isMobile ? openFullscreen : undefined}
+        style={isMobile ? { cursor: "pointer" } : undefined}
+      >
+        <div className="phone-frame">
+          <div className="phone-statusbar">
+            <span className="phone-status-time">9:41</span>
+            <div className="phone-status-icons" aria-hidden="true">
+              <div className="phone-signal">
+                <span /><span /><span /><span />
+              </div>
+              <Wifi size={13} strokeWidth={2.1} />
+              <span className="phone-battery" />
+            </div>
+          </div>
+          {header}
+          {thread}
+          {inputBar}
+          <div className="phone-home-indicator" />
+        </div>
       </div>
-    </div>
+      {fullscreenOverlay}
+    </>
   );
 }

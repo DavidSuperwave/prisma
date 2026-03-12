@@ -1,0 +1,30 @@
+<svg viewBox="0 0 40 40" width="40" height="40" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="prismGrad1" x1="0" y1="0" x2="40" y2="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#a8edea"/>
+      <stop offset="25%" stop-color="#fed6e3"/>
+      <stop offset="50%" stop-color="#d4fc79"/>
+      <stop offset="75%" stop-color="#96e6a1"/>
+      <stop offset="100%" stop-color="#89CFF0"/>
+    </linearGradient>
+    <linearGradient id="prismGrad2" x1="20" y1="0" x2="20" y2="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#f6d365"/>
+      <stop offset="50%" stop-color="#fda085"/>
+      <stop offset="100%" stop-color="#a18cd1"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="1.5" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <g transform="rotate(45 20 20)" filter="url(#glow)">
+    <rect x="6" y="6" width="28" height="28" rx="4" fill="url(#prismGrad1)" opacity="0.85"/>
+    <rect x="6" y="6" width="28" height="28" rx="4" fill="url(#prismGrad2)" opacity="0.45"/>
+    <rect x="6" y="6" width="28" height="28" rx="4" stroke="rgba(255,255,255,0.5)" stroke-width="1"/>
+    <line x1="20" y1="6" x2="20" y2="34" stroke="rgba(255,255,255,0.35)" stroke-width="0.8"/>
+    <line x1="6" y1="20" x2="34" y2="20" stroke="rgba(255,255,255,0.25)" stroke-width="0.8"/>
+  </g>
+</svg>

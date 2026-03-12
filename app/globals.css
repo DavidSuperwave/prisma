@@ -867,3 +867,66 @@ svg {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Phone fullscreen (mobile) */
+.phone-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  background: #ece5dd;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+.phone-fullscreen .chat-thread {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.phone-fullscreen .phone-statusbar {
+  background: #f7f7f7;
+}
+
+.phone-fullscreen .whatsapp-header {
+  background: rgba(247, 247, 247, 0.98);
+}
+
+.phone-fullscreen .chat-input-wrap {
+  flex-shrink: 0;
+}
+
+/* Fullscreen exit button */
+.fullscreen-exit-btn {
+  display: block;
+  width: 100%;
+  padding: 0.7rem 1rem;
+  border: none;
+  background: #25d366;
+  color: #fff;
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-align: center;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.fullscreen-exit-btn:active {
+  background: #1eba57;
+}
+
+/* Desktop input focus fix */
+.chat-form input:focus {
+  outline: none;
+  box-shadow: none;
+  background: #fff;
+}
+
+.chat-form:focus-within {
+  border-color: rgba(37, 165, 95, 0.4);
+}

@@ -1,3 +1,4 @@
+import Image from "next/image";
 import Link from "next/link";
 
 const links = [
@@ -12,7 +13,14 @@ export function Footer() {
       <div className="container footer-inner">
         <div>
           <div className="nav-logo">
-            <span>PrismaProject</span>
+            <Image
+              src="/prisma-logo.svg"
+              alt=""
+              width={32}
+              height={32}
+              aria-hidden="true"
+            />
+            <span>Prisma</span>
           </div>
           <p className="footer-copy">Agentes IA para WhatsApp. Hecho para Mexico.</p>
         </div>

@@ -15,9 +15,9 @@ const spaceGrotesk = Space_Grotesk({
 });
 
 export const metadata: Metadata = {
-  title: "PrismaProject | Agentes IA para WhatsApp",
+  title: "Prisma | Agentes IA para WhatsApp",
   description:
-    "PrismaProject crea agentes IA para WhatsApp que convierten conversaciones caoticas en operaciones claras y repetibles.",
+    "Prisma crea agentes IA para WhatsApp que convierten conversaciones caoticas en operaciones claras y repetibles.",
 };
 
 export default function RootLayout({

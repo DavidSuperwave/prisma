@@ -1,5 +1,5 @@
-import { ArrowRight, ShieldCheck, CheckCircle2 } from "lucide-react";
-import { WhatsAppPhone } from "@/components/WhatsAppPhone/WhatsAppPhone";
+import { ArrowRight, ShieldCheck } from "lucide-react";
+import { PhoneFrame } from "@/components/WhatsAppPhone/PhoneFrame";
 import { Button } from "@/components/ui/Button";
 import { Section } from "@/components/ui/Section";
 
@@ -63,35 +63,19 @@ const securityItems = [
   "Desplegable en tu infraestructura o en la nuestra, llaves siempre del lado del servidor.",
 ];
 
-const phoneCaptions = [
-  {
-    icon: <CheckCircle2 size={18} strokeWidth={2} />,
-    title: "Responde en segundos",
-    body: "Sin tiempos de espera ni turnos. Tu agente atiende el primer mensaje al instante, a cualquier hora.",
-  },
-  {
-    icon: <CheckCircle2 size={18} strokeWidth={2} />,
-    title: "Recuerda a cada cliente",
-    body: "Sabe quién es, qué preguntó la semana pasada y en qué etapa está. Sin que lo repita cada vez.",
-  },
-  {
-    icon: <CheckCircle2 size={18} strokeWidth={2} />,
-    title: "Habla como tu negocio",
-    body: "Configurado con el vocabulario, los flujos y el tono de tu industria — no un bot genérico.",
-  },
-];
-
 export default function HomePage() {
   return (
     <>
-      {/* ── HERO ─────────────────────────────────── */}
+      {/* HERO */}
       <section className="hero">
         <div className="container hero-grid fade-in">
           <div className="hero-copy">
             <div className="eyebrow-pill">Agentes IA · WhatsApp · Hecho para México</div>
             <h1>
               Tu operación ya vive en{" "}
-              <span className="gradient-text">WhatsApp.</span>{"\n"}Ahora puede correr sola.
+              <span className="gradient-text">WhatsApp.</span>
+              <br />
+              Ahora puede correr sola.
             </h1>
             <p>
               Prisma construye agentes de IA a medida para tu industria. Responden, califican, agendan
@@ -105,29 +89,12 @@ export default function HomePage() {
             </div>
           </div>
 
-          {/* Phone lives in the hero */}
-          <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-8)", alignItems: "flex-start" }}>
-            <WhatsAppPhone />
-            <div className="phone-caption-list">
-              {phoneCaptions.map((item) => (
-                <div key={item.title} className="phone-caption-item">
-                  {item.icon}
-                  <div>
-                    <strong style={{ display: "block", fontSize: "var(--text-sm)", marginBottom: "0.2rem" }}>
-                      {item.title}
-                    </strong>
-                    <p style={{ margin: 0, fontSize: "var(--text-sm)", color: "var(--color-text-muted)" }}>
-                      {item.body}
-                    </p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
+          {/* Phone only — no wrappers, no captions */}
+          <PhoneFrame />
         </div>
       </section>
 
-      {/* ── SOLUCIONES ───────────────────────────── */}
+      {/* SOLUCIONES */}
       <Section
         id="soluciones"
         label="Soluciones"
@@ -145,7 +112,7 @@ export default function HomePage() {
         </div>
       </Section>
 
-      {/* ── POR QUÉ IMPORTA ──────────────────────── */}
+      {/* POR QUÉ IMPORTA */}
       <Section
         label="Por qué importa"
         title="México tiene 95 millones de usuarios de WhatsApp. La mayoría de esas conversaciones aún se manejan a mano."
@@ -162,7 +129,7 @@ export default function HomePage() {
         </div>
       </Section>
 
-      {/* ── PARA QUIÉN ───────────────────────────── */}
+      {/* PARA QUIÉN */}
       <Section
         id="sectores"
         label="Para quién es"
@@ -179,7 +146,7 @@ export default function HomePage() {
         </div>
       </Section>
 
-      {/* ── CONFIANZA ────────────────────────────── */}
+      {/* CONFIANZA */}
       <Section
         id="seguridad"
         label="Privacidad y confianza"
@@ -215,7 +182,7 @@ export default function HomePage() {
         </div>
       </Section>
 
-      {/* ── CTA CIERRE ───────────────────────────── */}
+      {/* CTA CIERRE */}
       <Section
         label="Empieza hoy"
         title="Tu primer agente puede estar activo esta semana."

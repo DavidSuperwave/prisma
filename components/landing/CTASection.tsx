@@ -19,7 +19,7 @@ export default function CTASection() {
             textTransform: 'uppercase',
           }}
         >
-          Get a personalized demo
+          EMPIEZA ESTA SEMANA
         </div>
         <h2
           style={{
@@ -31,11 +31,11 @@ export default function CTASection() {
             fontWeight: 700,
           }}
         >
-          Ready to see the Prisma AI agent in action?
+          Tu equipo está listo en 5 días.
         </h2>
         <p style={{ color: 'var(--giga-muted)', marginBottom: '1.2rem', maxWidth: '760px', marginInline: 'auto' }}>
-          Prisma agents handle complex workflows at scale, from live customer support to compliance decisions, while
-          maintaining consistent resolution quality in production.
+          Platicamos contigo, configuramos a tus agentes y los ponemos a trabajar en tu WhatsApp — todo en una semana
+          laboral.
         </p>
         <a
           href="#"
@@ -51,8 +51,11 @@ export default function CTASection() {
             padding: '0.86rem 1.85rem',
           }}
         >
-          Talk to us
+          Quiero conocer a mi agente
         </a>
+        <p style={{ color: 'var(--giga-faint)', marginTop: '0.85rem', fontSize: '0.9rem' }}>
+          Sin contratos largos. Sin código. Sin sorpresas.
+        </p>
       </div>
     </section>
   )

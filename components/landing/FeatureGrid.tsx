@@ -522,6 +522,43 @@ export default function FeatureGrid() {
       }}
     >
       <div className="landing-container landing-container--compact">
+        <div className="animate-on-scroll" style={{ marginBottom: '1.8rem', maxWidth: '860px' }}>
+          <div
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              borderRadius: 'var(--radius-pill)',
+              border: '1px solid var(--giga-border)',
+              background: 'var(--giga-surface-soft)',
+              color: 'var(--giga-faint)',
+              textTransform: 'uppercase',
+              letterSpacing: '0.08em',
+              fontSize: '0.7rem',
+              fontWeight: 700,
+              padding: '0.3rem 0.72rem',
+              marginBottom: '0.85rem',
+            }}
+          >
+            TU EQUIPO
+          </div>
+          <h2
+            style={{
+              color: 'var(--giga-text)',
+              fontSize: 'clamp(1.95rem, 4.2vw, 3rem)',
+              lineHeight: 1.08,
+              marginBottom: '0.6rem',
+              fontFamily: 'var(--font-display)',
+            }}
+          >
+            No te mandamos un agente.
+            <br />
+            Te mandamos un equipo.
+          </h2>
+          <p style={{ color: 'var(--giga-muted)', fontSize: '0.95rem' }}>
+            Tres especialistas trabajando juntos en tu WhatsApp. Cada uno con su trabajo. Los tres sin descanso.
+          </p>
+        </div>
+
         <div
           className="animate-on-scroll"
           style={{
@@ -551,6 +588,70 @@ export default function FeatureGrid() {
               <p style={{ color: 'var(--giga-faint)', fontSize: '0.78rem', marginTop: '0.3rem' }}>{stat.label}</p>
             </article>
           ))}
+        </div>
+
+        <p className="animate-on-scroll" style={{ color: 'var(--giga-faint)', fontSize: '0.95rem', marginBottom: '1.3rem' }}>
+          Así como contratas a un equipo de personas, Prisma te arma el tuyo. Sin entrevistas. Sin nómina.
+        </p>
+
+        <div
+          className="animate-on-scroll"
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
+            gap: '1px',
+            border: '1px solid var(--giga-border)',
+            borderRadius: '14px',
+            overflow: 'hidden',
+            background: 'var(--giga-border)',
+            marginBottom: '2rem',
+          }}
+        >
+          <article
+            style={{
+              background: 'linear-gradient(180deg, rgba(24,29,37,0.9) 0%, rgba(16,20,28,0.92) 100%)',
+              padding: '1rem 1.05rem',
+            }}
+          >
+            <div
+              style={{
+                color: '#fca5a5',
+                textTransform: 'uppercase',
+                letterSpacing: '0.08em',
+                fontSize: '0.69rem',
+                fontWeight: 700,
+                marginBottom: '0.45rem',
+              }}
+            >
+              Chatbot
+            </div>
+            <p style={{ color: '#f8fafc', fontSize: '0.95rem', lineHeight: 1.55, margin: 0 }}>
+              Responde preguntas frecuentes, pero no entiende el contexto completo del cliente ni da seguimiento real.
+            </p>
+          </article>
+
+          <article
+            style={{
+              background: 'linear-gradient(180deg, rgba(24,29,37,0.9) 0%, rgba(16,20,28,0.92) 100%)',
+              padding: '1rem 1.05rem',
+            }}
+          >
+            <div
+              style={{
+                color: '#86efac',
+                textTransform: 'uppercase',
+                letterSpacing: '0.08em',
+                fontSize: '0.69rem',
+                fontWeight: 700,
+                marginBottom: '0.45rem',
+              }}
+            >
+              Agente Prisma
+            </div>
+            <p style={{ color: '#f8fafc', fontSize: '0.95rem', lineHeight: 1.55, margin: 0 }}>
+              Recuerda a cada cliente, entiende su etapa, y escribe hoy con el siguiente paso para cerrar la oportunidad.
+            </p>
+          </article>
         </div>
 
         {industryRows.map((row) => (

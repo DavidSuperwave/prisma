@@ -5,7 +5,7 @@ import Link from 'next/link'
 
 type MenuKey = 'product' | 'company'
 
-const productLinks = [
+const productLinks: { title: string; description: string; href: string; comingSoon?: boolean }[] = [
   {
     title: 'Agent Canvas',
     description: 'Build your ideal agent and solve support issues faster.',
@@ -20,6 +20,7 @@ const productLinks = [
     title: 'Voice Experience',
     description: 'Emotionally aware agents that keep conversations natural.',
     href: '#voice',
+    comingSoon: true,
   },
   {
     title: 'Browser Agent',
@@ -151,7 +152,7 @@ export default function Nav() {
               color: '#fff',
             }}
           >
-            <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#fff' }} />
+            <img src="/primalogoreal.png" alt="Prisma" style={{ height: '24px', width: 'auto' }} />
             <span style={{ fontWeight: 700, fontSize: '0.95rem' }}>Prisma</span>
           </Link>
 
@@ -200,24 +201,38 @@ export default function Nav() {
                     padding: '0.45rem',
                   }}
                 >
-                  {productLinks.map((item) => (
-                    <Link
-                      key={item.title}
-                      href={item.href}
-                      className="giga-menu-item"
-                      style={{
-                        display: 'block',
-                        textDecoration: 'none',
-                        borderRadius: '8px',
-                        padding: '0.65rem',
-                      }}
-                    >
-                      <div style={{ color: '#f8fafc', fontWeight: 700, fontSize: '0.88rem' }}>{item.title}</div>
-                      <div style={{ color: '#9fb0c6', fontSize: '0.78rem', marginTop: '0.15rem', lineHeight: 1.35 }}>
-                        {item.description}
-                      </div>
-                    </Link>
-                  ))}
+                  {productLinks.map((item) => {
+                    const Wrapper = item.comingSoon ? 'div' : Link
+                    const wrapperProps = item.comingSoon
+                      ? { className: 'giga-menu-item', style: { display: 'block', borderRadius: '8px', padding: '0.65rem', cursor: 'default', opacity: 0.9 } }
+                      : { href: item.href, className: 'giga-menu-item', style: { display: 'block', textDecoration: 'none', borderRadius: '8px', padding: '0.65rem' } }
+                    return (
+                      <Wrapper key={item.title} {...wrapperProps}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                          <span style={{ color: '#f8fafc', fontWeight: 700, fontSize: '0.88rem' }}>{item.title}</span>
+                          {item.comingSoon && (
+                            <span
+                              style={{
+                                fontSize: '0.62rem',
+                                fontWeight: 600,
+                                color: '#94a3b8',
+                                background: 'rgba(148,163,184,0.2)',
+                                padding: '0.12rem 0.4rem',
+                                borderRadius: '4px',
+                                textTransform: 'uppercase',
+                                letterSpacing: '0.04em',
+                              }}
+                            >
+                              Coming soon
+                            </span>
+                          )}
+                        </div>
+                        <div style={{ color: '#9fb0c6', fontSize: '0.78rem', marginTop: '0.15rem', lineHeight: 1.35 }}>
+                          {item.description}
+                        </div>
+                      </Wrapper>
+                    )
+                  })}
                 </div>
               )}
             </div>
@@ -381,11 +396,18 @@ export default function Nav() {
               Product
             </div>
             <div style={{ display: 'grid', gap: '0.32rem' }}>
-              {productLinks.map((item) => (
-                <Link key={item.title} href={item.href} className="giga-soft-link" style={{ color: '#f8fafc', textDecoration: 'none', fontSize: '0.88rem', fontWeight: 600 }}>
-                  {item.title}
-                </Link>
-              ))}
+              {productLinks.map((item) =>
+                item.comingSoon ? (
+                  <div key={item.title} className="giga-soft-link" style={{ color: '#94a3b8', fontSize: '0.88rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                    {item.title}
+                    <span style={{ fontSize: '0.6rem', color: '#64748b', fontWeight: 600 }}>Coming soon</span>
+                  </div>
+                ) : (
+                  <Link key={item.title} href={item.href} className="giga-soft-link" style={{ color: '#f8fafc', textDecoration: 'none', fontSize: '0.88rem', fontWeight: 600 }}>
+                    {item.title}
+                  </Link>
+                )
+              )}
             </div>
           </div>
           <div style={{ borderTop: '1px solid rgba(255,255,255,0.12)', paddingTop: '0.65rem' }}>

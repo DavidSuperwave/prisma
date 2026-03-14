@@ -4,29 +4,34 @@ import React from 'react'
 
 const costRows = [
   {
-    process: 'Cotización de pólizas',
-    before: '25 min / cotización',
-    after: '~3 min / cotización',
+    task: 'Llegó un cliente, necesitas cotización',
+    today: 'Le avisas a tu equipo manualmente — 2 horas después',
+    agent: 'Notifica y abre el proceso en 30 segundos',
   },
   {
-    process: 'Conciliación de datos',
-    before: '3 días / mes',
-    after: 'Continuo',
+    task: 'Alguien necesita su factura',
+    today: 'Te escriben a ti, tú la buscas, tú la mandas — mismo día si tienes suerte',
+    agent: 'Gestionada en minutos, sin tocarte',
   },
   {
-    process: 'Monitoreo de pagos',
-    before: 'Semanal manual',
-    after: 'Diario automatizado',
+    task: 'Hay que darle seguimiento a un prospecto',
+    today: 'Lo apuntas, lo olvidas, lo recuerdas 3 días después',
+    agent: 'Seguimiento automático al día siguiente',
   },
   {
-    process: 'Tasa de error',
-    before: '12%',
-    after: '<1%',
+    task: 'Un cliente pregunta algo que no sabes',
+    today: 'Interrumpes a tu equipo, esperas respuesta — 40 minutos perdidos',
+    agent: 'Respuesta inmediata con la información correcta',
   },
   {
-    process: 'Fuga de ingresos',
-    before: '~15% sin rastrear',
-    after: '~2% sin rastrear',
+    task: 'Necesitas saber qué pasó con un cliente',
+    today: 'Preguntas a 3 personas, reconstruyes el historial — 1 hora',
+    agent: 'Historial completo disponible al instante',
+  },
+  {
+    task: 'Fin de mes: ¿cuántos leads entraron?',
+    today: 'No sabes. Nadie lleva el conteo',
+    agent: 'Reporte listo, sin pedirlo',
   },
 ]
 
@@ -51,7 +56,7 @@ export default function CostSection() {
               marginBottom: '0.85rem',
             }}
           >
-            ROI
+            EL COSTO DE NO AUTOMATIZAR
           </div>
           <h2
             style={{
@@ -61,12 +66,8 @@ export default function CostSection() {
               marginBottom: '0.55rem',
             }}
           >
-            El costo de no automatizar
+            El 70% de tu tiempo se va en tareas que tu agente puede hacer mejor que tú.
           </h2>
-          <p style={{ color: 'var(--giga-muted)', fontSize: '0.95rem' }}>
-            Cada proceso manual tiene un costo oculto: tiempo, errores e ingresos perdidos. Esto es lo que cambia
-            cuando Prisma toma el control.
-          </p>
         </div>
 
         <div
@@ -92,14 +93,14 @@ export default function CostSection() {
               fontWeight: 700,
             }}
           >
-            <span>Proceso</span>
-            <span>Antes</span>
-            <span>Después</span>
+            <span>Tarea</span>
+            <span>Tú hoy</span>
+            <span>Tu agente</span>
           </div>
 
           {costRows.map((row) => (
             <div
-              key={row.process}
+              key={row.task}
               style={{
                 display: 'grid',
                 gridTemplateColumns: '1.2fr 1fr 1fr',
@@ -109,27 +110,16 @@ export default function CostSection() {
                 alignItems: 'center',
               }}
             >
-              <span style={{ color: 'var(--giga-text)', fontSize: '0.9rem', fontWeight: 600 }}>{row.process}</span>
-              <span style={{ color: '#94a3b8', fontSize: '0.86rem', textDecoration: 'line-through' }}>{row.before}</span>
-              <span style={{ color: '#e2e8f0', fontSize: '0.86rem', fontWeight: 600 }}>{row.after}</span>
+              <span style={{ color: 'var(--giga-text)', fontSize: '0.9rem', fontWeight: 600 }}>{row.task}</span>
+              <span style={{ color: '#94a3b8', fontSize: '0.86rem' }}>{row.today}</span>
+              <span style={{ color: '#e2e8f0', fontSize: '0.86rem', fontWeight: 600 }}>{row.agent}</span>
             </div>
           ))}
-
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns: '1.2fr 1fr 1fr',
-              gap: '0.8rem',
-              padding: '0.9rem 0.95rem',
-              background: 'rgba(255,255,255,0.03)',
-              alignItems: 'center',
-            }}
-          >
-            <span style={{ color: 'var(--giga-text)', fontSize: '0.9rem', fontWeight: 700 }}>ROI estimado</span>
-            <span style={{ color: 'var(--giga-faint)', fontSize: '0.82rem' }}>—</span>
-            <span style={{ color: '#ffffff', fontSize: '1.25rem', fontWeight: 800 }}>6–8x ROI</span>
-          </div>
         </div>
+
+        <p className="animate-on-scroll" style={{ color: 'var(--giga-faint)', fontSize: '0.95rem', marginTop: '0.95rem' }}>
+          Cada una de esas horas tiene un costo. Tu agente las recupera todas.
+        </p>
       </div>
     </section>
   )

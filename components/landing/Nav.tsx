@@ -202,12 +202,8 @@ export default function Nav() {
                   }}
                 >
                   {productLinks.map((item) => {
-                    const Wrapper = item.comingSoon ? 'div' : Link
-                    const wrapperProps = item.comingSoon
-                      ? { className: 'giga-menu-item', style: { display: 'block', borderRadius: '8px', padding: '0.65rem', cursor: 'default', opacity: 0.9 } }
-                      : { href: item.href, className: 'giga-menu-item', style: { display: 'block', textDecoration: 'none', borderRadius: '8px', padding: '0.65rem' } }
-                    return (
-                      <Wrapper key={item.title} {...wrapperProps}>
+                    const content = (
+                      <>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                           <span style={{ color: '#f8fafc', fontWeight: 700, fontSize: '0.88rem' }}>{item.title}</span>
                           {item.comingSoon && (
@@ -230,7 +226,16 @@ export default function Nav() {
                         <div style={{ color: '#9fb0c6', fontSize: '0.78rem', marginTop: '0.15rem', lineHeight: 1.35 }}>
                           {item.description}
                         </div>
-                      </Wrapper>
+                      </>
+                    )
+                    return item.comingSoon ? (
+                      <div key={item.title} className="giga-menu-item" style={{ display: 'block', borderRadius: '8px', padding: '0.65rem', cursor: 'default', opacity: 0.9 }}>
+                        {content}
+                      </div>
+                    ) : (
+                      <Link key={item.title} href={item.href} className="giga-menu-item" style={{ display: 'block', textDecoration: 'none', borderRadius: '8px', padding: '0.65rem' }}>
+                        {content}
+                      </Link>
                     )
                   })}
                 </div>

@@ -1,0 +1,25 @@
+<svg width="1920" height="1080" viewBox="0 0 1920 1080" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="sky" x1="960" y1="0" x2="960" y2="1080" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#CBD7E3" />
+      <stop offset="0.45" stop-color="#AABCCE" />
+      <stop offset="1" stop-color="#7B91A8" />
+    </linearGradient>
+    <linearGradient id="mountA" x1="0" y1="420" x2="1920" y2="800" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8EA2B6" />
+      <stop offset="1" stop-color="#71859A" />
+    </linearGradient>
+    <linearGradient id="mountB" x1="0" y1="560" x2="1920" y2="920" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#70859A" />
+      <stop offset="1" stop-color="#576D82" />
+    </linearGradient>
+    <linearGradient id="mountC" x1="0" y1="700" x2="1920" y2="1080" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4D6072" />
+      <stop offset="1" stop-color="#33485B" />
+    </linearGradient>
+  </defs>
+  <rect width="1920" height="1080" fill="url(#sky)" />
+  <path d="M0 520L168 472L320 530L496 448L690 534L848 456L1026 518L1234 450L1398 534L1574 470L1724 530L1920 492V1080H0V520Z" fill="url(#mountA)" opacity="0.82"/>
+  <path d="M0 660L186 594L350 680L522 610L742 706L924 624L1090 692L1270 622L1468 702L1688 620L1920 694V1080H0V660Z" fill="url(#mountB)" opacity="0.9"/>
+  <path d="M0 822L224 746L404 820L642 730L848 832L1094 744L1336 834L1592 736L1920 848V1080H0V822Z" fill="url(#mountC)" />
+</svg>

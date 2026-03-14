@@ -3,47 +3,75 @@
 import React from 'react'
 
 const footerCols = [
-  { title: 'Producto',   links: ['El Operador','El SDR','El Calificador','Supermemoria','Prisma Radar'] },
-  { title: 'Industrias', links: ['Legal','Inmobiliaria','Dental','Seguros','Belleza'] },
-  { title: 'Empresa',    links: ['Nosotros','Blog','Casos de éxito','Contacto'] },
+  { title: 'Product', links: ['Agent Canvas', 'Insights', 'Voice Experience', 'Browser Agent'] },
+  { title: 'Company', links: ['Careers', 'Contact', 'Trust Center'] },
+  { title: 'Resources', links: ['News', 'Privacy Policy', 'Terms Of Service'] },
 ]
 
 export default function Footer() {
   return (
-    <footer style={{ borderTop: '1px solid var(--divider)', padding: 'var(--space-12) var(--space-8)' }}>
-      <div style={{ maxWidth: '1200px', margin: '0 auto', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 'var(--space-12)', flexWrap: 'wrap' }}>
-        <div style={{ maxWidth: '280px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', marginBottom: 'var(--space-4)' }}>
-            <svg viewBox="0 0 80 80" width="28" height="28" fill="none">
-              <path d="M40 10L68 60H12L40 10Z" stroke="#818CF8" strokeWidth="3"/>
-              <path d="M40 24L54 52H26L40 24Z" stroke="#A78BFA" strokeWidth="2" opacity="0.5"/>
-              <line x1="40" y1="10" x2="40" y2="60" stroke="url(#fg)" strokeWidth="1.5" opacity="0.4"/>
-              <defs><linearGradient id="fg" x1="40" y1="10" x2="40" y2="60"><stop offset="0%" stopColor="#818CF8"/><stop offset="100%" stopColor="#F59E0B"/></linearGradient></defs>
-            </svg>
-            <span style={{ fontFamily: 'var(--font-display)', fontWeight: 800, fontSize: '1rem', color: 'var(--text-primary)', letterSpacing: '-0.03em' }}>Prisma</span>
-            <span style={{ fontFamily: 'var(--font-display)', fontWeight: 400, fontSize: '1rem', color: 'var(--text-muted)', letterSpacing: '-0.03em' }}>Project</span>
+    <footer style={{ borderTop: '1px solid var(--giga-border)', padding: '3.5rem 1.25rem', background: '#05070a' }}>
+      <div style={{ maxWidth: '1120px', margin: '0 auto', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1.8rem', flexWrap: 'wrap' }}>
+        <div style={{ maxWidth: '320px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.7rem' }}>
+            <span
+              style={{
+                width: '30px',
+                height: '30px',
+                borderRadius: '50%',
+                border: '2px solid #9fb0c8',
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontWeight: 700,
+                color: '#e2e8f0',
+                fontSize: '0.78rem',
+              }}
+            >
+              P
+            </span>
+            <span style={{ fontWeight: 700, fontSize: '1rem', color: 'var(--giga-text)' }}>Prisma</span>
           </div>
-          <p style={{ fontFamily: 'var(--font-body)', fontSize: 'var(--text-sm)', color: 'var(--text-faint)', lineHeight: 1.6 }}>Empleados de IA en tu WhatsApp que operan tu negocio 24/7 — y se vuelven más inteligentes cada semana.</p>
-          <p style={{ fontFamily: 'var(--font-body)', fontSize: 'var(--text-xs)', color: 'var(--text-faint)', marginTop: 'var(--space-4)' }}>Monterrey, Nuevo León, México · 2026</p>
+          <p style={{ color: 'var(--giga-muted)', lineHeight: 1.65 }}>
+            AI agents for enterprise support workflows with observability, governance, and fast deployment.
+          </p>
+          <div style={{ display: 'flex', gap: '0.45rem', marginTop: '0.8rem' }}>
+            {['Compliant', '5+'].map((badge) => (
+              <span
+                key={badge}
+                style={{
+                  borderRadius: 'var(--radius-pill)',
+                  border: '1px solid var(--giga-border)',
+                  padding: '0.2rem 0.6rem',
+                  color: 'var(--giga-faint)',
+                  fontSize: '0.75rem',
+                  fontWeight: 700,
+                }}
+              >
+                {badge}
+              </span>
+            ))}
+          </div>
         </div>
 
         {footerCols.map((col) => (
           <div key={col.title}>
-            <div style={{ fontFamily: 'var(--font-body)', fontSize: 'var(--text-xs)', fontWeight: 600, color: 'var(--text-muted)', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 'var(--space-4)' }}>{col.title}</div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
+            <div style={{ color: 'var(--giga-faint)', textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700, fontSize: '0.72rem', marginBottom: '0.6rem' }}>
+              {col.title}
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
               {col.links.map((link) => (
-                <a key={link} href="#" style={{ fontFamily: 'var(--font-body)', fontSize: 'var(--text-sm)', color: 'var(--text-faint)', textDecoration: 'none', transition: 'color 180ms' }}
-                  onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--text-primary)')}
-                  onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-faint)')}>{link}</a>
+                <a key={link} href="#" style={{ color: 'var(--giga-muted)', textDecoration: 'none', fontSize: '0.92rem' }}>
+                  {link}
+                </a>
               ))}
             </div>
           </div>
         ))}
       </div>
 
-      <div style={{ maxWidth: '1200px', margin: 'var(--space-12) auto 0', paddingTop: 'var(--space-8)', borderTop: '1px solid var(--divider)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-4)' }}>
-        <span style={{ fontFamily: 'var(--font-body)', fontSize: 'var(--text-xs)', color: 'var(--text-faint)' }}>© 2026 PrismaProject. Todos los derechos reservados.</span>
-        <span style={{ fontFamily: 'var(--font-display)', fontSize: 'var(--text-xs)', fontWeight: 600, color: 'var(--text-faint)', letterSpacing: '0.05em', fontStyle: 'italic' }}>Refract Reality.</span>
+      <div style={{ maxWidth: '1120px', margin: '2rem auto 0', paddingTop: '1rem', borderTop: '1px solid var(--giga-border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.8rem' }}>
+        <span style={{ color: 'var(--giga-faint)', fontSize: '0.8rem' }}>© 2026 Prisma. All rights reserved.</span>
       </div>
     </footer>
   )

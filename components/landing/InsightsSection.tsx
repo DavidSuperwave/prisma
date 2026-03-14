@@ -3,54 +3,137 @@
 import React from 'react'
 
 const insights = [
-  { label: 'Agregar flujo de seguimiento automático', type: 'Mejora de flujo',     tickets: '341 conv.', improvement: '18.2%' },
-  { label: 'Calificación de urgencia inicial',        type: 'Ajuste de patrón',   tickets: '218 conv.', improvement: '14.7%' },
-  { label: 'Recordatorio 24h antes de cita',          type: 'Gap de conocimiento', tickets: '192 conv.', improvement: '11.3%' },
+  { label: 'Add self-service reservation modification flow', type: 'Policy Modification', tickets: '928 tickets', improvement: '13.8% improvement' },
+  { label: 'Add fallback search flow for missing confirmation', type: 'Policy Modification', tickets: '1,190 tickets', improvement: '22.2% improvement' },
+  { label: 'Add FAQ and handling rules', type: 'Knowledge Gap', tickets: '72 tickets', improvement: '3.5% improvement' },
 ]
 
 export default function InsightsSection() {
   return (
-    <section style={{ padding: 'var(--space-32) var(--space-8)', background: 'var(--surface-deep)', borderTop: '1px solid var(--divider)', borderBottom: '1px solid var(--divider)' }}>
-      <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--space-16)', alignItems: 'center' }}>
-          {/* Card */}
+    <section id="insights" style={{ padding: '6rem 1.25rem', background: 'var(--giga-bg)' }}>
+      <div style={{ maxWidth: '1120px', margin: '0 auto' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(290px, 1fr))', gap: '1.4rem', alignItems: 'center' }}>
           <div className="animate-on-scroll">
-            <div style={{ background: 'var(--surface-mid)', border: '1px solid var(--border)', borderRadius: 'var(--radius-xl)', padding: 'var(--space-8)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-6)' }}>
+            <div
+              style={{
+                background: 'var(--giga-surface-soft)',
+                border: '1px solid var(--giga-border)',
+                borderRadius: 'var(--radius-lg)',
+                padding: '1rem',
+                boxShadow: 'var(--giga-shadow)',
+              }}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
                 <div>
-                  <div style={{ fontFamily: 'var(--font-body)', fontSize: 'var(--text-xs)', fontWeight: 600, color: 'var(--text-faint)', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 'var(--space-2)' }}>Tasa de resolución</div>
-                  <div style={{ fontFamily: 'var(--font-display)', fontSize: 'var(--text-2xl)', fontWeight: 800, color: 'var(--success)', letterSpacing: '-0.02em' }}>+22%</div>
+                  <div style={{ color: 'var(--giga-faint)', letterSpacing: '0.08em', textTransform: 'uppercase', fontWeight: 700, fontSize: '0.72rem' }}>
+                    Resolution Rate Improvement (Voice)
+                  </div>
+                  <div style={{ marginTop: '0.2rem', color: 'var(--giga-success)', fontSize: '2rem', fontWeight: 700 }}>14%</div>
                 </div>
-                <div style={{ background: 'rgba(52,211,153,0.1)', border: '1px solid rgba(52,211,153,0.2)', borderRadius: 'var(--radius-full)', padding: '0.25rem 0.75rem', fontFamily: 'var(--font-body)', fontSize: 'var(--text-xs)', fontWeight: 600, color: 'var(--success)' }}>Mes 3</div>
+                <div style={{ color: 'var(--giga-muted)', fontSize: '0.84rem', fontWeight: 600 }}>1,302 of 2,170 tickets</div>
               </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                 {insights.map((ins, i) => (
-                  <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: 'var(--space-3) var(--space-4)', background: 'var(--surface-offset)', borderRadius: 'var(--radius-lg)', border: '1px solid var(--divider)' }}>
+                  <div
+                    key={i}
+                    style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      gap: '0.6rem',
+                      padding: '0.65rem',
+                      background: '#1e2535',
+                      borderRadius: 'var(--radius-md)',
+                      border: '1px solid var(--giga-border)',
+                    }}
+                  >
                     <div style={{ flex: 1 }}>
-                      <div style={{ fontFamily: 'var(--font-body)', fontSize: 'var(--text-xs)', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '2px' }}>{ins.label}</div>
-                      <div style={{ fontFamily: 'var(--font-body)', fontSize: 'var(--text-xs)', color: 'var(--text-faint)' }}>{ins.type} · {ins.tickets}</div>
+                      <div style={{ fontSize: '0.86rem', fontWeight: 700, color: 'var(--giga-text)' }}>{ins.label}</div>
+                      <div style={{ fontSize: '0.77rem', color: 'var(--giga-faint)' }}>
+                        {ins.type} · {ins.tickets}
+                      </div>
                     </div>
-                    <div style={{ fontFamily: 'var(--font-display)', fontSize: 'var(--text-sm)', fontWeight: 700, color: 'var(--success)', letterSpacing: '-0.01em', marginLeft: 'var(--space-4)' }}>+{ins.improvement}</div>
+                    <div style={{ fontWeight: 700, color: 'var(--giga-success)', fontSize: '0.82rem' }}>{ins.improvement}</div>
                   </div>
                 ))}
               </div>
             </div>
           </div>
 
-          {/* Copy */}
           <div className="animate-on-scroll">
-            <div style={{ display: 'inline-flex', background: 'var(--surface-mid)', border: '1px solid var(--border)', borderRadius: 'var(--radius-full)', padding: '0.375rem 1rem', marginBottom: 'var(--space-6)' }}>
-              <span style={{ fontFamily: 'var(--font-body)', fontSize: 'var(--text-xs)', fontWeight: 600, color: 'var(--amber)', letterSpacing: '0.12em', textTransform: 'uppercase' }}>Smart Insights</span>
+            <div
+              style={{
+                display: 'inline-flex',
+                borderRadius: 'var(--radius-pill)',
+                border: '1px solid var(--giga-border)',
+                background: 'var(--giga-surface-soft)',
+                padding: '0.36rem 0.88rem',
+                marginBottom: '1rem',
+                color: 'var(--giga-faint)',
+                fontWeight: 700,
+                letterSpacing: '0.08em',
+                textTransform: 'uppercase',
+                fontSize: '0.72rem',
+              }}
+            >
+              Smart Insights
             </div>
-            <h2 style={{ fontFamily: 'var(--font-display)', fontSize: 'var(--text-2xl)', fontWeight: 800, color: 'var(--white)', letterSpacing: '-0.02em', lineHeight: 1.1, marginBottom: 'var(--space-6)' }}>Mejoran mientras tú duermes.</h2>
-            <p style={{ fontFamily: 'var(--font-body)', fontSize: 'var(--text-base)', color: 'var(--text-muted)', lineHeight: 1.7, marginBottom: 'var(--space-8)' }}>Cada mes: cuántas conversaciones manejaron, tasa de resolución, escenarios más frecuentes y recomendaciones para el siguiente ciclo. No es un chatbot — es un equipo que aprende.</p>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
-              {[{ label: 'Elige el objetivo', desc: 'Tasa de resolución, escalaciones, satisfacción.' }, { label: 'Genera insights', desc: 'La IA agrupa conversaciones y encuentra raíz causa.' }, { label: 'Valida a escala', desc: 'Hipótesis probadas contra miles de chats reales.' }].map((item, i) => (
-                <div key={i} style={{ display: 'flex', gap: 'var(--space-4)', alignItems: 'flex-start' }}>
-                  <div style={{ width: '28px', height: '28px', borderRadius: 'var(--radius-md)', background: 'var(--surface-offset)', border: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: 'var(--font-display)', fontSize: 'var(--text-xs)', fontWeight: 700, color: 'var(--amber)', flexShrink: 0 }}>{i + 1}</div>
+            <h2
+              style={{
+                color: 'var(--giga-text)',
+                fontFamily: 'var(--font-display)',
+                fontSize: 'clamp(1.95rem, 4.2vw, 3.2rem)',
+                lineHeight: 1.06,
+                marginBottom: '0.85rem',
+              }}
+            >
+              Improve as you go
+            </h2>
+            <p style={{ color: 'var(--giga-muted)', marginBottom: '1rem' }}>
+              Your agent surfaces patterns, uncovers root causes, and recommends policy updates that drive KPIs.
+            </p>
+            <a
+              href="#cta"
+              style={{
+                display: 'inline-flex',
+                color: '#e2e8f0',
+                textDecoration: 'none',
+                fontWeight: 700,
+                fontSize: '0.9rem',
+                marginBottom: '1rem',
+                alignItems: 'center',
+                gap: '0.34rem',
+              }}
+            >
+              Explore Smart Insights <span aria-hidden>›</span>
+            </a>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+              {[
+                { label: 'Choose an objective', desc: 'Select a metric like resolution rate, escalation rate, or satisfaction.' },
+                { label: 'Generate insights', desc: 'Cluster conversations dynamically and identify high-impact opportunities.' },
+                { label: 'Validate at scale', desc: 'Run hypotheses across thousands of conversations to confirm root cause.' },
+              ].map((item, i) => (
+                <div key={i} style={{ display: 'flex', gap: '0.75rem', alignItems: 'flex-start' }}>
+                  <div
+                    style={{
+                      width: '28px',
+                      height: '28px',
+                      borderRadius: '50%',
+                      border: '1px solid var(--giga-border)',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      color: 'var(--giga-text)',
+                      fontWeight: 700,
+                      fontSize: '0.8rem',
+                      background: 'var(--giga-surface-soft)',
+                    }}
+                  >
+                    {i + 1}
+                  </div>
                   <div>
-                    <div style={{ fontFamily: 'var(--font-body)', fontSize: 'var(--text-sm)', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '2px' }}>{item.label}</div>
-                    <div style={{ fontFamily: 'var(--font-body)', fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>{item.desc}</div>
+                    <div style={{ color: 'var(--giga-text)', fontWeight: 700, fontSize: '0.95rem' }}>{item.label}</div>
+                    <div style={{ color: 'var(--giga-faint)', fontSize: '0.86rem' }}>{item.desc}</div>
                   </div>
                 </div>
               ))}

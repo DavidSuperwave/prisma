@@ -6,9 +6,8 @@ export default function ValuePropSection() {
   return (
     <section style={{ padding: '4.2rem 1.25rem 3.6rem', background: 'var(--giga-surface)' }}>
       <div
+        className="landing-container"
         style={{
-          maxWidth: '1120px',
-          margin: '0 auto',
           display: 'grid',
           gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
           gap: '1.8rem',

@@ -3,7 +3,7 @@
 export default function CTASection() {
   return (
     <section id="cta" style={{ padding: '6rem 1.25rem', background: 'var(--giga-surface)' }}>
-      <div style={{ maxWidth: '920px', margin: '0 auto', textAlign: 'center' }} className="animate-on-scroll">
+      <div className="landing-container landing-container--narrow animate-on-scroll" style={{ textAlign: 'center' }}>
         <div
           style={{
             display: 'inline-flex',

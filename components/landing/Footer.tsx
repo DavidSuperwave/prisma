@@ -11,7 +11,7 @@ const footerCols = [
 export default function Footer() {
   return (
     <footer style={{ borderTop: '1px solid var(--giga-border)', padding: '3.5rem 1.25rem', background: '#05070a' }}>
-      <div style={{ maxWidth: '1120px', margin: '0 auto', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1.8rem', flexWrap: 'wrap' }}>
+      <div className="landing-container" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1.8rem', flexWrap: 'wrap' }}>
         <div style={{ maxWidth: '320px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.7rem' }}>
             <span
@@ -70,7 +70,7 @@ export default function Footer() {
         ))}
       </div>
 
-      <div style={{ maxWidth: '1120px', margin: '2rem auto 0', paddingTop: '1rem', borderTop: '1px solid var(--giga-border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.8rem' }}>
+      <div className="landing-container" style={{ margin: '2rem auto 0', paddingTop: '1rem', borderTop: '1px solid var(--giga-border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.8rem' }}>
         <span style={{ color: 'var(--giga-faint)', fontSize: '0.8rem' }}>© 2026 Prisma. All rights reserved.</span>
       </div>
     </footer>

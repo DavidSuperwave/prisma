@@ -64,13 +64,11 @@ export default function Hero() {
       </div>
 
       <div
-        className="hero-grid"
+        className="hero-grid landing-container landing-container--hero"
         style={{
           flex: 1,
           width: '100%',
-          maxWidth: '1400px',
           padding: '0 1.25rem',
-          margin: '0 auto',
           display: 'grid',
           gridTemplateColumns: '1fr 1fr',
           gap: '2rem',

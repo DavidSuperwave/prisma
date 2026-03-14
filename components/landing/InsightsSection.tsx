@@ -11,7 +11,7 @@ const insights = [
 export default function InsightsSection() {
   return (
     <section id="insights" style={{ padding: '6rem 1.25rem', background: 'var(--giga-bg)' }}>
-      <div style={{ maxWidth: '1120px', margin: '0 auto' }}>
+      <div className="landing-container">
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(290px, 1fr))', gap: '1.4rem', alignItems: 'center' }}>
           <div className="animate-on-scroll">
             <div

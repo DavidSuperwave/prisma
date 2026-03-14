@@ -62,9 +62,8 @@ export default function AgentSection() {
   return (
     <section id="agent-canvas" style={{ padding: '3rem 1.25rem 6rem', background: 'var(--giga-surface)' }}>
       <div
+          className="landing-container landing-container--wide"
         style={{
-          maxWidth: '1240px',
-          margin: '0 auto',
           border: '1px solid var(--giga-border)',
           borderRadius: '14px',
           background: 'var(--giga-surface-soft)',

@@ -5,7 +5,7 @@ import React from 'react'
 export default function TestimonialSection() {
   return (
     <section style={{ padding: '6rem 1.25rem', background: 'var(--giga-bg)' }}>
-      <div style={{ maxWidth: '1120px', margin: '0 auto' }}>
+      <div className="landing-container">
       <div style={{ textAlign: 'center', marginBottom: '1.3rem' }} className="animate-on-scroll">
         <div
           style={{

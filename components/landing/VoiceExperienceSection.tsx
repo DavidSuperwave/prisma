@@ -5,7 +5,10 @@ import React from 'react'
 export default function VoiceExperienceSection() {
   return (
     <section id="voice" style={{ padding: '6rem 1.25rem', background: 'var(--giga-surface)' }}>
-      <div style={{ maxWidth: '1120px', margin: '0 auto', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(290px, 1fr))', gap: '1.4rem' }}>
+      <div
+        className="landing-container"
+        style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(290px, 1fr))', gap: '1.4rem' }}
+      >
         <div className="animate-on-scroll">
           <div
             style={{

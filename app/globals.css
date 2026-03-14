@@ -19,6 +19,9 @@
   --giga-border: rgba(255, 255, 255, 0.12);
   --giga-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
   --giga-success: #42d38b;
+  --giga-re: #f59e0b;
+  --giga-law: #38bdf8;
+  --giga-gen: #a78bfa;
   --font-display: "Manrope", "Inter", "Segoe UI", sans-serif;
   --font-body: "Inter", "Segoe UI", sans-serif;
   --radius-sm: 8px;
@@ -26,6 +29,12 @@
   --radius-lg: 18px;
   --radius-xl: 24px;
   --radius-pill: 999px;
+  --landing-anchor-offset: 5rem;
+  --landing-content-max: 1120px;
+  --landing-content-compact: 1100px;
+  --landing-content-wide: 1240px;
+  --landing-content-hero: 1400px;
+  --landing-content-narrow: 920px;
 }
 
 html {
@@ -41,8 +50,30 @@ body {
   overflow-x: hidden;
 }
 
-section {
-  position: relative;
+section[id] {
+  scroll-margin-top: var(--landing-anchor-offset);
+}
+
+.landing-container {
+  width: 100%;
+  max-width: var(--landing-content-max);
+  margin: 0 auto;
+}
+
+.landing-container--compact {
+  max-width: var(--landing-content-compact);
+}
+
+.landing-container--wide {
+  max-width: var(--landing-content-wide);
+}
+
+.landing-container--hero {
+  max-width: var(--landing-content-hero);
+}
+
+.landing-container--narrow {
+  max-width: var(--landing-content-narrow);
 }
 
 h1,

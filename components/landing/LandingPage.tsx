@@ -3,12 +3,11 @@
 import React, { useEffect } from 'react'
 import Nav from './Nav'
 import Hero from './Hero'
-import ValuePropSection from './ValuePropSection'
 import FeatureGrid from './FeatureGrid'
 import AgentSection from './AgentSection'
-import InsightsSection from './InsightsSection'
-import VoiceExperienceSection from './VoiceExperienceSection'
-import TestimonialSection from './TestimonialSection'
+import ProblemFlowSection from './ProblemFlowSection'
+import CostSection from './CostSection'
+import IntegrationsSection from './IntegrationsSection'
 import CTASection from './CTASection'
 import Footer from './Footer'
 
@@ -26,12 +25,11 @@ export default function LandingPage() {
     <div style={{ background: 'var(--giga-bg)', minHeight: '100vh' }}>
       <Nav />
       <Hero />
-      <ValuePropSection />
       <FeatureGrid />
       <AgentSection />
-      <InsightsSection />
-      <VoiceExperienceSection />
-      <TestimonialSection />
+      <ProblemFlowSection />
+      <CostSection />
+      <IntegrationsSection />
       <CTASection />
       <Footer />
     </div>

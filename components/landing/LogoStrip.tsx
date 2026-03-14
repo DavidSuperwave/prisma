@@ -17,9 +17,8 @@ export default function LogoStrip({ variant = 'default' }: { variant?: 'default'
       }}
     >
       <div
+        className="landing-container"
         style={{
-          maxWidth: '1120px',
-          margin: '0 auto',
           display: 'flex',
           flexWrap: 'wrap',
           justifyContent: 'center',

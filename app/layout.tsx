@@ -1,33 +1,15 @@
-import type { Metadata } from "next";
-import { Inter, Space_Grotesk } from "next/font/google";
-import "./globals.css";
-
-const inter = Inter({
-  subsets: ["latin"],
-  variable: "--font-body",
-  display: "swap",
-});
-
-const spaceGrotesk = Space_Grotesk({
-  subsets: ["latin"],
-  variable: "--font-display",
-  display: "swap",
-});
+import type { Metadata } from 'next'
+import './globals.css'
 
 export const metadata: Metadata = {
-  title: "Prisma | Agentes IA para WhatsApp",
-  description:
-    "Prisma crea agentes IA para WhatsApp que convierten conversaciones caoticas en operaciones claras y repetibles.",
-};
+  title: 'Prisma Project — Empleados de IA para tu negocio',
+  description: 'Empleados de IA en tu WhatsApp que operan, califican leads y cierran tratos 24/7 — y se vuelven más inteligentes cada semana.',
+}
 
-export default function RootLayout({
-  children,
-}: Readonly<{
-  children: React.ReactNode;
-}>) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="es" className={`${inter.variable} ${spaceGrotesk.variable}`}>
+    <html lang="es">
       <body>{children}</body>
     </html>
-  );
+  )
 }

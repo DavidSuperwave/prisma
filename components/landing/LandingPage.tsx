@@ -1,0 +1,37 @@
+'use client'
+
+import React, { useEffect } from 'react'
+import Nav from './Nav'
+import Hero from './Hero'
+import LogoStrip from './LogoStrip'
+import FeatureGrid from './FeatureGrid'
+import AgentSection from './AgentSection'
+import InsightsSection from './InsightsSection'
+import TestimonialSection from './TestimonialSection'
+import CTASection from './CTASection'
+import Footer from './Footer'
+
+export default function LandingPage() {
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      (entries) => { entries.forEach((e) => { if (e.isIntersecting) e.target.classList.add('visible') }) },
+      { threshold: 0.1 }
+    )
+    document.querySelectorAll('.animate-on-scroll').forEach((el) => observer.observe(el))
+    return () => observer.disconnect()
+  }, [])
+
+  return (
+    <div style={{ background: 'var(--void)', minHeight: '100vh' }}>
+      <Nav />
+      <Hero />
+      <LogoStrip />
+      <FeatureGrid />
+      <AgentSection />
+      <InsightsSection />
+      <TestimonialSection />
+      <CTASection />
+      <Footer />
+    </div>
+  )
+}

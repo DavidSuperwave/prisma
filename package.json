@@ -9,10 +9,12 @@
     "lint": "eslint . --ext .js,.jsx,.ts,.tsx"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.102.1",
     "lucide-react": "latest",
     "next": "latest",
     "react": "latest",
-    "react-dom": "latest"
+    "react-dom": "latest",
+    "stripe": "^22.0.0"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.3.5",

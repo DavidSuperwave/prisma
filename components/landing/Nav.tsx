@@ -362,7 +362,7 @@ export default function Nav() {
             Menu
           </button>
           <a
-            href="#cta"
+            href="/intake"
             className="giga-cta"
             style={{
               color: '#1e293b',

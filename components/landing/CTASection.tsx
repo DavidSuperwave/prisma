@@ -38,7 +38,7 @@ export default function CTASection() {
           laboral.
         </p>
         <a
-          href="#"
+          href="/intake"
           className="giga-cta"
           style={{
             display: 'inline-flex',

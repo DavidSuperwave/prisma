@@ -1,18 +1,18 @@
-.page {
+.workspaceIndexPage {
   min-height: 100vh;
   background: var(--color-page-bg);
   color: var(--color-text-primary);
   padding: var(--space-10) var(--space-6);
 }
 
-.header {
+.workspaceIndexHeader {
   max-width: 740px;
   display: grid;
   gap: var(--space-4);
   margin: 0 auto var(--space-8);
 }
 
-.kicker {
+.workspaceIndexKicker {
   margin: 0;
   font-size: 0.75rem;
   line-height: 1rem;
@@ -22,26 +22,26 @@
   font-weight: var(--font-semibold);
 }
 
-.title {
+.workspaceIndexTitle {
   margin: 0;
   font-size: 2rem;
   line-height: 2.25rem;
   letter-spacing: -0.02em;
 }
 
-.description {
+.workspaceIndexDescription {
   margin: 0;
   color: var(--color-text-secondary);
   max-width: 64ch;
 }
 
-.meta {
+.workspaceIndexMeta {
   margin: 0;
   color: var(--color-text-tertiary);
   font-size: 0.875rem;
 }
 
-.empty {
+.workspaceIndexEmpty {
   max-width: 620px;
   margin: 0 auto;
   border: 1px solid var(--color-border);
@@ -52,17 +52,17 @@
   gap: var(--space-3);
 }
 
-.empty h2 {
+.workspaceIndexEmpty h2 {
   margin: 0;
   font-size: 1.25rem;
 }
 
-.empty p {
+.workspaceIndexEmpty p {
   margin: 0;
   color: var(--color-text-secondary);
 }
 
-.emptyCta {
+.workspaceIndexEmptyCta {
   justify-self: start;
   margin-top: var(--space-2);
   text-decoration: none;
@@ -74,11 +74,11 @@
   font-weight: var(--font-semibold);
 }
 
-.emptyCta:hover {
+.workspaceIndexEmptyCta:hover {
   background: var(--color-accent-subtle);
 }
 
-.grid {
+.workspaceIndexGrid {
   width: 100%;
   max-width: 1080px;
   margin: 0 auto;
@@ -87,7 +87,7 @@
   gap: var(--space-5);
 }
 
-.card {
+.workspaceIndexCard {
   text-decoration: none;
   color: inherit;
   border: 1px solid var(--color-border);
@@ -99,25 +99,25 @@
   gap: var(--space-3);
 }
 
-.card:hover {
+.workspaceIndexCard:hover {
   border-color: var(--color-border-focus);
   background: var(--color-surface-hover);
   transform: translateY(-1px);
 }
 
-.cardHeader {
+.workspaceIndexCardHeader {
   display: flex;
   align-items: center;
   gap: var(--space-3);
 }
 
-.colorDot {
+.workspaceIndexColor {
   width: 12px;
   height: 12px;
   border-radius: var(--radius-full);
 }
 
-.subdomain {
+.workspaceIndexSubdomain {
   color: var(--color-text-tertiary);
   font-size: 0.75rem;
   letter-spacing: 0.08em;
@@ -125,19 +125,19 @@
   font-weight: var(--font-semibold);
 }
 
-.card h2 {
+.workspaceIndexCard h2 {
   margin: 0;
   font-size: 1.125rem;
   line-height: 1.5rem;
 }
 
-.card p {
+.workspaceIndexCard p {
   margin: 0;
   color: var(--color-text-secondary);
   font-size: 0.875rem;
 }
 
-.cardCta {
+.workspaceIndexCardCta {
   margin-top: var(--space-2);
   font-size: 0.875rem;
   font-weight: var(--font-semibold);
@@ -145,7 +145,7 @@
 }
 
 @media (max-width: 768px) {
-  .page {
+  .workspaceIndexPage {
     padding: var(--space-8) var(--space-4);
   }
 }

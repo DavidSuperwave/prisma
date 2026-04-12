@@ -1,3 +1,8 @@
+---
+name: prisma-database
+description: Create and update Prisma workspace schema rows in Supabase through the meta-model tables.
+---
+
 # prisma-database
 
 Use this skill to create and update Prisma workspace schema rows in Supabase through the meta-model tables.
@@ -16,6 +21,14 @@ The goal is to keep the UI dynamic: do not create hardcoded client tables.
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_KEY`
 - `HERMES_WORKSPACE_ID` (or workspace id passed in the task)
+
+## Critical execution rules
+
+- `workspace_id` must be a real UUID. If `HERMES_WORKSPACE_ID` is not a UUID, stop and ask for the correct workspace UUID before attempting writes.
+- Prefer HTTP requests to Supabase REST over shell commands. Use Python's standard library (`urllib.request`, `json`) if code execution is available.
+- Do not assume `curl` exists in the runtime container.
+- Before creating anything, verify the workspace exists by querying `workspaces?id=eq.<workspace_uuid>` or `workspaces?subdomain=eq.<slug>`.
+- After every write, immediately read the created rows back and confirm success.
 
 ## Table Contract
 
@@ -54,6 +67,16 @@ Required columns:
    - set `options` for select/status fields
    - assign deterministic `sort_order`
 4. Return created object + field IDs and a short summary.
+
+## Safe write sequence
+
+1. Read `HERMES_WORKSPACE_ID`.
+2. If it is not UUID-shaped, do not write.
+3. Verify the target workspace exists.
+4. Create the `workspace_objects` row and capture the returned `id`.
+5. Create the `workspace_fields` rows using that `object_id`.
+6. Read the object and fields back from Supabase.
+7. Only then report success.
 
 ## Supabase REST Examples
 

@@ -63,7 +63,21 @@ type DataPanelProps = {
 };
 
 type AgentPanelProps = {
-  agents: PrismaWorkspaceAgent[];
+  agents: Array<{
+    id: string;
+    name: string;
+    type: string;
+    status: string;
+    description: string | null;
+    tools: string[];
+    read: string[];
+    write: string[];
+    channels: string[];
+    cronJobs: unknown[];
+    memoryLabel: string;
+    soulMd?: string | null;
+    runtimeLabel?: string;
+  }>;
   activity: PrismaWorkspaceActivity[];
 };
 
@@ -434,8 +448,108 @@ export function DataPanel({ objects, fields, views, records }: DataPanelProps) {
 
 export function AgentsPanel({ agents, activity }: AgentPanelProps) {
   const [selectedAgentId, setSelectedAgentId] = useState<string>(agents[0]?.id ?? "");
+  const [chatInput, setChatInput] = useState("");
+  const [chatError, setChatError] = useState<string | null>(null);
+  const [isSending, setIsSending] = useState(false);
+  const [chatMessages, setChatMessages] = useState<Array<{ role: "user" | "assistant"; content: string }>>([
+    {
+      role: "assistant",
+      content: "Use this test chat to validate the selected agent without leaving the workspace.",
+    },
+  ]);
   const selectedAgent = agents.find((agent) => agent.id === selectedAgentId) ?? agents[0] ?? null;
   const selectedActivity = activity.filter((entry) => entry.agentId === selectedAgent?.id).slice(0, 10);
+
+  async function sendTestMessage() {
+    const trimmed = chatInput.trim();
+    if (!trimmed || !selectedAgent || isSending) {
+      return;
+    }
+
+    const nextMessages = [...chatMessages, { role: "user" as const, content: trimmed }];
+    setChatMessages([...nextMessages, { role: "assistant", content: "" }]);
+    setChatInput("");
+    setChatError(null);
+    setIsSending(true);
+
+    try {
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          agent_id: selectedAgent.id,
+          message: trimmed,
+          history: nextMessages.map((message) => ({
+            role: message.role,
+            content: message.content,
+          })),
+          conversation_id: `workspace-agent-${selectedAgent.id}`,
+        }),
+      });
+
+      if (!response.ok || !response.body) {
+        const errorText = await response.text();
+        throw new Error(errorText || "Unable to reach the selected agent.");
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          break;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split("\n\n");
+        buffer = events.pop() ?? "";
+
+        for (const event of events) {
+          const payloads = event
+            .split("\n")
+            .map((line) => line.trim())
+            .filter((line) => line.startsWith("data:"))
+            .map((line) => line.slice(5).trim())
+            .filter(Boolean);
+
+          for (const raw of payloads) {
+            const parsed = JSON.parse(raw) as { type?: string; content?: string; error?: string };
+            if (parsed.type === "delta" && parsed.content) {
+              setChatMessages((current) => {
+                const updated = [...current];
+                updated[updated.length - 1] = {
+                  role: "assistant",
+                  content: `${updated[updated.length - 1]?.content ?? ""}${parsed.content}`,
+                };
+                return updated;
+              });
+            }
+
+            if (parsed.type === "error") {
+              throw new Error(parsed.error ?? "Agent request failed.");
+            }
+          }
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error while contacting the agent.";
+      setChatError(message);
+      setChatMessages((current) => {
+        const updated = [...current];
+        updated[updated.length - 1] = {
+          role: "assistant",
+          content: "The selected agent could not answer right now. Check runtime configuration and try again.",
+        };
+        return updated;
+      });
+    } finally {
+      setIsSending(false);
+    }
+  }
 
   return (
     <div style={stackStyle}>
@@ -511,6 +625,7 @@ export function AgentsPanel({ agents, activity }: AgentPanelProps) {
                     items={[
                       `Lectura: ${selectedAgent.read.length ? selectedAgent.read.join(", ") : "—"}`,
                       `Escritura: ${selectedAgent.write.length ? selectedAgent.write.join(", ") : "—"}`,
+                      `Canales: ${selectedAgent.channels.length ? selectedAgent.channels.join(", ") : "Ninguno"}`,
                     ]}
                   />
                   <DetailBlock
@@ -522,7 +637,7 @@ export function AgentsPanel({ agents, activity }: AgentPanelProps) {
                     title="Memoria y jobs"
                     icon={CircleDot}
                     items={[
-                      `Memoria: ${selectedAgent.memoryLimitMb} MB`,
+                      `Memoria: ${selectedAgent.memoryLabel}`,
                       `Cron jobs: ${selectedAgent.cronJobs.length || 0}`,
                     ]}
                   />
@@ -532,6 +647,9 @@ export function AgentsPanel({ agents, activity }: AgentPanelProps) {
                   <div style={detailRailStyle}>
                     <h4 style={detailRailTitleStyle}>SOUL.md</h4>
                     <p style={detailRailCopyStyle}>{selectedAgent.soulMd ?? "Sin instrucciones cargadas."}</p>
+                    {selectedAgent.runtimeLabel ? (
+                      <p style={detailRailMetaStyle}>Runtime: {selectedAgent.runtimeLabel}</p>
+                    ) : null}
                   </div>
 
                   <div style={detailRailStyle}>
@@ -557,6 +675,43 @@ export function AgentsPanel({ agents, activity }: AgentPanelProps) {
                       <p style={detailRailCopyStyle}>Todavía no hay actividad registrada para este agente.</p>
                     )}
                   </div>
+                </div>
+
+                <div style={detailRailStyle}>
+                  <h4 style={detailRailTitleStyle}>Test chat</h4>
+                  <p style={detailRailCopyStyle}>
+                    Validate the selected agent from the workspace surface before wiring broader operator chat.
+                  </p>
+                  <div style={agentChatThreadStyle}>
+                    {chatMessages.map((message, index) => (
+                      <div
+                        key={`${message.role}-${index}`}
+                        style={{
+                          ...agentChatBubbleStyle,
+                          justifySelf: message.role === "user" ? "end" : "start",
+                          background:
+                            message.role === "user" ? "rgba(51, 92, 255, 0.12)" : "rgba(15, 23, 42, 0.05)",
+                        }}
+                      >
+                        <strong style={agentChatRoleStyle}>
+                          {message.role === "user" ? "You" : selectedAgent.name}
+                        </strong>
+                        <p style={agentChatCopyStyle}>{message.content || (isSending ? "Thinking..." : "")}</p>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={agentChatComposerStyle}>
+                    <input
+                      value={chatInput}
+                      onChange={(event) => setChatInput(event.target.value)}
+                      placeholder={`Message ${selectedAgent.name}`}
+                      style={chatInputStyle}
+                    />
+                    <button type="button" onClick={sendTestMessage} style={chatButtonStyle} disabled={isSending}>
+                      {isSending ? "Sending..." : "Send"}
+                    </button>
+                  </div>
+                  {chatError ? <p style={chatErrorStyle}>{chatError}</p> : null}
                 </div>
               </>
             ) : (
@@ -1182,6 +1337,12 @@ const detailRailCopyStyle: React.CSSProperties = {
   whiteSpace: "pre-wrap",
 };
 
+const detailRailMetaStyle: React.CSSProperties = {
+  margin: 0,
+  color: "var(--workspace-faint)",
+  fontSize: 12,
+};
+
 const agentActivityRowStyle: React.CSSProperties = {
   display: "grid",
   gap: 4,
@@ -1235,6 +1396,67 @@ const recordFieldValueStyle: React.CSSProperties = {
   color: "var(--workspace-text)",
   fontSize: 16,
   lineHeight: 1.4,
+};
+
+const agentChatThreadStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 10,
+  maxHeight: 260,
+  overflowY: "auto",
+  paddingRight: 4,
+};
+
+const agentChatBubbleStyle: React.CSSProperties = {
+  maxWidth: "92%",
+  borderRadius: 16,
+  padding: "12px 14px",
+  display: "grid",
+  gap: 6,
+};
+
+const agentChatRoleStyle: React.CSSProperties = {
+  fontSize: 12,
+  color: "var(--workspace-faint)",
+};
+
+const agentChatCopyStyle: React.CSSProperties = {
+  margin: 0,
+  color: "var(--workspace-text)",
+  fontSize: 14,
+  lineHeight: 1.5,
+  whiteSpace: "pre-wrap",
+};
+
+const agentChatComposerStyle: React.CSSProperties = {
+  display: "flex",
+  gap: 10,
+  marginTop: 4,
+};
+
+const chatInputStyle: React.CSSProperties = {
+  flex: 1,
+  borderRadius: 14,
+  border: "1px solid var(--workspace-border)",
+  background: "var(--workspace-surface)",
+  color: "var(--workspace-text)",
+  padding: "10px 12px",
+  font: "inherit",
+};
+
+const chatButtonStyle: React.CSSProperties = {
+  borderRadius: 14,
+  border: "1px solid rgba(51, 92, 255, 0.16)",
+  background: "rgba(51, 92, 255, 0.12)",
+  color: "#2947cc",
+  padding: "10px 14px",
+  fontWeight: 700,
+  font: "inherit",
+};
+
+const chatErrorStyle: React.CSSProperties = {
+  margin: 0,
+  color: "#b42318",
+  fontSize: 13,
 };
 
 const pillStyle: React.CSSProperties = {

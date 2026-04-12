@@ -34,6 +34,8 @@ function formatAgentSummary(agents: Awaited<ReturnType<typeof getWorkspaceSnapsh
       Array.isArray(agent.knowledgeScope.channels) ? (agent.knowledgeScope.channels as string[]) : [],
     cronJobs: agent.cronJobs,
     memoryLabel: `${agent.memoryLimitMb} MB`,
+    soulMd: agent.soulMd,
+    runtimeLabel: agent.containerName,
   }));
 }
 
@@ -201,7 +203,13 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
   }
 
   if (selectedTab === "agents") {
-    content = <AgentOverviewPanel agents={formatAgentSummary(snapshot.agents)} activity={snapshot.activity} />;
+    content = (
+      <AgentOverviewPanel
+        workspaceSlug={snapshot.workspace.subdomain}
+        agents={formatAgentSummary(snapshot.agents)}
+        activity={snapshot.activity}
+      />
+    );
   }
 
   return (

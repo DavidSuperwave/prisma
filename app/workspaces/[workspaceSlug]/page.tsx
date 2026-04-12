@@ -4,7 +4,7 @@ import {
   getWorkspaceSnapshotForUser,
   getRecordFieldValue,
 } from "@/lib/workspaceStore";
-import { listDashboardCardsForWorkspace } from "@/lib/platformStore";
+import { listAgentTemplates, listDashboardCardsForWorkspace } from "@/lib/platformStore";
 import { WorkspaceShell } from "@/components/workspace/WorkspaceShell";
 import {
   AgentOverviewPanel,
@@ -125,7 +125,10 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
     );
   }
 
-  const dashboardCards = await listDashboardCardsForWorkspace(snapshot.workspace.id);
+  const [dashboardCards, agentTemplates] = await Promise.all([
+    listDashboardCardsForWorkspace(snapshot.workspace.id),
+    listAgentTemplates(),
+  ]);
   const currentObject =
     snapshot.objects.find((object) => object.id === query.object) ?? snapshot.objects[0] ?? null;
   const currentView =
@@ -336,6 +339,10 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
   if (selectedTab === "agents") {
     content = (
       <AgentOverviewPanel
+        workspaceId={snapshot.workspace.id}
+        workspaceSlug={snapshot.workspace.subdomain}
+        agentLimit={snapshot.workspace.agentLimit}
+        agentTemplates={agentTemplates}
         agents={formatAgentSummary(snapshot.agents)}
         activity={snapshot.activity}
       />

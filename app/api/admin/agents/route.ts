@@ -1,4 +1,4 @@
-import { createAgentDefinition, listAgents } from '@/lib/platformStore'
+import { createAgentDefinition, listAgents, updateAgentDefinition } from '@/lib/platformStore'
 
 type CreateAgentRequest = {
   workspaceId?: string
@@ -6,6 +6,13 @@ type CreateAgentRequest = {
   name?: string
   role?: 'intake_assistant' | 'lead_qualifier' | 'crm_updater' | 'follow_up' | 'ops_assistant' | 'custom'
   model?: string
+  promptPack?: Record<string, unknown>
+  toolsConfig?: Record<string, unknown>
+  integrationConfig?: Record<string, unknown>
+}
+
+type UpdateAgentRequest = CreateAgentRequest & {
+  id?: string
 }
 
 export async function GET(request: Request) {
@@ -28,11 +35,42 @@ export async function POST(request: Request) {
       name: body.name,
       role: body.role,
       model: body.model,
+      promptPack: body.promptPack,
+      toolsConfig: body.toolsConfig,
+      integrationConfig: body.integrationConfig,
     })
 
     return Response.json({ agent }, { status: 201 })
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unable to create agent'
+    return Response.json({ error: message }, { status: 400 })
+  }
+}
+
+export async function PATCH(request: Request) {
+  try {
+    const body = (await request.json()) as UpdateAgentRequest
+    if (!body.id || !body.workspaceId) {
+      return Response.json({ error: 'id and workspaceId are required' }, { status: 400 })
+    }
+
+    const agent = await updateAgentDefinition(body.id, {
+      workspaceId: body.workspaceId,
+      name: body.name,
+      role: body.role,
+      model: body.model,
+      promptPack: body.promptPack,
+      toolsConfig: body.toolsConfig,
+      integrationConfig: body.integrationConfig,
+    })
+
+    if (!agent) {
+      return Response.json({ error: 'Agent not found' }, { status: 404 })
+    }
+
+    return Response.json({ agent })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unable to update agent'
     return Response.json({ error: message }, { status: 400 })
   }
 }

@@ -75,6 +75,21 @@ type DataPanelProps = {
 };
 
 type AgentPanelProps = {
+  workspaceId: string;
+  workspaceSlug: string;
+  agentLimit: number;
+  agentTemplates: Array<{
+    id: string;
+    name: string;
+    description?: string;
+    type: "copilot" | "channel" | "worker" | "chatbot";
+    category?: string;
+    defaultSoulMd?: string;
+    defaultSkills: string[];
+    defaultKnowledgeScope: Record<string, unknown>;
+    defaultCronJobs: unknown[];
+    defaultMemoryConfig: Record<string, unknown>;
+  }>;
   agents: Array<{
     id: string;
     name: string;
@@ -1247,8 +1262,45 @@ export function DataPanel({ objects, fields, views, records, recordBaseHref, ask
   );
 }
 
-export function AgentsPanel({ agents, activity }: AgentPanelProps) {
+export function AgentsPanel({
+  workspaceId,
+  workspaceSlug,
+  agentLimit,
+  agentTemplates,
+  agents,
+  activity,
+}: AgentPanelProps) {
+  const [localAgents, setLocalAgents] = useState(agents);
   const [selectedAgentId, setSelectedAgentId] = useState<string>(agents[0]?.id ?? "");
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>(agentTemplates[0]?.id ?? "");
+  const [isCreateMode, setIsCreateMode] = useState(agents.length === 0);
+  const [draft, setDraft] = useState<{
+    id?: string;
+    name: string;
+    role: string;
+    description: string;
+    soulMd: string;
+    skills: string;
+    read: string;
+    write: string;
+    channels: string;
+    cronJobs: string;
+    isActive: boolean;
+  }>({
+    name: "",
+    role: "custom",
+    description: "",
+    soulMd: "",
+    skills: "",
+    read: "",
+    write: "",
+    channels: "",
+    cronJobs: "[]",
+    isActive: true,
+  });
+  const [builderError, setBuilderError] = useState<string>("");
+  const [builderSuccess, setBuilderSuccess] = useState<string>("");
+  const [isSaving, setIsSaving] = useState(false);
   const [chatInput, setChatInput] = useState("");
   const [chatError, setChatError] = useState<string | null>(null);
   const [isSending, setIsSending] = useState(false);
@@ -1258,8 +1310,183 @@ export function AgentsPanel({ agents, activity }: AgentPanelProps) {
       content: "Usa este chat para validar el agente seleccionado sin salir del workspace.",
     },
   ]);
-  const selectedAgent = agents.find((agent) => agent.id === selectedAgentId) ?? agents[0] ?? null;
+  const selectedAgent = localAgents.find((agent) => agent.id === selectedAgentId) ?? localAgents[0] ?? null;
   const selectedActivity = activity.filter((entry) => entry.agentId === selectedAgent?.id).slice(0, 10);
+  const activeAgentCount = localAgents.length;
+
+  useEffect(() => {
+    setLocalAgents(agents);
+  }, [agents]);
+
+  useEffect(() => {
+    const current = localAgents.find((agent) => agent.id === selectedAgentId) ?? null;
+    if (!current) {
+      if (localAgents.length === 0) {
+        setIsCreateMode(true);
+      }
+      return;
+    }
+
+    setDraft({
+      id: current.id,
+      name: current.name,
+      role: mapAgentTypeToRole(current.type),
+      description: current.description ?? "",
+      soulMd: current.soulMd ?? "",
+      skills: current.tools.join(", "),
+      read: current.read.join(", "),
+      write: current.write.join(", "),
+      channels: current.channels.join(", "),
+      cronJobs: JSON.stringify(current.cronJobs ?? [], null, 2),
+      isActive: current.status !== "paused",
+    });
+    setIsCreateMode(false);
+  }, [localAgents, selectedAgentId]);
+
+  function applyTemplate(templateId: string) {
+    const template = agentTemplates.find((entry) => entry.id === templateId);
+    setSelectedTemplateId(templateId);
+    if (!template) {
+      return;
+    }
+
+    setDraft({
+      id: undefined,
+      name: template.name,
+      role: mapTemplateTypeToRole(template.type),
+      description: template.description ?? "",
+      soulMd: template.defaultSoulMd ?? "",
+      skills: template.defaultSkills.join(", "),
+      read: Array.isArray(template.defaultKnowledgeScope.read) ? (template.defaultKnowledgeScope.read as string[]).join(", ") : "",
+      write: Array.isArray(template.defaultKnowledgeScope.write) ? (template.defaultKnowledgeScope.write as string[]).join(", ") : "",
+      channels: Array.isArray(template.defaultKnowledgeScope.channels) ? (template.defaultKnowledgeScope.channels as string[]).join(", ") : "",
+      cronJobs: JSON.stringify(template.defaultCronJobs ?? [], null, 2),
+      isActive: true,
+    });
+    setBuilderError("");
+    setBuilderSuccess("");
+    setIsCreateMode(true);
+  }
+
+  function startBlankAgent() {
+    setSelectedAgentId("");
+    setDraft({
+      id: undefined,
+      name: "",
+      role: "custom",
+      description: "",
+      soulMd: "",
+      skills: "",
+      read: "",
+      write: "",
+      channels: "",
+      cronJobs: "[]",
+      isActive: true,
+    });
+    setBuilderError("");
+    setBuilderSuccess("");
+    setIsCreateMode(true);
+  }
+
+  async function saveAgent() {
+    setBuilderError("");
+    setBuilderSuccess("");
+
+    if (!draft.name.trim()) {
+      setBuilderError("El nombre del agente es obligatorio.");
+      return;
+    }
+
+    if (isCreateMode && activeAgentCount >= agentLimit) {
+      setBuilderError(`Este workspace ya usa ${activeAgentCount} de ${agentLimit} agentes. Contacta a Superwave para ampliar el plan.`);
+      return;
+    }
+
+    setIsSaving(true);
+    try {
+      const parsedCronJobs = draft.cronJobs.trim() ? JSON.parse(draft.cronJobs) : [];
+      const payload = {
+        id: draft.id,
+        workspaceId,
+        name: draft.name,
+        role: draft.role,
+        promptPack: {
+          objective: draft.description,
+          soulMd: draft.soulMd,
+        },
+        toolsConfig: {
+          skills: parseCsvList(draft.skills),
+          knowledgeScope: {
+            read: parseCsvList(draft.read),
+            write: parseCsvList(draft.write),
+            channels: parseCsvList(draft.channels),
+          },
+        },
+        integrationConfig: {
+          knowledgeScope: {
+            read: parseCsvList(draft.read),
+            write: parseCsvList(draft.write),
+            channels: parseCsvList(draft.channels),
+          },
+          cronJobs: Array.isArray(parsedCronJobs) ? parsedCronJobs : [],
+        },
+        isActive: draft.isActive,
+      };
+
+      const response = await fetch("/api/admin/agents", {
+        method: isCreateMode ? "POST" : "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        agent?: {
+          id: string;
+          name: string;
+          role: string;
+          promptPack?: Record<string, unknown>;
+          toolsConfig?: Record<string, unknown>;
+          integrationConfig?: Record<string, unknown>;
+          isActive?: boolean;
+        };
+      };
+
+      if (!response.ok || !data.agent) {
+        throw new Error(data.error ?? "No se pudo guardar el agente.");
+      }
+
+      const mappedAgent = {
+        id: data.agent.id,
+        name: data.agent.name,
+        type: mapRoleToAgentType(data.agent.role),
+        status: data.agent.isActive === false ? "paused" : "active",
+        description:
+          typeof data.agent.promptPack?.objective === "string" ? data.agent.promptPack.objective : draft.description,
+        tools: Array.isArray(data.agent.toolsConfig?.skills) ? (data.agent.toolsConfig?.skills as string[]) : parseCsvList(draft.skills),
+        read: parseCsvList(draft.read),
+        write: parseCsvList(draft.write),
+        channels: parseCsvList(draft.channels),
+        cronJobs: Array.isArray(data.agent.integrationConfig?.cronJobs) ? (data.agent.integrationConfig?.cronJobs as unknown[]) : Array.isArray(parsedCronJobs) ? parsedCronJobs : [],
+        memoryLabel: "Activada",
+        soulMd: typeof data.agent.promptPack?.soulMd === "string" ? data.agent.promptPack.soulMd : draft.soulMd,
+        runtimeLabel: draft.id ? selectedAgent?.runtimeLabel ?? `hermes-${workspaceSlug}-${draft.role}` : `hermes-${workspaceSlug}-${draft.role}`,
+      };
+
+      setLocalAgents((current) => {
+        if (isCreateMode) {
+          return [mappedAgent, ...current];
+        }
+        return current.map((agent) => (agent.id === mappedAgent.id ? mappedAgent : agent));
+      });
+      setSelectedAgentId(mappedAgent.id);
+      setIsCreateMode(false);
+      setBuilderSuccess(isCreateMode ? "Agente creado." : "Agente actualizado.");
+    } catch (caughtError) {
+      setBuilderError(caughtError instanceof Error ? caughtError.message : "No se pudo guardar el agente.");
+    } finally {
+      setIsSaving(false);
+    }
+  }
 
   async function sendTestMessage() {
     const trimmed = chatInput.trim();
@@ -1280,6 +1507,7 @@ export function AgentsPanel({ agents, activity }: AgentPanelProps) {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
+          workspaceId,
           agent_id: selectedAgent.id,
           message: trimmed,
           history: nextMessages.map((message) => ({
@@ -1357,11 +1585,36 @@ export function AgentsPanel({ agents, activity }: AgentPanelProps) {
       <Panel
         eyebrow="Agents"
         title="Agentes"
-        description="Selecciona un agente para revisar su alcance, actividad y chat de prueba."
+        description={`${activeAgentCount} de ${agentLimit} agentes en uso. Crea o edita agentes desde este canvas.`}
       >
+        <div style={agentToolbarStyle}>
+          <div style={agentTemplateChooserStyle}>
+            <select
+              value={selectedTemplateId}
+              onChange={(event) => applyTemplate(event.target.value)}
+              style={inputStyle}
+            >
+              {agentTemplates.map((template) => (
+                <option key={template.id} value={template.id}>
+                  {template.name}
+                </option>
+              ))}
+            </select>
+            <button type="button" style={chatActionButtonStyle} onClick={() => applyTemplate(selectedTemplateId)}>
+              Usar plantilla
+            </button>
+            <button type="button" style={chatActionButtonStyle} onClick={startBlankAgent}>
+              Agente en blanco
+            </button>
+          </div>
+          <StatusPill tone={activeAgentCount < agentLimit ? "active" : "pending"}>
+            {activeAgentCount}/{agentLimit} agentes
+          </StatusPill>
+        </div>
+
         <div style={agentGridStyle}>
           <div style={agentListStyle}>
-            {agents.map((agent) => (
+            {localAgents.map((agent) => (
               <button
                 key={agent.id}
                 type="button"
@@ -1382,7 +1635,7 @@ export function AgentsPanel({ agents, activity }: AgentPanelProps) {
                       <Bot size={16} />
                     )}
                   </div>
-                  <StatusPill tone={agent.status.toLowerCase()}>{agent.status}</StatusPill>
+                  <StatusPill tone={agent.status.toLowerCase()}>{formatStatusLabel(agent.status)}</StatusPill>
                 </div>
                 <div>
                   <p style={agentNameStyle}>{agent.name}</p>
@@ -1397,59 +1650,128 @@ export function AgentsPanel({ agents, activity }: AgentPanelProps) {
           </div>
 
           <div style={agentDetailCardStyle}>
+            <div style={agentDetailHeaderStyle}>
+              <div>
+                <p style={eyebrowStyle}>{isCreateMode ? "Nuevo agente" : "Canvas"}</p>
+                <h3 style={agentDetailTitleStyle}>{isCreateMode ? "Crear agente" : draft.name || "Editar agente"}</h3>
+                <p style={agentDescriptionStyle}>
+                  Define identidad, instrucciones, permisos y ejecución desde el workspace.
+                </p>
+              </div>
+              {!isCreateMode && selectedAgent ? (
+                <StatusPill tone={selectedAgent.status.toLowerCase()}>{formatStatusLabel(selectedAgent.status)}</StatusPill>
+              ) : null}
+            </div>
+
+            <div style={agentCanvasGridStyle}>
+              <label style={fieldStyle}>
+                Nombre
+                <input
+                  value={draft.name}
+                  onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))}
+                  style={inputStyle}
+                />
+              </label>
+              <label style={fieldStyle}>
+                Tipo
+                <select
+                  value={draft.role}
+                  onChange={(event) => setDraft((current) => ({ ...current, role: event.target.value }))}
+                  style={inputStyle}
+                >
+                  <option value="intake_assistant">Copilot</option>
+                  <option value="lead_qualifier">Canal</option>
+                  <option value="crm_updater">CRM monitor</option>
+                  <option value="follow_up">Follow-up</option>
+                  <option value="ops_assistant">Operativo</option>
+                  <option value="custom">Custom</option>
+                </select>
+              </label>
+              <label style={{ ...fieldStyle, gridColumn: "1 / -1" }}>
+                Descripción / responsabilidad
+                <textarea
+                  value={draft.description}
+                  onChange={(event) => setDraft((current) => ({ ...current, description: event.target.value }))}
+                  rows={3}
+                  style={textAreaStyle}
+                />
+              </label>
+              <label style={{ ...fieldStyle, gridColumn: "1 / -1" }}>
+                Instrucciones (SOUL.md)
+                <textarea
+                  value={draft.soulMd}
+                  onChange={(event) => setDraft((current) => ({ ...current, soulMd: event.target.value }))}
+                  rows={8}
+                  style={textAreaStyle}
+                />
+              </label>
+              <label style={fieldStyle}>
+                Skills (CSV)
+                <input
+                  value={draft.skills}
+                  onChange={(event) => setDraft((current) => ({ ...current, skills: event.target.value }))}
+                  style={inputStyle}
+                />
+              </label>
+              <label style={fieldStyle}>
+                Lectura (CSV)
+                <input
+                  value={draft.read}
+                  onChange={(event) => setDraft((current) => ({ ...current, read: event.target.value }))}
+                  style={inputStyle}
+                />
+              </label>
+              <label style={fieldStyle}>
+                Escritura (CSV)
+                <input
+                  value={draft.write}
+                  onChange={(event) => setDraft((current) => ({ ...current, write: event.target.value }))}
+                  style={inputStyle}
+                />
+              </label>
+              <label style={fieldStyle}>
+                Canales (CSV)
+                <input
+                  value={draft.channels}
+                  onChange={(event) => setDraft((current) => ({ ...current, channels: event.target.value }))}
+                  style={inputStyle}
+                />
+              </label>
+              <label style={{ ...fieldStyle, gridColumn: "1 / -1" }}>
+                Cron jobs (JSON array)
+                <textarea
+                  value={draft.cronJobs}
+                  onChange={(event) => setDraft((current) => ({ ...current, cronJobs: event.target.value }))}
+                  rows={4}
+                  style={textAreaStyle}
+                />
+              </label>
+              <label style={toggleStyle}>
+                <input
+                  type="checkbox"
+                  checked={draft.isActive}
+                  onChange={(event) => setDraft((current) => ({ ...current, isActive: event.target.checked }))}
+                />
+                Activo
+              </label>
+            </div>
+
+            <div style={actionsStyle}>
+              <button type="button" style={primaryButtonStyle} onClick={saveAgent} disabled={isSaving}>
+                {isSaving ? "Guardando..." : isCreateMode ? "Crear agente" : "Guardar cambios"}
+              </button>
+              {!isCreateMode ? (
+                <button type="button" style={chatActionButtonStyle} onClick={startBlankAgent}>
+                  Nuevo desde cero
+                </button>
+              ) : null}
+              {builderError ? <p style={inlineErrorStyle}>{builderError}</p> : null}
+              {builderSuccess ? <p style={inlineSuccessStyle}>{builderSuccess}</p> : null}
+            </div>
+
             {selectedAgent ? (
               <>
-                <div style={agentDetailHeaderStyle}>
-                  <div>
-                    <p style={eyebrowStyle}>Detalle</p>
-                    <h3 style={agentDetailTitleStyle}>{selectedAgent.name}</h3>
-                    <p style={agentDescriptionStyle}>{selectedAgent.description ?? "Sin descripción"}</p>
-                  </div>
-                  <StatusPill tone={selectedAgent.status.toLowerCase()}>{formatStatusLabel(selectedAgent.status)}</StatusPill>
-                </div>
-
-                <div style={agentSectionGridStyle}>
-                  <DetailBlock
-                    title="Responsabilidad"
-                    icon={Bot}
-                    items={[
-                      selectedAgent.type === "copilot"
-                        ? "Coordina el workspace, resume estado y propone cambios."
-                        : selectedAgent.type === "channel"
-                          ? "Opera en un canal externo y califica o responde con límites claros."
-                          : "Ejecuta trabajo operativo específico en segundo plano.",
-                    ]}
-                  />
-                  <DetailBlock
-                    title="Acceso"
-                    icon={ShieldCheck}
-                    items={[
-                      `Lectura: ${selectedAgent.read.length ? selectedAgent.read.map(formatKnowledgeLabel).join(", ") : "—"}`,
-                      `Escritura: ${selectedAgent.write.length ? selectedAgent.write.map(formatKnowledgeLabel).join(", ") : "—"}`,
-                      `Canales: ${selectedAgent.channels.length ? selectedAgent.channels.join(", ") : "Ninguno"}`,
-                    ]}
-                  />
-                  <DetailBlock
-                    title="Skills"
-                    icon={Sparkles}
-                    items={selectedAgent.tools.length ? selectedAgent.tools : ["Sin herramientas adjuntas"]}
-                  />
-                  <DetailBlock
-                    title="Memoria y programacion"
-                    icon={CircleDot}
-                    items={[
-                      `Memoria: ${selectedAgent.memoryLabel}`,
-                      `Tareas programadas: ${selectedAgent.cronJobs.length || 0}`,
-                    ]}
-                  />
-                </div>
-
                 <div style={agentFooterGridStyle}>
-                  <div style={detailRailStyle}>
-                    <h4 style={detailRailTitleStyle}>SOUL.md</h4>
-                    <p style={detailRailCopyStyle}>{selectedAgent.soulMd ?? "Sin instrucciones cargadas."}</p>
-                  </div>
-
                   <div style={detailRailStyle}>
                     <h4 style={detailRailTitleStyle}>Actividad reciente</h4>
                     {selectedActivity.length ? (
@@ -1464,6 +1786,16 @@ export function AgentsPanel({ agents, activity }: AgentPanelProps) {
                     ) : (
                       <p style={detailRailCopyStyle}>Todavía no hay actividad registrada para este agente.</p>
                     )}
+                  </div>
+
+                  <div style={detailRailStyle}>
+                    <h4 style={detailRailTitleStyle}>Despliegue</h4>
+                    <p style={detailRailCopyStyle}>
+                      Runtime: {selectedAgent.runtimeLabel ?? `hermes-${workspaceSlug}`}
+                    </p>
+                    <p style={detailRailCopyStyle}>
+                      Estado: {formatStatusLabel(selectedAgent.status)}
+                    </p>
                   </div>
                 </div>
 
@@ -1505,7 +1837,7 @@ export function AgentsPanel({ agents, activity }: AgentPanelProps) {
               <EmptyState
                 icon={Bot}
                 title="No hay agentes configurados"
-                description="Cuando registremos el copilot y el primer agente operativo, aparecerán aquí."
+                description="Selecciona una plantilla o crea un agente en blanco para empezar."
               />
             )}
           </div>
@@ -1656,6 +1988,33 @@ function resolveAgentTypeTone(type: string) {
 function formatKnowledgeLabel(value: string) {
   if (value === "workspace_views") return "Vistas";
   return value.replace(/_/g, " ").replace(/^\w/, (letter) => letter.toUpperCase());
+}
+
+function parseCsvList(value: string) {
+  return value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function mapAgentTypeToRole(type: string) {
+  if (type === "copilot") return "intake_assistant";
+  if (type === "channel") return "lead_qualifier";
+  if (type === "worker") return "crm_updater";
+  return "custom";
+}
+
+function mapTemplateTypeToRole(type: string) {
+  if (type === "copilot") return "intake_assistant";
+  if (type === "channel" || type === "chatbot") return "lead_qualifier";
+  if (type === "worker") return "crm_updater";
+  return "custom";
+}
+
+function mapRoleToAgentType(role: string) {
+  if (role === "intake_assistant" || role === "ops_assistant") return "copilot";
+  if (role === "lead_qualifier" || role === "follow_up") return "channel";
+  return "worker";
 }
 
 function resolvePriorityColor(status: string) {
@@ -2021,6 +2380,83 @@ const overviewGridStyle: React.CSSProperties = {
 const queueListStyle: React.CSSProperties = {
   display: "grid",
   gap: 12,
+};
+
+const agentToolbarStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 12,
+  flexWrap: "wrap",
+};
+
+const agentTemplateChooserStyle: React.CSSProperties = {
+  display: "flex",
+  gap: 10,
+  flexWrap: "wrap",
+  alignItems: "center",
+};
+
+const agentCanvasGridStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+  gap: 12,
+};
+
+const fieldStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 6,
+  fontSize: 13,
+  color: "var(--workspace-muted)",
+};
+
+const textAreaStyle: React.CSSProperties = {
+  borderRadius: 14,
+  border: "1px solid var(--workspace-border)",
+  background: "var(--workspace-surface)",
+  color: "var(--workspace-text)",
+  padding: "10px 12px",
+  font: "inherit",
+  minWidth: 0,
+  resize: "vertical",
+};
+
+const toggleStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  fontSize: 13,
+  color: "var(--workspace-text)",
+};
+
+const actionsStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 12,
+  flexWrap: "wrap",
+};
+
+const primaryButtonStyle: React.CSSProperties = {
+  borderRadius: 14,
+  border: "1px solid rgba(51, 92, 255, 0.16)",
+  background: "rgba(51, 92, 255, 0.12)",
+  color: "#2947cc",
+  padding: "10px 14px",
+  fontWeight: 700,
+  font: "inherit",
+  cursor: "pointer",
+};
+
+const inlineErrorStyle: React.CSSProperties = {
+  margin: 0,
+  color: "#b42318",
+  fontSize: 13,
+};
+
+const inlineSuccessStyle: React.CSSProperties = {
+  margin: 0,
+  color: "#0f8a52",
+  fontSize: 13,
 };
 
 const queueItemStyle: React.CSSProperties = {

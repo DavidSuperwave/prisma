@@ -1,3 +1,5 @@
+import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
+
 const defaultSystemPrompt = `Eres agente de Prisma. Hablas en espanol para negocios mexicanos con tono claro, cercano y orientado a conversion. Tu trabajo es ayudar al visitante a entender como un agente IA por WhatsApp puede resolver su caso y mover la conversacion al siguiente paso.
 
 Empieza con respuestas cortas y utiles. Despues de responder, empuja el workflow con una siguiente pregunta concreta que ayude a calificar la oportunidad, por ejemplo:
@@ -17,9 +19,34 @@ type ChatRequest = {
   conversationId?: string;
   agent_id?: string;
   agentId?: string;
+  workspace_id?: string;
+  workspaceId?: string;
+  app_context?: {
+    current_tab?: string;
+    current_object?: string | null;
+    current_view?: string | null;
+    current_record_title?: string | null;
+    queue_preview?: string[];
+  };
+  appContext?: {
+    current_tab?: string;
+    current_object?: string | null;
+    current_view?: string | null;
+    current_record_title?: string | null;
+    queue_preview?: string[];
+  };
 };
 
 type ChatProvider = "hermes" | "openrouter";
+
+type AgentRuntimeRecord = {
+  id: string;
+  workspace_id: string;
+  name: string;
+  api_endpoint: string;
+  api_key: string;
+  status: string;
+};
 
 const sseHeaders = {
   "Content-Type": "text/event-stream",
@@ -57,6 +84,12 @@ function extractDeltaText(parsed: Record<string, unknown>) {
 
   if (typeof parsed.output_text === "string" && parsed.output_text.length > 0) {
     return parsed.output_text;
+  }
+
+  const output = parsed.output as Array<{ content?: Array<{ text?: string }> }> | undefined;
+  const outputText = output?.flatMap((item) => item.content ?? []).map((item) => item.text).find(Boolean);
+  if (typeof outputText === "string" && outputText.length > 0) {
+    return outputText;
   }
 
   const messageContent = messageChoices?.[0]?.message?.content;
@@ -209,20 +242,202 @@ function buildHermesInput(message: string, history: ChatHistoryMessage[]) {
   return `${transcript}\nUser: ${message.trim()}`;
 }
 
-async function callHermes(payload: ChatRequest) {
-  const baseUrl = process.env.HERMES_API_BASE_URL;
-  const apiKey = process.env.HERMES_API_KEY;
-  const model = process.env.HERMES_MODEL ?? "hermes-agent";
+async function resolveWorkspaceContext(workspaceIdentifier?: string | null) {
+  const supabase = getSupabaseAdmin();
+  if (!supabase || !workspaceIdentifier) {
+    return null;
+  }
+
+  let workspaceId = workspaceIdentifier;
+  let workspaceQuery = supabase
+    .from("workspaces")
+    .select("id, name, subdomain")
+    .limit(1);
+
+  if (/^[0-9a-fA-F-]{36}$/.test(workspaceIdentifier)) {
+    workspaceQuery = workspaceQuery.eq("id", workspaceIdentifier);
+  } else {
+    workspaceQuery = workspaceQuery.eq("subdomain", workspaceIdentifier);
+  }
+
+  const { data: workspaceRow, error: workspaceError } = await workspaceQuery.maybeSingle();
+  if (workspaceError) {
+    throw new Error(workspaceError.message);
+  }
+
+  if (!workspaceRow) {
+    return null;
+  }
+
+  workspaceId = String(workspaceRow.id);
+
+  const [{ data: objectRows }, { data: agentRows }, { data: activityRows }] = await Promise.all([
+    supabase
+      .from("workspace_objects")
+      .select("name")
+      .eq("workspace_id", workspaceId)
+      .order("created_at", { ascending: true }),
+    supabase
+      .from("workspace_agents")
+      .select("name, type, status")
+      .eq("workspace_id", workspaceId)
+      .order("created_at", { ascending: true }),
+    supabase
+      .from("agent_activity")
+      .select("action")
+      .eq("workspace_id", workspaceId)
+      .order("created_at", { ascending: false })
+      .limit(5),
+  ]);
+
+  const objectNames = (objectRows ?? []).map((row) => String(row.name));
+  const agentNames = (agentRows ?? []).map(
+    (row) => `${String(row.name)} (${String(row.type)}, ${String(row.status)})`,
+  );
+  const recentActions = (activityRows ?? []).map((row) => String(row.action));
+
+  return {
+    workspaceId,
+    workspaceName: String(workspaceRow.name),
+    workspaceSlug: String(workspaceRow.subdomain),
+    objectNames,
+    agentNames,
+    recentActions,
+  };
+}
+
+async function resolveAgentRuntime(payload: ChatRequest) {
+  const supabase = getSupabaseAdmin();
+  const requestedAgentId = payload.agent_id ?? payload.agentId;
+  const requestedWorkspaceId = payload.workspace_id ?? payload.workspaceId;
+
+  if (!supabase || !requestedAgentId) {
+    return null;
+  }
+
+  let scopedWorkspaceId = requestedWorkspaceId;
+
+  if (requestedWorkspaceId && !/^[0-9a-fA-F-]{36}$/.test(requestedWorkspaceId)) {
+    const { data: workspaceRow, error: workspaceError } = await supabase
+      .from("workspaces")
+      .select("id")
+      .eq("subdomain", requestedWorkspaceId)
+      .maybeSingle();
+
+    if (workspaceError) {
+      throw new Error(workspaceError.message);
+    }
+
+    scopedWorkspaceId = workspaceRow?.id ? String(workspaceRow.id) : requestedWorkspaceId;
+  }
+
+  let query = supabase
+    .from("workspace_agents")
+    .select("id, workspace_id, name, api_endpoint, api_key, status")
+    .eq("id", requestedAgentId)
+    .limit(1);
+
+  if (scopedWorkspaceId && /^[0-9a-fA-F-]{36}$/.test(scopedWorkspaceId)) {
+    query = query.eq("workspace_id", scopedWorkspaceId);
+  }
+
+  const { data, error } = await query.maybeSingle();
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  if (!data) {
+    return null;
+  }
+
+  return data as AgentRuntimeRecord;
+}
+
+async function proxyToHermes({
+  payload,
+  baseUrl,
+  apiKey,
+  model,
+  agent,
+  workspaceContext,
+}: {
+  payload: ChatRequest & { message: string };
+  baseUrl: string;
+  apiKey: string;
+  model?: string;
+  agent?: AgentRuntimeRecord | null;
+  workspaceContext?: {
+    workspaceId: string;
+    workspaceName: string;
+    workspaceSlug: string;
+    objectNames: string[];
+    agentNames: string[];
+    recentActions: string[];
+  } | null;
+}) {
+  const appContext = payload.app_context ?? payload.appContext ?? null;
   const conversationId =
     payload.conversation_id ??
     payload.conversationId ??
-    process.env.HERMES_DEFAULT_CONVERSATION ??
+    (agent ? `${agent.workspace_id}:${agent.id}` : process.env.HERMES_DEFAULT_CONVERSATION) ??
     undefined;
 
-  if (!baseUrl || !apiKey) {
-    return Response.json(
-      { error: "HERMES_API_BASE_URL or HERMES_API_KEY is missing for hErmes mode." },
-      { status: 500 },
+  const requestBody: Record<string, unknown> = {
+    input: buildHermesInput(
+      workspaceContext
+        ? [
+            `Workspace context: ${workspaceContext.workspaceName} (${workspaceContext.workspaceSlug})`,
+            `Workspace ID: ${workspaceContext.workspaceId}`,
+            `Objects: ${workspaceContext.objectNames.join(", ") || "none"}`,
+            `Agents: ${workspaceContext.agentNames.join(", ") || "none"}`,
+            `Recent activity: ${workspaceContext.recentActions.join(", ") || "none"}`,
+            "",
+            payload.message,
+          ].join("\n")
+        : payload.message,
+      payload.history ?? [],
+    ),
+    conversation: conversationId,
+    stream: true,
+    store: true,
+    metadata: {
+      ...(agent ? { agent_id: agent.id, workspace_id: agent.workspace_id, agent_name: agent.name } : {}),
+      ...(payload.agent_id || payload.agentId ? { requested_agent_id: payload.agent_id ?? payload.agentId } : {}),
+    },
+  };
+
+  const appContextLines =
+    appContext
+      ? [
+          `Current UI tab: ${appContext.current_tab ?? "unknown"}`,
+          `Current dataset: ${appContext.current_object ?? "none"}`,
+          `Current view: ${appContext.current_view ?? "none"}`,
+          `Current record: ${appContext.current_record_title ?? "none"}`,
+          `Queue preview: ${appContext.queue_preview?.join(", ") || "none"}`,
+        ]
+      : [];
+
+  if (model) {
+    requestBody.model = model;
+  }
+
+  if (workspaceContext || appContextLines.length > 0) {
+    requestBody.input = buildHermesInput(
+      [
+        ...(workspaceContext
+          ? [
+              `Workspace context: ${workspaceContext.workspaceName} (${workspaceContext.workspaceSlug})`,
+              `Workspace ID: ${workspaceContext.workspaceId}`,
+              `Objects: ${workspaceContext.objectNames.join(", ") || "none"}`,
+              `Agents: ${workspaceContext.agentNames.join(", ") || "none"}`,
+              `Recent activity: ${workspaceContext.recentActions.join(", ") || "none"}`,
+            ]
+          : []),
+        ...appContextLines,
+        "",
+        payload.message,
+      ].join("\n"),
+      payload.history ?? [],
     );
   }
 
@@ -232,14 +447,7 @@ async function callHermes(payload: ChatRequest) {
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      model,
-      input: buildHermesInput(payload.message ?? "", payload.history ?? []),
-      conversation: conversationId,
-      stream: true,
-      store: true,
-      metadata: payload.agent_id || payload.agentId ? { agent_id: payload.agent_id ?? payload.agentId } : undefined,
-    }),
+    body: JSON.stringify(requestBody),
   });
 
   if (!hermesResponse.ok || !hermesResponse.body) {
@@ -255,9 +463,31 @@ async function callHermes(payload: ChatRequest) {
   return streamFromJsonUpstream(hermesResponse);
 }
 
-async function callOpenRouter(payload: ChatRequest) {
+async function callHermes(payload: ChatRequest & { message: string }) {
+  const agent = await resolveAgentRuntime(payload);
+  if (agent && agent.status !== "active") {
+    return Response.json({ error: "Selected agent is not active." }, { status: 409 });
+  }
+
+  const workspaceContext = await resolveWorkspaceContext(payload.workspace_id ?? payload.workspaceId ?? null);
+
+  const baseUrl = agent?.api_endpoint ?? process.env.HERMES_API_BASE_URL;
+  const apiKey = agent?.api_key ?? process.env.HERMES_API_KEY;
+  const model = agent ? undefined : process.env.HERMES_MODEL ?? undefined;
+
+  if (!baseUrl || !apiKey) {
+    return Response.json(
+      { error: "HERMES_API_BASE_URL or HERMES_API_KEY is missing for hErmes mode." },
+      { status: 500 },
+    );
+  }
+
+  return proxyToHermes({ payload, baseUrl, apiKey, model, agent, workspaceContext });
+}
+
+async function callOpenRouter(payload: ChatRequest & { message: string }) {
   const apiKey = process.env.OPENROUTER_API_KEY;
-  const model = process.env.OPENROUTER_MODEL ?? "openai/gpt-4o-mini";
+  const model = process.env.OPENROUTER_MODEL ?? "[REDACTED]";
 
   if (!apiKey) {
     return Response.json({ error: "OPENROUTER_API_KEY is missing for OpenRouter mode." }, { status: 500 });
@@ -278,7 +508,7 @@ async function callOpenRouter(payload: ChatRequest) {
           role: item.role === "assistant" ? "assistant" : "user",
           content: item.content,
         })),
-        { role: "user", content: payload.message?.trim() },
+        { role: "user", content: payload.message.trim() },
       ],
     }),
   });

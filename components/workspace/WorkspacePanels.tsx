@@ -377,7 +377,7 @@ export function QueuePanel({ queueItems }: QueuePanelProps) {
   );
 }
 
-export function ChatPanel({ workspaceId, workspaceSlug, userId, contextSummary, copilotAgent }: ChatPanelProps) {
+export function ChatPanel({ workspaceId, workspaceSlug, userId, contextSummary, copilotAgent, askPrompt }: ChatPanelProps) {
   const storageKey = `prisma-chat:${workspaceSlug}:${userId}:${copilotAgent?.id ?? "copilot"}`;
   const router = useRouter();
   const [sessions, setSessions] = useState<ChatSession[]>([]);
@@ -424,13 +424,24 @@ export function ChatPanel({ workspaceId, workspaceSlug, userId, contextSummary, 
   }, [sessions, storageKey]);
 
   const selectedSession = sessions.find((session) => session.id === selectedSessionId) ?? sessions[0] ?? null;
+  const selectedSessionTitle = selectedSession?.title ?? "";
+  const selectedSessionMessageCount = selectedSession?.messages.length ?? 0;
 
   useEffect(() => {
     if (!selectedSession) {
       return;
     }
-    setRenameDraft(selectedSession.title);
-  }, [selectedSession?.id]);
+    setRenameDraft(selectedSessionTitle);
+  }, [selectedSession?.id, selectedSessionTitle]);
+
+  useEffect(() => {
+    if (!askPrompt || !selectedSession) {
+      return;
+    }
+    if (selectedSessionMessageCount === 0 && !input.trim()) {
+      setInput(askPrompt);
+    }
+  }, [askPrompt, input, selectedSession?.id, selectedSessionMessageCount]);
 
   function updateSession(sessionId: string, updater: (session: ChatSession) => ChatSession) {
     setSessions((current) =>
@@ -817,7 +828,7 @@ export function ChatPanel({ workspaceId, workspaceSlug, userId, contextSummary, 
   );
 }
 
-export function DataPanel({ objects, fields, views, records }: DataPanelProps) {
+export function DataPanel({ objects, fields, views, records, askHref }: DataPanelProps) {
   const [selectedObjectId, setSelectedObjectId] = useState<string>(objects[0]?.id ?? "");
   const [selectedViewId, setSelectedViewId] = useState<string>("all");
   const [query, setQuery] = useState("");
@@ -905,6 +916,11 @@ export function DataPanel({ objects, fields, views, records }: DataPanelProps) {
                 <Filter size={12} />
                 {currentView.name}
               </StatusPill>
+            ) : null}
+            {askHref ? (
+              <a href={askHref} style={metaActionLinkStyle}>
+                Ask CEO about this dataset
+              </a>
             ) : null}
           </div>
           <p style={metaCopyStyle}>{summary}</p>

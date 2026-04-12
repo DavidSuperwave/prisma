@@ -17,7 +17,7 @@ import { requireAuthenticatedUser } from "@/lib/auth";
 
 type PageProps = {
   params: Promise<{ workspaceSlug: string }>;
-  searchParams: Promise<{ object?: string; view?: string; record?: string; tab?: string }>;
+  searchParams: Promise<{ object?: string; view?: string; record?: string; tab?: string; ask?: string }>;
 };
 
 function formatAgentSummary(agents: Array<{
@@ -123,6 +123,12 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
   const queueItems = deriveQueueItems(snapshot.objects, snapshot.records);
   const selectedTab = query.tab ?? "home";
   const copilot = snapshot.agents.find((agent) => agent.type === "copilot") ?? snapshot.agents[0] ?? null;
+  const askPrompt =
+    query.ask === "record" && selectedRecord
+      ? `Analiza el registro ${((typeof getRecordFieldValue(selectedRecord, "name") === "string" && String(getRecordFieldValue(selectedRecord, "name"))) || (typeof getRecordFieldValue(selectedRecord, "company_name") === "string" && String(getRecordFieldValue(selectedRecord, "company_name"))) || (typeof getRecordFieldValue(selectedRecord, "document_name") === "string" && String(getRecordFieldValue(selectedRecord, "document_name"))) || "seleccionado")} y dime que acciones humanas pendientes ves.`
+      : query.ask === "dataset" && currentObject
+        ? `Resume el dataset ${currentObject.name} y sugiere las siguientes acciones operativas.`
+        : null;
 
   let content = (
     <HomeOverviewPanel
@@ -141,33 +147,15 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
   if (selectedTab === "data") {
     content = (
       <DatasetPanel
-        objectName={currentObject?.name ?? "Dataset"}
-        description={
-          currentObject?.description ??
-          "Data views are generated from workspace objects, fields, and saved views."
+        objects={snapshot.objects}
+        fields={snapshot.fields}
+        views={snapshot.views}
+        records={snapshot.records}
+        askHref={
+          currentObject
+            ? `/workspaces/${snapshot.workspace.subdomain}?tab=chat&ask=dataset&object=${currentObject.id}${currentView ? `&view=${currentView.id}` : ""}`
+            : undefined
         }
-        views={snapshot.views
-          .filter((view) => !currentObject || view.objectId === currentObject.id)
-          .map((view) => ({ id: view.id, name: view.name, isSelected: currentView?.id === view.id }))}
-        records={currentRecords.map((record) => ({
-          id: record.id,
-          primaryLabel:
-            (typeof getRecordFieldValue(record, "name") === "string" && String(getRecordFieldValue(record, "name"))) ||
-            (typeof getRecordFieldValue(record, "company_name") === "string" &&
-              String(getRecordFieldValue(record, "company_name"))) ||
-            (typeof getRecordFieldValue(record, "document_name") === "string" &&
-              String(getRecordFieldValue(record, "document_name"))) ||
-            "Record",
-          summary: currentFields
-            .filter((field) => field.key !== "name" && field.key !== "company_name" && field.key !== "document_name")
-            .slice(0, 3)
-            .map((field) => ({
-              label: field.name,
-              value: String(getRecordFieldValue(record, field.key) ?? "—"),
-            })),
-          isSelected: selectedRecord?.id === record.id,
-        }))}
-        fieldLabels={currentFields.map((field) => field.name)}
       />
     );
   }
@@ -196,13 +184,7 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
               "Selected record"
             : null
         }
-        askPrompt={
-          selectedRecord
-            ? `Analiza el registro ${((typeof getRecordFieldValue(selectedRecord, "name") === "string" && String(getRecordFieldValue(selectedRecord, "name"))) || (typeof getRecordFieldValue(selectedRecord, "company_name") === "string" && String(getRecordFieldValue(selectedRecord, "company_name"))) || (typeof getRecordFieldValue(selectedRecord, "document_name") === "string" && String(getRecordFieldValue(selectedRecord, "document_name"))) || "seleccionado")} y dime que acciones humanas pendientes ves.`
-            : currentObject
-              ? `Resume el dataset ${currentObject.name} y sugiere las siguientes acciones.`
-              : null
-        }
+        askPrompt={askPrompt}
         queueSummary={queueItems.slice(0, 5).map((item) => ({
           title: item.title,
           status: item.status,
@@ -240,7 +222,7 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
           currentObject?.description ??
           "The detail panel keeps key fields, history, and AI-generated context in one place."
         }
-        askHref={`/workspaces/${snapshot.workspace.subdomain}?tab=chat`}
+        askHref={`/workspaces/${snapshot.workspace.subdomain}?tab=chat&ask=record${currentObject ? `&object=${currentObject.id}` : ""}${selectedRecord ? `&record=${selectedRecord.id}` : ""}`}
         fields={currentFields.map((field) => ({
           label: field.name,
           value: String(getRecordFieldValue(selectedRecord, field.key) ?? "—"),

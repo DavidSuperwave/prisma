@@ -21,6 +21,20 @@ type ChatRequest = {
   agentId?: string;
   workspace_id?: string;
   workspaceId?: string;
+  app_context?: {
+    current_tab?: string;
+    current_object?: string | null;
+    current_view?: string | null;
+    current_record_title?: string | null;
+    queue_preview?: string[];
+  };
+  appContext?: {
+    current_tab?: string;
+    current_object?: string | null;
+    current_view?: string | null;
+    current_record_title?: string | null;
+    queue_preview?: string[];
+  };
 };
 
 type ChatProvider = "hermes" | "openrouter";
@@ -363,6 +377,7 @@ async function proxyToHermes({
     recentActions: string[];
   } | null;
 }) {
+  const appContext = payload.app_context ?? payload.appContext ?? null;
   const conversationId =
     payload.conversation_id ??
     payload.conversationId ??
@@ -393,8 +408,39 @@ async function proxyToHermes({
     },
   };
 
+  const appContextLines =
+    appContext
+      ? [
+          `Current UI tab: ${appContext.current_tab ?? "unknown"}`,
+          `Current dataset: ${appContext.current_object ?? "none"}`,
+          `Current view: ${appContext.current_view ?? "none"}`,
+          `Current record: ${appContext.current_record_title ?? "none"}`,
+          `Queue preview: ${appContext.queue_preview?.join(", ") || "none"}`,
+        ]
+      : [];
+
   if (model) {
     requestBody.model = model;
+  }
+
+  if (workspaceContext || appContextLines.length > 0) {
+    requestBody.input = buildHermesInput(
+      [
+        ...(workspaceContext
+          ? [
+              `Workspace context: ${workspaceContext.workspaceName} (${workspaceContext.workspaceSlug})`,
+              `Workspace ID: ${workspaceContext.workspaceId}`,
+              `Objects: ${workspaceContext.objectNames.join(", ") || "none"}`,
+              `Agents: ${workspaceContext.agentNames.join(", ") || "none"}`,
+              `Recent activity: ${workspaceContext.recentActions.join(", ") || "none"}`,
+            ]
+          : []),
+        ...appContextLines,
+        "",
+        payload.message,
+      ].join("\n"),
+      payload.history ?? [],
+    );
   }
 
   const hermesResponse = await fetch(`${baseUrl.replace(/\/$/, "")}/v1/responses`, {

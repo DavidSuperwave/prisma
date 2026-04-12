@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   AlertTriangle,
   ArrowRight,
@@ -95,6 +96,13 @@ type ChatPanelProps = {
   workspaceId: string;
   workspaceSlug: string;
   userId: string;
+  contextSummary: {
+    activeTab: string;
+    activeObjectName?: string | null;
+    activeViewName?: string | null;
+    activeRecordName?: string | null;
+    queueTitles: string[];
+  };
   copilotAgent: {
     id: string;
     name: string;
@@ -358,8 +366,9 @@ export function QueuePanel({ queueItems }: QueuePanelProps) {
   );
 }
 
-export function ChatPanel({ workspaceId, workspaceSlug, userId, copilotAgent }: ChatPanelProps) {
+export function ChatPanel({ workspaceId, workspaceSlug, userId, contextSummary, copilotAgent }: ChatPanelProps) {
   const storageKey = `prisma-chat:${workspaceSlug}:${userId}:${copilotAgent?.id ?? "copilot"}`;
+  const router = useRouter();
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string>("");
   const [input, setInput] = useState("");
@@ -473,6 +482,7 @@ export function ChatPanel({ workspaceId, workspaceSlug, userId, copilotAgent }: 
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           workspaceId,
+          workspaceContext: contextSummary,
           agentId: copilotAgent.id,
           conversationId: selectedSession.conversationId,
           message: trimmed,
@@ -536,6 +546,7 @@ export function ChatPanel({ workspaceId, workspaceSlug, userId, copilotAgent }: 
       }));
     } finally {
       setIsLoading(false);
+      window.setTimeout(() => router.refresh(), 400);
     }
   }
 
@@ -646,7 +657,9 @@ export function ChatPanel({ workspaceId, workspaceSlug, userId, copilotAgent }: 
                   style={chatTextareaStyle}
                 />
                 <div style={chatComposerFooterStyle}>
-                  <span style={chatHintStyle}>Sessions persist locally per user/workspace and reuse the named hErmes conversation.</span>
+                  <span style={chatHintStyle}>
+                    Sessions persist locally per user/workspace and include the current tab, dataset, record, and queue context.
+                  </span>
                   <button type="button" onClick={sendMessage} disabled={isLoading || !input.trim()} style={chatSendButtonStyle}>
                     {isLoading ? <LoaderCircle size={16} className="workspace-spin" /> : "Send"}
                   </button>

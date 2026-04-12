@@ -182,6 +182,25 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
         workspaceId={snapshot.workspace.id}
         workspaceSlug={snapshot.workspace.subdomain}
         userId={user.id}
+        currentTab={selectedTab}
+        currentObjectName={currentObject?.name ?? null}
+        currentViewName={currentView?.name ?? null}
+        currentRecordName={
+          selectedRecord
+            ? (typeof getRecordFieldValue(selectedRecord, "name") === "string" &&
+                String(getRecordFieldValue(selectedRecord, "name"))) ||
+              (typeof getRecordFieldValue(selectedRecord, "company_name") === "string" &&
+                String(getRecordFieldValue(selectedRecord, "company_name"))) ||
+              (typeof getRecordFieldValue(selectedRecord, "document_name") === "string" &&
+                String(getRecordFieldValue(selectedRecord, "document_name"))) ||
+              "Selected record"
+            : null
+        }
+        queueSummary={queueItems.slice(0, 5).map((item) => ({
+          title: item.title,
+          status: item.status,
+          subtitle: item.subtitle,
+        }))}
         copilotAgent={
           copilot
             ? {

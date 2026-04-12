@@ -51,3 +51,33 @@
 - Keep service-role operations inside control-plane backend.
 - Pass short-lived scoped tokens to runtime agents.
 - Avoid shared unrestricted DB keys inside hErmes containers.
+
+## Current product maturity notes (UI/UX scope)
+
+- Agent canvas is functional but not complete:
+  - No full deploy/restart controls yet.
+  - No rich editor yet.
+  - No advanced validation yet.
+  - No emergency admin pause/stop flow yet.
+- Team chat is foundational, not complete:
+  - No threaded replies yet.
+  - No read receipts yet.
+  - No search yet.
+  - No notifications yet.
+  - No record preview cards yet.
+  - No persistent member directory UX yet.
+- CRM is bootstrap-level, not full product-level:
+  - No dedicated three-column CRM record detail yet.
+  - No board/kanban pipeline yet.
+  - No rich associations UI yet.
+  - No activity-specific CRM views yet.
+- Dashboard builder via conversation is partially realized:
+  - Quick actions can create presets.
+  - Copilot does not yet parse/confirm/execute arbitrary dashboard-building requests from conversation content.
+
+## Follow-up testing still needed
+
+- Multi-user isolation for team chat.
+- Richer CRUD coverage around CRM records.
+- Cross-workspace security checks for the workspace action routes.
+- End-to-end flows combining team chat + agents + CRM updates.

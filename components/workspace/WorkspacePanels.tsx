@@ -62,6 +62,7 @@ type DataPanelProps = {
   fields: PrismaWorkspaceField[];
   views: PrismaWorkspaceView[];
   records: PrismaWorkspaceRecord[];
+  askHref?: string;
 };
 
 type AgentPanelProps = {
@@ -501,13 +502,17 @@ export function ChatPanel({ workspaceId, workspaceSlug, userId, contextSummary, 
         throw new Error(payload.error ?? "No se pudo subir el documento.");
       }
 
+      const uploadedRecordId = payload.recordId;
+      const uploadedDocumentName = payload.documentName;
+      const uploadedPublicUrl = payload.publicUrl;
+
       updateSession(selectedSession.id, (session) => ({
         ...session,
         attachments: [
           {
-            id: payload.recordId,
-            fileName: payload.documentName,
-            publicUrl: payload.publicUrl,
+            id: uploadedRecordId,
+            fileName: uploadedDocumentName,
+            publicUrl: uploadedPublicUrl,
             contentType: payload.contentType ?? file.type ?? "application/octet-stream",
           },
           ...session.attachments,
@@ -517,7 +522,7 @@ export function ChatPanel({ workspaceId, workspaceSlug, userId, contextSummary, 
           {
             id: `upload-${Date.now()}`,
             role: "assistant",
-            content: `Documento subido: ${payload.documentName}. Se agregó al dataset Documents y el workspace se actualizará.`,
+            content: `Documento subido: ${uploadedDocumentName}. Se agregó al dataset Documents y el workspace se actualizará.`,
             timestamp: currentTimeLabel(),
           },
         ],
@@ -1801,6 +1806,12 @@ const chatSendButtonStyle: React.CSSProperties = {
   display: "inline-flex",
   alignItems: "center",
   gap: 8,
+};
+
+const chatErrorStyle: React.CSSProperties = {
+  margin: 0,
+  color: "#b42318",
+  fontSize: 13,
 };
 
 const agentChatErrorStyle: React.CSSProperties = {

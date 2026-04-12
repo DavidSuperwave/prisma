@@ -252,8 +252,7 @@ async function resolveWorkspaceContext(workspaceIdentifier?: string | null) {
   let workspaceQuery = supabase
     .from("workspaces")
     .select("id, name, subdomain")
-    .limit(1)
-    .maybeSingle();
+    .limit(1);
 
   if (/^[0-9a-fA-F-]{36}$/.test(workspaceIdentifier)) {
     workspaceQuery = workspaceQuery.eq("id", workspaceIdentifier);
@@ -261,7 +260,7 @@ async function resolveWorkspaceContext(workspaceIdentifier?: string | null) {
     workspaceQuery = workspaceQuery.eq("subdomain", workspaceIdentifier);
   }
 
-  const { data: workspaceRow, error: workspaceError } = await workspaceQuery;
+  const { data: workspaceRow, error: workspaceError } = await workspaceQuery.maybeSingle();
   if (workspaceError) {
     throw new Error(workspaceError.message);
   }
@@ -336,14 +335,13 @@ async function resolveAgentRuntime(payload: ChatRequest) {
     .from("workspace_agents")
     .select("id, workspace_id, name, api_endpoint, api_key, status")
     .eq("id", requestedAgentId)
-    .limit(1)
-    .maybeSingle();
+    .limit(1);
 
   if (scopedWorkspaceId && /^[0-9a-fA-F-]{36}$/.test(scopedWorkspaceId)) {
     query = query.eq("workspace_id", scopedWorkspaceId);
   }
 
-  const { data, error } = await query;
+  const { data, error } = await query.maybeSingle();
   if (error) {
     throw new Error(error.message);
   }

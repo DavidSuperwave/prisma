@@ -228,6 +228,71 @@ function buildHermesInput(message: string, history: ChatHistoryMessage[]) {
   return `${transcript}\nUser: ${message.trim()}`;
 }
 
+async function resolveWorkspaceContext(workspaceIdentifier?: string | null) {
+  const supabase = getSupabaseAdmin();
+  if (!supabase || !workspaceIdentifier) {
+    return null;
+  }
+
+  let workspaceId = workspaceIdentifier;
+  let workspaceQuery = supabase
+    .from("workspaces")
+    .select("id, name, subdomain")
+    .limit(1)
+    .maybeSingle();
+
+  if (/^[0-9a-fA-F-]{36}$/.test(workspaceIdentifier)) {
+    workspaceQuery = workspaceQuery.eq("id", workspaceIdentifier);
+  } else {
+    workspaceQuery = workspaceQuery.eq("subdomain", workspaceIdentifier);
+  }
+
+  const { data: workspaceRow, error: workspaceError } = await workspaceQuery;
+  if (workspaceError) {
+    throw new Error(workspaceError.message);
+  }
+
+  if (!workspaceRow) {
+    return null;
+  }
+
+  workspaceId = String(workspaceRow.id);
+
+  const [{ data: objectRows }, { data: agentRows }, { data: activityRows }] = await Promise.all([
+    supabase
+      .from("workspace_objects")
+      .select("name")
+      .eq("workspace_id", workspaceId)
+      .order("created_at", { ascending: true }),
+    supabase
+      .from("workspace_agents")
+      .select("name, type, status")
+      .eq("workspace_id", workspaceId)
+      .order("created_at", { ascending: true }),
+    supabase
+      .from("agent_activity")
+      .select("action")
+      .eq("workspace_id", workspaceId)
+      .order("created_at", { ascending: false })
+      .limit(5),
+  ]);
+
+  const objectNames = (objectRows ?? []).map((row) => String(row.name));
+  const agentNames = (agentRows ?? []).map(
+    (row) => `${String(row.name)} (${String(row.type)}, ${String(row.status)})`,
+  );
+  const recentActions = (activityRows ?? []).map((row) => String(row.action));
+
+  return {
+    workspaceId,
+    workspaceName: String(workspaceRow.name),
+    workspaceSlug: String(workspaceRow.subdomain),
+    objectNames,
+    agentNames,
+    recentActions,
+  };
+}
+
 async function resolveAgentRuntime(payload: ChatRequest) {
   const supabase = getSupabaseAdmin();
   const requestedAgentId = payload.agent_id ?? payload.agentId;
@@ -282,12 +347,21 @@ async function proxyToHermes({
   apiKey,
   model,
   agent,
+  workspaceContext,
 }: {
   payload: ChatRequest & { message: string };
   baseUrl: string;
   apiKey: string;
   model?: string;
   agent?: AgentRuntimeRecord | null;
+  workspaceContext?: {
+    workspaceId: string;
+    workspaceName: string;
+    workspaceSlug: string;
+    objectNames: string[];
+    agentNames: string[];
+    recentActions: string[];
+  } | null;
 }) {
   const conversationId =
     payload.conversation_id ??
@@ -296,7 +370,20 @@ async function proxyToHermes({
     undefined;
 
   const requestBody: Record<string, unknown> = {
-    input: buildHermesInput(payload.message, payload.history ?? []),
+    input: buildHermesInput(
+      workspaceContext
+        ? [
+            `Workspace context: ${workspaceContext.workspaceName} (${workspaceContext.workspaceSlug})`,
+            `Workspace ID: ${workspaceContext.workspaceId}`,
+            `Objects: ${workspaceContext.objectNames.join(", ") || "none"}`,
+            `Agents: ${workspaceContext.agentNames.join(", ") || "none"}`,
+            `Recent activity: ${workspaceContext.recentActions.join(", ") || "none"}`,
+            "",
+            payload.message,
+          ].join("\n")
+        : payload.message,
+      payload.history ?? [],
+    ),
     conversation: conversationId,
     stream: true,
     store: true,
@@ -338,6 +425,8 @@ async function callHermes(payload: ChatRequest & { message: string }) {
     return Response.json({ error: "Selected agent is not active." }, { status: 409 });
   }
 
+  const workspaceContext = await resolveWorkspaceContext(payload.workspace_id ?? payload.workspaceId ?? null);
+
   const baseUrl = agent?.api_endpoint ?? process.env.HERMES_API_BASE_URL;
   const apiKey = agent?.api_key ?? process.env.HERMES_API_KEY;
   const model = agent ? undefined : process.env.HERMES_MODEL ?? undefined;
@@ -349,7 +438,7 @@ async function callHermes(payload: ChatRequest & { message: string }) {
     );
   }
 
-  return proxyToHermes({ payload, baseUrl, apiKey, model, agent });
+  return proxyToHermes({ payload, baseUrl, apiKey, model, agent, workspaceContext });
 }
 
 async function callOpenRouter(payload: ChatRequest & { message: string }) {

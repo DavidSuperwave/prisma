@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   ArrowRight,
@@ -10,6 +10,7 @@ import {
   FileStack,
   Filter,
   Layers3,
+  LoaderCircle,
   MessageSquare,
   Search,
   ShieldCheck,
@@ -90,6 +91,18 @@ type QueuePanelProps = {
   }>;
 };
 
+type ChatPanelProps = {
+  workspaceId: string;
+  workspaceSlug: string;
+  userId: string;
+  copilotAgent: {
+    id: string;
+    name: string;
+    status: string;
+    description: string | null;
+  } | null;
+};
+
 type RecordDetailPanelProps = {
   title: string;
   status: string;
@@ -105,6 +118,21 @@ type RecordDetailPanelProps = {
     detail: string;
     timestamp: string;
   }>;
+};
+
+type ChatMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  timestamp: string;
+};
+
+type ChatSession = {
+  id: string;
+  title: string;
+  conversationId: string;
+  messages: ChatMessage[];
+  updatedAt: string;
 };
 
 function Panel({
@@ -130,6 +158,32 @@ function Panel({
       {children}
     </section>
   );
+}
+
+function createSession(userId: string) {
+  const sessionId = typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}`;
+  return {
+    id: sessionId,
+    title: "New chat",
+    conversationId: `user-${userId}-${sessionId}`,
+    messages: [],
+    updatedAt: new Date().toISOString(),
+  } satisfies ChatSession;
+}
+
+function parseSseChunk(chunk: string) {
+  return chunk
+    .split("\n\n")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .flatMap((part) => part.split("\n").filter((line) => line.startsWith("data: ")).map((line) => line.slice(6)));
+}
+
+function currentTimeLabel() {
+  return new Intl.DateTimeFormat("es-MX", {
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date());
 }
 
 export function OverviewPanel({ metrics, queueItems, activity, suggestions, agents }: OverviewProps) {
@@ -297,6 +351,309 @@ export function QueuePanel({ queueItems }: QueuePanelProps) {
                 <StatusPill tone={item.status.toLowerCase()}>{item.status}</StatusPill>
               </div>
             ))}
+          </div>
+        )}
+      </Panel>
+    </div>
+  );
+}
+
+export function ChatPanel({ workspaceId, workspaceSlug, userId, copilotAgent }: ChatPanelProps) {
+  const storageKey = `prisma-chat:${workspaceSlug}:${userId}:${copilotAgent?.id ?? "copilot"}`;
+  const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const [selectedSessionId, setSelectedSessionId] = useState<string>("");
+  const [input, setInput] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const fallbackSession = createSession(userId);
+    const stored = window.localStorage.getItem(storageKey);
+    if (!stored) {
+      setSessions([fallbackSession]);
+      setSelectedSessionId(fallbackSession.id);
+      return;
+    }
+
+    try {
+      const parsed = JSON.parse(stored) as ChatSession[];
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        setSessions(parsed);
+        setSelectedSessionId(parsed[0].id);
+        return;
+      }
+    } catch {
+      // ignore invalid cache
+    }
+
+    setSessions([fallbackSession]);
+    setSelectedSessionId(fallbackSession.id);
+  }, [storageKey, userId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || sessions.length === 0) {
+      return;
+    }
+    window.localStorage.setItem(storageKey, JSON.stringify(sessions));
+  }, [sessions, storageKey]);
+
+  const selectedSession = sessions.find((session) => session.id === selectedSessionId) ?? sessions[0] ?? null;
+
+  function updateSession(sessionId: string, updater: (session: ChatSession) => ChatSession) {
+    setSessions((current) =>
+      current
+        .map((session) => (session.id === sessionId ? updater(session) : session))
+        .sort((left, right) => (left.updatedAt < right.updatedAt ? 1 : -1)),
+    );
+  }
+
+  function createNewChat() {
+    const session = createSession(userId);
+    setSessions((current) => [session, ...current]);
+    setSelectedSessionId(session.id);
+    setInput("");
+    setError(null);
+  }
+
+  function deleteSession(sessionId: string) {
+    setSessions((current) => {
+      const next = current.filter((session) => session.id !== sessionId);
+      if (next.length > 0) {
+        return next;
+      }
+      return [createSession(userId)];
+    });
+    setSelectedSessionId((current) => {
+      if (current !== sessionId) {
+        return current;
+      }
+      return "";
+    });
+  }
+
+  async function sendMessage() {
+    const trimmed = input.trim();
+    if (!trimmed || !selectedSession || !copilotAgent || isLoading) {
+      return;
+    }
+
+    setIsLoading(true);
+    setError(null);
+
+    const userMessage: ChatMessage = {
+      id: `user-${Date.now()}`,
+      role: "user",
+      content: trimmed,
+      timestamp: currentTimeLabel(),
+    };
+    const assistantId = `assistant-${Date.now()}`;
+    const assistantMessage: ChatMessage = {
+      id: assistantId,
+      role: "assistant",
+      content: "",
+      timestamp: currentTimeLabel(),
+    };
+
+    const optimisticMessages = [...selectedSession.messages, userMessage, assistantMessage];
+    updateSession(selectedSession.id, (session) => ({
+      ...session,
+      title: session.messages.length === 0 ? trimmed.slice(0, 36) : session.title,
+      messages: optimisticMessages,
+      updatedAt: new Date().toISOString(),
+    }));
+    setInput("");
+
+    try {
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId,
+          agentId: copilotAgent.id,
+          conversationId: selectedSession.conversationId,
+          message: trimmed,
+          history: selectedSession.messages.map((message) => ({
+            role: message.role,
+            content: message.content,
+          })),
+        }),
+      });
+
+      if (!response.ok || !response.body) {
+        throw new Error("No se pudo conectar con el CEO agent.");
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          break;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+        const parts = parseSseChunk(buffer);
+        const endedWithBoundary = buffer.endsWith("\n\n");
+        buffer = endedWithBoundary ? "" : buffer.slice(buffer.lastIndexOf("\n\n") + 2);
+
+        for (const part of parts) {
+          const payload = JSON.parse(part) as { type: string; content?: string; error?: string };
+          if (payload.type === "delta" && payload.content) {
+            updateSession(selectedSession.id, (session) => ({
+              ...session,
+              messages: session.messages.map((message) =>
+                message.id === assistantId ? { ...message, content: `${message.content}${payload.content}` } : message,
+              ),
+              updatedAt: new Date().toISOString(),
+            }));
+          }
+
+          if (payload.type === "error") {
+            throw new Error(payload.error ?? "Error al generar respuesta.");
+          }
+        }
+      }
+    } catch (caughtError) {
+      const message = caughtError instanceof Error ? caughtError.message : "Error desconocido";
+      setError(message);
+      updateSession(selectedSession.id, (session) => ({
+        ...session,
+        messages: session.messages.map((message) =>
+          message.id === assistantId
+            ? {
+                ...message,
+                content: "No pude responder en este momento. Intenta de nuevo o revisa la configuracion del runtime.",
+              }
+            : message,
+        ),
+        updatedAt: new Date().toISOString(),
+      }));
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  return (
+    <div style={stackStyle}>
+      <Panel
+        eyebrow="Chat"
+        title="CEO agent chat"
+        description="Conversation-first workspace intelligence with persistent named sessions for the current user."
+      >
+        {!copilotAgent ? (
+          <EmptyState
+            icon={Bot}
+            title="No CEO agent available"
+            description="Seed or deploy a copilot agent before using the workspace chat surface."
+          />
+        ) : (
+          <div style={chatLayoutStyle}>
+            <div style={chatSidebarStyle}>
+              <div style={chatSidebarHeaderStyle}>
+                <div>
+                  <p style={eyebrowStyle}>Sessions</p>
+                  <p style={chatSidebarCopyStyle}>{copilotAgent.name}</p>
+                </div>
+                <button type="button" onClick={createNewChat} style={chatActionButtonStyle}>
+                  New chat
+                </button>
+              </div>
+
+              <div style={chatSessionListStyle}>
+                {sessions.map((session) => (
+                  <div
+                    key={session.id}
+                    style={{
+                      ...chatSessionCardStyle,
+                      borderColor:
+                        selectedSession?.id === session.id ? "rgba(51, 92, 255, 0.22)" : "var(--workspace-border)",
+                      background:
+                        selectedSession?.id === session.id ? "rgba(51, 92, 255, 0.05)" : "var(--workspace-panel)",
+                    }}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => setSelectedSessionId(session.id)}
+                      style={chatSessionButtonStyle}
+                    >
+                      <strong style={chatSessionTitleStyle}>{session.title}</strong>
+                      <span style={chatSessionMetaStyle}>
+                        {session.messages.length ? `${session.messages.length} messages` : "Fresh session"}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => deleteSession(session.id)}
+                      style={chatDeleteButtonStyle}
+                      aria-label={`Delete ${session.title}`}
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div style={chatMainStyle}>
+              <div style={chatHeaderStyle}>
+                <div>
+                  <p style={eyebrowStyle}>Current conversation</p>
+                  <h3 style={chatTitleStyle}>{selectedSession?.title ?? "New chat"}</h3>
+                </div>
+                <StatusPill tone={copilotAgent.status.toLowerCase()}>{copilotAgent.status}</StatusPill>
+              </div>
+
+              <div style={chatMessagesStyle}>
+                {selectedSession?.messages.length ? (
+                  selectedSession.messages.map((message) => (
+                    <div
+                      key={message.id}
+                      style={{
+                        ...chatBubbleStyle,
+                        alignSelf: message.role === "user" ? "flex-end" : "flex-start",
+                        background:
+                          message.role === "user" ? "rgba(17, 24, 39, 0.94)" : "rgba(255, 255, 255, 0.96)",
+                        color: message.role === "user" ? "#fff" : "var(--workspace-text)",
+                      }}
+                    >
+                      <p style={{ margin: 0, whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{message.content || "..."}</p>
+                      <span style={{ ...chatTimestampStyle, color: message.role === "user" ? "rgba(255,255,255,0.7)" : "var(--workspace-muted)" }}>
+                        {message.timestamp}
+                      </span>
+                    </div>
+                  ))
+                ) : (
+                  <EmptyState
+                    icon={MessageSquare}
+                    title="Start the first conversation"
+                    description="Ask the CEO agent about this workspace, what changed today, or what dataset needs attention next."
+                  />
+                )}
+              </div>
+
+              <div style={chatComposerStyle}>
+                <textarea
+                  value={input}
+                  onChange={(event) => setInput(event.target.value)}
+                  placeholder="Ask the CEO agent about this workspace..."
+                  rows={4}
+                  style={chatTextareaStyle}
+                />
+                <div style={chatComposerFooterStyle}>
+                  <span style={chatHintStyle}>Sessions persist locally per user/workspace and reuse the named hErmes conversation.</span>
+                  <button type="button" onClick={sendMessage} disabled={isLoading || !input.trim()} style={chatSendButtonStyle}>
+                    {isLoading ? <LoaderCircle size={16} className="workspace-spin" /> : "Send"}
+                  </button>
+                </div>
+                {error ? <p style={chatErrorStyle}>{error}</p> : null}
+              </div>
+            </div>
           </div>
         )}
       </Panel>
@@ -711,7 +1068,7 @@ export function AgentsPanel({ agents, activity }: AgentPanelProps) {
                       {isSending ? "Sending..." : "Send"}
                     </button>
                   </div>
-                  {chatError ? <p style={chatErrorStyle}>{chatError}</p> : null}
+                  {chatError ? <p style={agentChatErrorStyle}>{chatError}</p> : null}
                 </div>
               </>
             ) : (
@@ -1028,6 +1385,194 @@ const queueTableRowStyle: React.CSSProperties = {
   alignItems: "center",
   justifyContent: "space-between",
   gap: 16,
+};
+
+const chatLayoutStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "300px minmax(0, 1fr)",
+  gap: 20,
+};
+
+const chatSidebarStyle: React.CSSProperties = {
+  borderRadius: 22,
+  border: "1px solid var(--workspace-border)",
+  background: "var(--workspace-panel-soft)",
+  padding: 16,
+  display: "grid",
+  gap: 14,
+  alignContent: "start",
+};
+
+const chatSidebarHeaderStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "flex-start",
+  justifyContent: "space-between",
+  gap: 12,
+};
+
+const chatSidebarCopyStyle: React.CSSProperties = {
+  margin: "4px 0 0",
+  color: "var(--workspace-muted)",
+  fontSize: 13,
+};
+
+const chatActionButtonStyle: React.CSSProperties = {
+  borderRadius: 999,
+  border: "1px solid var(--workspace-border)",
+  background: "var(--workspace-panel)",
+  padding: "8px 12px",
+  fontSize: 12,
+  fontWeight: 700,
+  color: "var(--workspace-text)",
+  cursor: "pointer",
+};
+
+const chatSessionListStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 10,
+};
+
+const chatSessionCardStyle: React.CSSProperties = {
+  borderRadius: 16,
+  border: "1px solid var(--workspace-border)",
+  background: "var(--workspace-panel)",
+  padding: 10,
+  display: "grid",
+  gridTemplateColumns: "minmax(0, 1fr) auto",
+  gap: 10,
+  alignItems: "center",
+};
+
+const chatSessionButtonStyle: React.CSSProperties = {
+  border: "none",
+  background: "transparent",
+  textAlign: "left",
+  cursor: "pointer",
+  display: "grid",
+  gap: 4,
+  padding: 0,
+};
+
+const chatSessionTitleStyle: React.CSSProperties = {
+  color: "var(--workspace-text)",
+  fontSize: 14,
+  lineHeight: 1.3,
+};
+
+const chatSessionMetaStyle: React.CSSProperties = {
+  color: "var(--workspace-muted)",
+  fontSize: 12,
+};
+
+const chatDeleteButtonStyle: React.CSSProperties = {
+  border: "none",
+  background: "transparent",
+  color: "var(--workspace-muted)",
+  cursor: "pointer",
+  fontSize: 20,
+  lineHeight: 1,
+  width: 28,
+  height: 28,
+};
+
+const chatMainStyle: React.CSSProperties = {
+  borderRadius: 22,
+  border: "1px solid var(--workspace-border)",
+  background: "var(--workspace-panel)",
+  padding: 18,
+  display: "grid",
+  gap: 16,
+  minHeight: 640,
+};
+
+const chatHeaderStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "flex-start",
+  justifyContent: "space-between",
+  gap: 14,
+};
+
+const chatTitleStyle: React.CSSProperties = {
+  margin: "4px 0 0",
+  fontFamily: "var(--font-display)",
+  fontSize: 28,
+  lineHeight: 1.1,
+  color: "var(--workspace-text)",
+};
+
+const chatMessagesStyle: React.CSSProperties = {
+  borderRadius: 18,
+  border: "1px solid var(--workspace-border)",
+  background: "rgba(247, 247, 242, 0.6)",
+  padding: 16,
+  minHeight: 360,
+  display: "flex",
+  flexDirection: "column",
+  gap: 12,
+  overflowY: "auto",
+};
+
+const chatBubbleStyle: React.CSSProperties = {
+  maxWidth: "78%",
+  borderRadius: 18,
+  padding: "12px 14px",
+  display: "grid",
+  gap: 8,
+  boxShadow: "0 12px 28px rgba(15, 23, 42, 0.06)",
+};
+
+const chatTimestampStyle: React.CSSProperties = {
+  fontSize: 11,
+  color: "var(--workspace-muted)",
+};
+
+const chatComposerStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 10,
+};
+
+const chatTextareaStyle: React.CSSProperties = {
+  width: "100%",
+  borderRadius: 18,
+  border: "1px solid var(--workspace-border)",
+  background: "var(--workspace-surface)",
+  padding: "14px 16px",
+  font: "inherit",
+  color: "var(--workspace-text)",
+  resize: "vertical",
+  outline: "none",
+};
+
+const chatComposerFooterStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 16,
+};
+
+const chatHintStyle: React.CSSProperties = {
+  color: "var(--workspace-muted)",
+  fontSize: 12,
+  lineHeight: 1.5,
+};
+
+const chatSendButtonStyle: React.CSSProperties = {
+  borderRadius: 999,
+  border: "none",
+  padding: "10px 16px",
+  background: "#111827",
+  color: "#fff",
+  fontWeight: 700,
+  cursor: "pointer",
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 8,
+};
+
+const agentChatErrorStyle: React.CSSProperties = {
+  margin: 0,
+  color: "#b42318",
+  fontSize: 13,
 };
 
 const activityListStyle: React.CSSProperties = {
@@ -1451,12 +1996,6 @@ const chatButtonStyle: React.CSSProperties = {
   padding: "10px 14px",
   fontWeight: 700,
   font: "inherit",
-};
-
-const chatErrorStyle: React.CSSProperties = {
-  margin: 0,
-  color: "#b42318",
-  fontSize: 13,
 };
 
 const pillStyle: React.CSSProperties = {

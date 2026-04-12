@@ -7,6 +7,7 @@ type NavItem = {
   href: string;
   active?: boolean;
   badge?: number;
+  hidden?: boolean;
 };
 
 type ContextRail = {
@@ -18,32 +19,34 @@ type ContextRail = {
 type Props = {
   workspaceName: string;
   workspaceSlug: string;
+  workspaceLogoUrl?: string | null;
   accentColor?: string | null;
   navItems: NavItem[];
   contextRail: ContextRail;
-  roleLabel?: string;
-  userEmail?: string;
+  currentRole?: string | null;
+  currentUserEmail?: string | null;
   children: React.ReactNode;
 };
 
 export function WorkspaceShell({
   workspaceName,
   workspaceSlug,
+  workspaceLogoUrl,
   accentColor,
   navItems,
   contextRail,
-  roleLabel,
-  userEmail,
+  currentRole,
+  currentUserEmail,
   children,
 }: Props) {
   const groupedItems = [
     {
       label: "Operate",
-      items: navItems.filter((item) => ["home", "queue", "record"].includes(item.id)),
+      items: navItems.filter((item) => ["home", "chat", "queue", "record"].includes(item.id) && !item.hidden),
     },
     {
       label: "Workspace",
-      items: navItems.filter((item) => ["data", "agents"].includes(item.id)),
+      items: navItems.filter((item) => ["data", "agents"].includes(item.id) && !item.hidden),
     },
   ].filter((group) => group.items.length > 0);
 
@@ -66,9 +69,19 @@ export function WorkspaceShell({
                   justifyContent: "center",
                   fontWeight: 700,
                   boxShadow: "0 10px 24px rgba(51, 92, 255, 0.22)",
+                  overflow: "hidden",
                 }}
               >
-                {workspaceName.slice(0, 1)}
+                {workspaceLogoUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={workspaceLogoUrl}
+                    alt={`${workspaceName} logo`}
+                    style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                  />
+                ) : (
+                  workspaceName.slice(0, 1)
+                )}
               </div>
               <div>
                 <h1 className="workspace-brand__title">{workspaceName}</h1>
@@ -91,6 +104,7 @@ export function WorkspaceShell({
                       <p className="workspace-nav__title">{item.label}</p>
                       <p className="workspace-nav__meta">
                         {item.id === "home" && "Overview, queue, suggestions"}
+                        {item.id === "chat" && "CEO agent conversations"}
                         {item.id === "queue" && "Priority actions waiting"}
                         {item.id === "data" && "Dynamic views and saved filters"}
                         {item.id === "record" && "Context-rich record surface"}
@@ -111,13 +125,13 @@ export function WorkspaceShell({
             Database first. CEO agent for coordination. Worker agents for tightly scoped work.
           </div>
 
-          {userEmail ? (
+          {currentUserEmail ? (
             <div className="workspace-hero-note">
               <p className="workspace-card__eyebrow">Signed in</p>
               <div style={{ display: "grid", gap: 6 }}>
-                <strong style={{ color: "#111827", fontSize: 14 }}>{userEmail}</strong>
+                <strong style={{ color: "#111827", fontSize: 14 }}>{currentUserEmail}</strong>
                 <span style={{ color: "#6b7280", fontSize: 13 }}>
-                  {roleLabel ? `Workspace role: ${roleLabel}` : "Workspace member"}
+                  {currentRole ? `Workspace role: ${currentRole}` : "Workspace member"}
                 </span>
               </div>
             </div>

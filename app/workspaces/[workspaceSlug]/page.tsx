@@ -7,6 +7,7 @@ import {
 import { WorkspaceShell } from "@/components/workspace/WorkspaceShell";
 import {
   AgentOverviewPanel,
+  ChatPanel,
   DatasetPanel,
   HomeOverviewPanel,
   QueuePanel,
@@ -121,6 +122,7 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
 
   const queueItems = deriveQueueItems(snapshot.objects, snapshot.records);
   const selectedTab = query.tab ?? "home";
+  const copilot = snapshot.agents.find((agent) => agent.type === "copilot") ?? snapshot.agents[0] ?? null;
 
   let content = (
     <HomeOverviewPanel
@@ -172,6 +174,26 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
 
   if (selectedTab === "queue") {
     content = <QueuePanel queueItems={queueItems} />;
+  }
+
+  if (selectedTab === "chat") {
+    content = (
+      <ChatPanel
+        workspaceId={snapshot.workspace.id}
+        workspaceSlug={snapshot.workspace.subdomain}
+        userId={user.id}
+        copilotAgent={
+          copilot
+            ? {
+                id: copilot.id,
+                name: copilot.name,
+                status: copilot.status,
+                description: copilot.description,
+              }
+            : null
+        }
+      />
+    );
   }
 
   if (selectedTab === "record" && selectedRecord) {
@@ -237,6 +259,12 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
       currentUserEmail={user.email}
       currentRole={membership.role}
       navItems={[
+        {
+          id: "chat",
+          label: "Chat",
+          href: `/workspaces/${snapshot.workspace.subdomain}?tab=chat`,
+          active: selectedTab === "chat",
+        },
         { id: "home", label: "Home", href: `/workspaces/${snapshot.workspace.subdomain}?tab=home`, active: selectedTab === "home" },
         {
           id: "queue",

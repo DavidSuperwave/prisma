@@ -167,6 +167,34 @@ type RecordDetailPanelProps = {
   }>;
 };
 
+type TeamChatPanelProps = {
+  workspaceSlug: string;
+  workspaceName: string;
+  currentUserEmail?: string | null;
+  channels: Array<{
+    id: string;
+    name: string;
+    description?: string;
+    isDefault: boolean;
+    isPrivate: boolean;
+  }>;
+  directMessages: Array<{
+    id: string;
+    participantIds: string[];
+    lastMessageAt?: string;
+  }>;
+  messages: Array<{
+    id: string;
+    channelId?: string;
+    directMessageId?: string;
+    senderLabel: string;
+    content: string;
+    createdAt: string;
+    mentions: string[];
+    recordLinks: Array<{ title: string; href: string }>;
+  }>;
+};
+
 type ChatMessage = {
   id: string;
   role: "user" | "assistant";
@@ -1847,6 +1875,321 @@ export function AgentsPanel({
   );
 }
 
+export function TeamChatPanel({ workspaceSlug, workspaceName, currentUserEmail }: TeamChatPanelProps) {
+  const [channels, setChannels] = useState<Array<{ id: string; name: string; description?: string; isPrivate: boolean }>>([]);
+  const [directMessages, setDirectMessages] = useState<Array<{ id: string; title: string; participantEmails: string[] }>>([]);
+  const [selectedScope, setSelectedScope] = useState<{ type: "channel" | "dm"; id: string } | null>(null);
+  const [messages, setMessages] = useState<
+    Array<{
+      id: string;
+      senderEmail: string;
+      content: string;
+      messageType: "message" | "post" | "system";
+      createdAt: string;
+      mentions: string[];
+    }>
+  >([]);
+  const [input, setInput] = useState("");
+  const [newChannelName, setNewChannelName] = useState("");
+  const [newDmEmails, setNewDmEmails] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  async function loadThread(scope?: { type: "channel" | "dm"; id: string } | null) {
+    const target = scope ?? selectedScope;
+    if (!target) return;
+    setIsLoading(true);
+    setError("");
+    try {
+      const response = await fetch(
+        `/api/workspaces/${workspaceSlug}/team-chat?scopeType=${target.type}&scopeId=${encodeURIComponent(target.id)}`,
+      );
+      const data = (await response.json()) as {
+        error?: string;
+        channels?: Array<{ id: string; name: string; description?: string; isPrivate: boolean }>;
+        directMessages?: Array<{ id: string; title: string; participantEmails: string[] }>;
+        messages?: Array<{
+          id: string;
+          senderEmail: string;
+          content: string;
+          messageType: "message" | "post" | "system";
+          createdAt: string;
+          mentions: string[];
+        }>;
+      };
+      if (!response.ok) {
+        throw new Error(data.error ?? "No se pudo cargar el chat.");
+      }
+      setChannels(data.channels ?? []);
+      setDirectMessages(data.directMessages ?? []);
+      setMessages(data.messages ?? []);
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "No se pudo cargar el chat.");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    const initialScope = async () => {
+      setIsLoading(true);
+      try {
+        const response = await fetch(`/api/workspaces/${workspaceSlug}/team-chat`);
+        const data = (await response.json()) as {
+          error?: string;
+          channels?: Array<{ id: string; name: string; description?: string; isPrivate: boolean }>;
+          directMessages?: Array<{ id: string; title: string; participantEmails: string[] }>;
+        };
+        if (!response.ok) {
+          throw new Error(data.error ?? "No se pudo cargar los canales.");
+        }
+        const loadedChannels = data.channels ?? [];
+        const loadedDms = data.directMessages ?? [];
+        setChannels(loadedChannels);
+        setDirectMessages(loadedDms);
+        if (loadedChannels[0]) {
+          const nextScope = { type: "channel" as const, id: loadedChannels[0].id };
+          setSelectedScope(nextScope);
+          await loadThread(nextScope);
+        } else if (loadedDms[0]) {
+          const nextScope = { type: "dm" as const, id: loadedDms[0].id };
+          setSelectedScope(nextScope);
+          await loadThread(nextScope);
+        }
+      } catch (caughtError) {
+        setError(caughtError instanceof Error ? caughtError.message : "No se pudo cargar los canales.");
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    void initialScope();
+  }, [workspaceSlug]);
+
+  async function createChannel() {
+    if (!newChannelName.trim()) return;
+    setError("");
+    const response = await fetch(`/api/workspaces/${workspaceSlug}/team-chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "channel", name: newChannelName, description: `Canal de ${newChannelName}` }),
+    });
+    const data = (await response.json()) as { error?: string; channel?: { id: string; name: string } };
+    if (!response.ok || !data.channel) {
+      setError(data.error ?? "No se pudo crear el canal.");
+      return;
+    }
+    setNewChannelName("");
+    const nextScope = { type: "channel" as const, id: data.channel.id };
+    setSelectedScope(nextScope);
+    await loadThread(nextScope);
+  }
+
+  async function createDirectMessage() {
+    const participants = newDmEmails
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+    if (!participants.length) return;
+    setError("");
+    const response = await fetch(`/api/workspaces/${workspaceSlug}/team-chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "dm", participantEmails: participants }),
+    });
+    const data = (await response.json()) as { error?: string; directMessage?: { id: string } };
+    if (!response.ok || !data.directMessage) {
+      setError(data.error ?? "No se pudo crear el mensaje directo.");
+      return;
+    }
+    setNewDmEmails("");
+    const nextScope = { type: "dm" as const, id: data.directMessage.id };
+    setSelectedScope(nextScope);
+    await loadThread(nextScope);
+  }
+
+  async function sendMessage() {
+    if (!selectedScope || !input.trim()) return;
+    const response = await fetch(`/api/workspaces/${workspaceSlug}/team-chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mode: "message",
+        scopeType: selectedScope.type,
+        scopeId: selectedScope.id,
+        content: input,
+      }),
+    });
+    const data = (await response.json()) as { error?: string };
+    if (!response.ok) {
+      setError(data.error ?? "No se pudo enviar el mensaje.");
+      return;
+    }
+    setInput("");
+    await loadThread(selectedScope);
+  }
+
+  return (
+    <div style={stackStyle}>
+      <Panel
+        eyebrow="Team chat"
+        title="Colaboración del equipo"
+        description={`Canales y mensajes directos conectados al contexto de ${workspaceName}.`}
+      >
+        <div style={teamChatLayoutStyle}>
+          <aside style={teamChatSidebarStyle}>
+            <div style={detailRailStyle}>
+              <h4 style={detailRailTitleStyle}>Canales</h4>
+              <div style={teamChatCreateRowStyle}>
+                <input
+                  value={newChannelName}
+                  onChange={(event) => setNewChannelName(event.target.value)}
+                  placeholder="Nuevo canal"
+                  style={chatInputStyle}
+                />
+                <button type="button" onClick={createChannel} style={chatButtonStyle}>
+                  Crear
+                </button>
+              </div>
+              <div style={detailListStyle}>
+                {channels.map((channel) => (
+                  <button
+                    key={channel.id}
+                    type="button"
+                    onClick={() => {
+                      const nextScope = { type: "channel" as const, id: channel.id };
+                      setSelectedScope(nextScope);
+                      void loadThread(nextScope);
+                    }}
+                    style={{
+                      ...teamChatThreadButtonStyle,
+                      borderColor:
+                        selectedScope?.type === "channel" && selectedScope.id === channel.id
+                          ? "rgba(51, 92, 255, 0.24)"
+                          : "var(--workspace-border)",
+                    }}
+                  >
+                    <span style={teamChatThreadTitleStyle}>#{channel.name}</span>
+                    {channel.description ? <span style={queueSubtitleStyle}>{channel.description}</span> : null}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div style={detailRailStyle}>
+              <h4 style={detailRailTitleStyle}>Mensajes directos</h4>
+              <div style={teamChatCreateRowStyle}>
+                <input
+                  value={newDmEmails}
+                  onChange={(event) => setNewDmEmails(event.target.value)}
+                  placeholder="correo1@x.com, correo2@x.com"
+                  style={chatInputStyle}
+                />
+                <button type="button" onClick={createDirectMessage} style={chatButtonStyle}>
+                  Crear
+                </button>
+              </div>
+              <div style={detailListStyle}>
+                {directMessages.map((dm) => (
+                  <button
+                    key={dm.id}
+                    type="button"
+                    onClick={() => {
+                      const nextScope = { type: "dm" as const, id: dm.id };
+                      setSelectedScope(nextScope);
+                      void loadThread(nextScope);
+                    }}
+                    style={{
+                      ...teamChatThreadButtonStyle,
+                      borderColor:
+                        selectedScope?.type === "dm" && selectedScope.id === dm.id
+                          ? "rgba(51, 92, 255, 0.24)"
+                          : "var(--workspace-border)",
+                    }}
+                  >
+                    <span style={teamChatThreadTitleStyle}>{dm.title}</span>
+                    <span style={queueSubtitleStyle}>{dm.participantEmails.join(", ")}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </aside>
+
+          <section style={teamChatMainStyle}>
+            <div style={chatHeaderStyle}>
+              <div>
+                <p style={eyebrowStyle}>{selectedScope?.type === "dm" ? "Directo" : "Canal"}</p>
+                <h3 style={chatTitleStyle}>
+                  {selectedScope
+                    ? selectedScope.type === "dm"
+                      ? directMessages.find((entry) => entry.id === selectedScope.id)?.title ?? "Mensaje directo"
+                      : `#${channels.find((entry) => entry.id === selectedScope.id)?.name ?? "general"}`
+                    : "Selecciona una conversación"}
+                </h3>
+              </div>
+              {currentUserEmail ? <StatusPill tone="info">{currentUserEmail}</StatusPill> : null}
+            </div>
+
+            <div style={chatMessagesStyle}>
+              {messages.length ? (
+                messages.map((message) => (
+                  <div
+                    key={message.id}
+                    style={{
+                      ...chatBubbleStyle,
+                      alignSelf:
+                        currentUserEmail && message.senderEmail.toLowerCase() === currentUserEmail.toLowerCase()
+                          ? "flex-end"
+                          : "flex-start",
+                      background:
+                        currentUserEmail && message.senderEmail.toLowerCase() === currentUserEmail.toLowerCase()
+                          ? "rgba(17, 24, 39, 0.94)"
+                          : "rgba(255, 255, 255, 0.96)",
+                      color:
+                        currentUserEmail && message.senderEmail.toLowerCase() === currentUserEmail.toLowerCase()
+                          ? "#fff"
+                          : "var(--workspace-text)",
+                    }}
+                  >
+                    <strong style={agentChatRoleStyle}>{message.senderEmail}</strong>
+                    <p style={{ margin: 0, whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{message.content}</p>
+                    {message.mentions.length ? (
+                      <span style={queueSubtitleStyle}>Menciones: {message.mentions.join(", ")}</span>
+                    ) : null}
+                    <span style={chatTimestampStyle}>{new Date(message.createdAt).toLocaleString("es-MX")}</span>
+                  </div>
+                ))
+              ) : (
+                <EmptyState
+                  icon={MessageSquare}
+                  title="Sin mensajes todavía"
+                  description="Empieza una conversación del equipo, menciona a alguien con @correo o crea un canal nuevo."
+                />
+              )}
+            </div>
+
+            <div style={chatComposerStyle}>
+              <textarea
+                value={input}
+                onChange={(event) => setInput(event.target.value)}
+                placeholder="Escribe un mensaje, usa @correo para mencionar, o pega links a registros..."
+                rows={4}
+                style={chatTextareaStyle}
+              />
+              <div style={chatComposerFooterStyle}>
+                <button type="button" onClick={sendMessage} style={chatSendButtonStyle} disabled={!selectedScope || !input.trim()}>
+                  Enviar
+                </button>
+              </div>
+              {error ? <p style={chatErrorStyle}>{error}</p> : null}
+              {isLoading ? <p style={queueSubtitleStyle}>Cargando conversación...</p> : null}
+            </div>
+          </section>
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
 export function RecordDetailPanel({
   title,
   status,
@@ -2329,6 +2672,88 @@ const chatSearchCardStyle: React.CSSProperties = {
   padding: "14px 16px",
   color: "var(--workspace-muted)",
   fontSize: 14,
+};
+
+const teamChatLayoutStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "320px minmax(0, 1fr)",
+  gap: 20,
+};
+
+const teamChatSidebarStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 16,
+  alignContent: "start",
+};
+
+const teamChatCreateRowStyle: React.CSSProperties = {
+  display: "flex",
+  gap: 8,
+  alignItems: "center",
+};
+
+const teamChatListButtonStyle: React.CSSProperties = {
+  width: "100%",
+  border: "1px solid var(--workspace-border)",
+  borderRadius: 14,
+  background: "var(--workspace-panel)",
+  color: "var(--workspace-text)",
+  padding: "12px 14px",
+  textAlign: "left",
+  cursor: "pointer",
+  display: "grid",
+  gap: 4,
+};
+
+const teamChatThreadButtonStyle: React.CSSProperties = {
+  ...teamChatListButtonStyle,
+  background: "var(--workspace-panel-soft)",
+};
+
+const teamChatThreadTitleStyle: React.CSSProperties = {
+  fontWeight: 700,
+  color: "var(--workspace-text)",
+};
+
+const teamChatMainStyle: React.CSSProperties = {
+  borderRadius: 22,
+  border: "1px solid var(--workspace-border)",
+  background: "var(--workspace-panel)",
+  padding: 18,
+  display: "grid",
+  gap: 16,
+  minHeight: 620,
+};
+
+const teamChatHeaderMetaStyle: React.CSSProperties = {
+  margin: "4px 0 0",
+  color: "var(--workspace-muted)",
+  fontSize: 13,
+};
+
+const teamChatMessageListStyle: React.CSSProperties = {
+  borderRadius: 18,
+  border: "1px solid var(--workspace-border)",
+  background: "rgba(247, 247, 242, 0.6)",
+  padding: 16,
+  minHeight: 360,
+  display: "grid",
+  gap: 10,
+  alignContent: "start",
+  overflowY: "auto",
+};
+
+const teamChatMessageBubbleStyle: React.CSSProperties = {
+  maxWidth: "88%",
+  borderRadius: 16,
+  padding: "12px 14px",
+  display: "grid",
+  gap: 6,
+};
+
+const teamChatComposerBoxStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 10,
 };
 
 const metricCardStyle: React.CSSProperties = {

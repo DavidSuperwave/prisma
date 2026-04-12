@@ -5,6 +5,7 @@ import {
   getRecordFieldValue,
 } from "@/lib/workspaceStore";
 import { listAgentTemplates, listDashboardCardsForWorkspace } from "@/lib/platformStore";
+import { listDirectThreadsForUser, listMessagesForScope, listWorkspaceChannelsForUser } from "@/lib/teamChatStore";
 import { WorkspaceShell } from "@/components/workspace/WorkspaceShell";
 import {
   AgentOverviewPanel,
@@ -13,6 +14,7 @@ import {
   HomeOverviewPanel,
   QueuePanel,
   RecordDetailPanel,
+  TeamChatPanel,
 } from "@/components/workspace/WorkspacePanels";
 import { requireAuthenticatedUser } from "@/lib/auth";
 
@@ -125,9 +127,18 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
     );
   }
 
-  const [dashboardCards, agentTemplates] = await Promise.all([
+  const [dashboardCards, agentTemplates, teamChatChannels, teamChatDirectMessages, teamChatMessages] = await Promise.all([
     listDashboardCardsForWorkspace(snapshot.workspace.id),
     listAgentTemplates(),
+    listWorkspaceChannelsForUser(workspaceSlug, user.id, user.isPlatformAdmin),
+    listDirectThreadsForUser(workspaceSlug, user.id, user.isPlatformAdmin),
+    listMessagesForScope({
+      workspaceSlug,
+      userId: user.id,
+      isPlatformAdmin: user.isPlatformAdmin,
+      channelId: undefined,
+      directMessageId: undefined,
+    }),
   ]);
   const currentObject =
     snapshot.objects.find((object) => object.id === query.object) ?? snapshot.objects[0] ?? null;
@@ -349,6 +360,19 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
     );
   }
 
+  if (selectedTab === "team-chat") {
+    content = (
+      <TeamChatPanel
+        workspaceSlug={snapshot.workspace.subdomain}
+        workspaceName={snapshot.workspace.name}
+        currentUserEmail={user.email}
+        channels={teamChatChannels}
+        directMessages={teamChatDirectMessages}
+        messages={teamChatMessages}
+      />
+    );
+  }
+
   return (
     <WorkspaceShell
       workspaceName={snapshot.workspace.name}
@@ -395,9 +419,16 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
           active: selectedTab === "agents",
           hidden: membership.role === "viewer",
         },
+        {
+          id: "team-chat",
+          label: "Team chat",
+          href: `/workspaces/${snapshot.workspace.subdomain}?tab=team-chat`,
+          meta: `${teamChatChannels.length} canales`,
+          active: selectedTab === "team-chat",
+        },
       ]}
       contextRail={
-        selectedTab === "queue"
+        selectedTab === "queue" || selectedTab === "team-chat"
           ? null
           : {
               headline: selectedTab === "agents" ? "Workspace agents" : selectedTab === "record" ? "Record context" : "Workspace context",

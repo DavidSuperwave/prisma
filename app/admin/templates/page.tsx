@@ -5,22 +5,22 @@ export default async function AdminTemplatesPage() {
 
   return (
     <section>
-      <h1 style={{ marginTop: 0 }}>Templates</h1>
+      <h1 style={{ marginTop: 0 }}>Agent templates</h1>
       <p style={{ color: 'var(--giga-muted)' }}>
-        Template registry turns landing pages into configurable data instead of one-repo-per-client forks.
+        Catalog of reusable starting points that appear in each workspace when creating new agents.
       </p>
 
       <div style={panelStyle}>
         {templates.length === 0 ? (
-          <p style={{ color: 'var(--giga-muted)' }}>No templates found.</p>
+          <p style={{ color: 'var(--giga-muted)' }}>No agent templates found.</p>
         ) : (
           <ul style={listStyle}>
             {templates.map((template) => (
               <li key={template.id} style={rowStyle}>
                 <p style={{ margin: 0, fontWeight: 600 }}>{template.name}</p>
                 <p style={{ margin: 0, color: 'var(--giga-muted)' }}>key: {template.key}</p>
-                <p style={{ margin: 0, color: 'var(--giga-muted)' }}>vertical: {template.vertical ?? 'generic'}</p>
-                <p style={{ margin: 0, color: 'var(--giga-muted)' }}>{template.sectionSchema.length} sections</p>
+                <p style={{ margin: 0, color: 'var(--giga-muted)' }}>category: {template.vertical ?? 'general'}</p>
+                <p style={{ margin: 0, color: 'var(--giga-muted)' }}>{template.sectionSchema.length} defaults</p>
               </li>
             ))}
           </ul>

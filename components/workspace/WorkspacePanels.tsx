@@ -29,6 +29,14 @@ import type {
 import { applyViewToRecords, deriveQueueItems, getRecordFieldValue } from "@/lib/workspaceStore";
 
 type OverviewProps = {
+  dashboardCards?: Array<{
+    id: string;
+    cardType: "metric" | "table" | "queue" | "activity" | "status" | "chart";
+    title: string;
+    subtitle?: string;
+    gridWidth: number;
+    config: Record<string, unknown>;
+  }>;
   metrics: Array<{
     label: string;
     value: string;
@@ -100,6 +108,16 @@ type ChatPanelProps = {
   workspaceId: string;
   workspaceSlug: string;
   userId: string;
+  connectedApps: Array<{
+    label: string;
+    status: "connected" | "available";
+  }>;
+  quickActions: Array<{
+    label: string;
+    href?: string;
+    prompt?: string;
+  }>;
+  suggestedPrompts: string[];
   contextSummary: {
     activeTab: string;
     activeObjectName?: string | null;
@@ -209,13 +227,153 @@ function currentTimeLabel() {
   }).format(new Date());
 }
 
-export function OverviewPanel({ metrics, queueItems, activity, suggestions, agents }: OverviewProps) {
+export function OverviewPanel({ dashboardCards, metrics, queueItems, activity, suggestions, agents }: OverviewProps) {
   const stats = [
     { icon: Layers3, ...metrics[0] },
     { icon: Building2, ...metrics[1] },
     { icon: Bot, ...metrics[2] },
     { icon: ShieldCheck, ...metrics[3] },
   ].filter((item) => item.label && item.value);
+  const cards = dashboardCards?.length ? [...dashboardCards].sort((left, right) => left.config.position as number - (right.config.position as number)) : [];
+
+  if (cards.length > 0) {
+    return (
+      <div style={stackStyle}>
+        <Panel eyebrow="Home" title="Resumen operativo" description="Panel compuesto desde bloques del workspace.">
+          <div style={dashboardGridStyle}>
+            {cards.map((card) => {
+              if (card.cardType === "metric") {
+                const metric = stats.find((entry) => entry.label === String(card.config.metricKey ?? ""));
+                const Icon = metric?.icon ?? Layers3;
+                return (
+                  <article
+                    key={card.id}
+                    style={{
+                      ...metricCardStyle,
+                      gridColumn: card.gridWidth > 1 ? "span 2" : "span 1",
+                    }}
+                  >
+                    <div style={metricIconWrapStyle}>
+                      <Icon size={18} />
+                    </div>
+                    <p style={metricLabelStyle}>{card.title}</p>
+                    <p style={metricValueStyle}>{metric?.value ?? String(card.config.value ?? "—")}</p>
+                    <p style={metricHintStyle}>{card.subtitle ?? metric?.caption ?? ""}</p>
+                  </article>
+                );
+              }
+
+              if (card.cardType === "queue") {
+                return (
+                  <div key={card.id} style={{ ...panelStyle, gridColumn: card.gridWidth > 1 ? "span 2" : "span 1" }}>
+                    <div style={panelHeaderStyle}>
+                      <div>
+                        <p style={eyebrowStyle}>Queue</p>
+                        <h2 style={panelTitleStyle}>{card.title}</h2>
+                        {card.subtitle ? <p style={panelDescriptionStyle}>{card.subtitle}</p> : null}
+                      </div>
+                    </div>
+                    <div style={queueListStyle}>
+                      {queueItems.slice(0, Number(card.config.limit ?? 4)).map((item) => (
+                        <div key={item.id} style={queueItemStyle}>
+                          <div>
+                            <p style={queueTitleStyle}>{item.title}</p>
+                            <p style={queueSubtitleStyle}>{item.subtitle}</p>
+                          </div>
+                          <StatusPill tone={item.status.toLowerCase()}>{formatStatusLabel(item.status)}</StatusPill>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              }
+
+              if (card.cardType === "activity") {
+                return (
+                  <div key={card.id} style={{ ...panelStyle, gridColumn: card.gridWidth > 1 ? "span 2" : "span 1" }}>
+                    <div style={panelHeaderStyle}>
+                      <div>
+                        <p style={eyebrowStyle}>Actividad</p>
+                        <h2 style={panelTitleStyle}>{card.title}</h2>
+                        {card.subtitle ? <p style={panelDescriptionStyle}>{card.subtitle}</p> : null}
+                      </div>
+                    </div>
+                    <div style={activityListStyle}>
+                      {activity.slice(0, Number(card.config.limit ?? 6)).map((entry) => (
+                        <div key={entry.id} style={agentActivityRowStyle}>
+                          <p style={activityActionStyle}>{formatActivityLabel(entry.action)}</p>
+                          <p style={activityDetailStyle}>{formatActivityDetails(entry.details)}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              }
+
+              if (card.cardType === "status") {
+                const activeAgents = agents.filter((agent) => agent.status === "active").length;
+                return (
+                  <div key={card.id} style={{ ...panelStyle, gridColumn: card.gridWidth > 1 ? "span 2" : "span 1" }}>
+                    <div style={panelHeaderStyle}>
+                      <div>
+                        <p style={eyebrowStyle}>Estado</p>
+                        <h2 style={panelTitleStyle}>{card.title}</h2>
+                        {card.subtitle ? <p style={panelDescriptionStyle}>{card.subtitle}</p> : null}
+                      </div>
+                    </div>
+                    <div style={detailListStyle}>
+                      <div style={queueItemStyle}>
+                        <div>
+                          <p style={queueTitleStyle}>Agentes activos</p>
+                          <p style={queueSubtitleStyle}>{activeAgents} disponibles</p>
+                        </div>
+                        <StatusPill tone="active">{activeAgents > 0 ? "Estable" : "Sin agentes"}</StatusPill>
+                      </div>
+                      <div style={queueItemStyle}>
+                        <div>
+                          <p style={queueTitleStyle}>Seguimientos</p>
+                          <p style={queueSubtitleStyle}>{queueItems.length} items en cola</p>
+                        </div>
+                        <StatusPill tone={queueItems.length > 0 ? "pending" : "active"}>{queueItems.length > 0 ? "Atencion" : "Al dia"}</StatusPill>
+                      </div>
+                    </div>
+                  </div>
+                );
+              }
+
+              if (card.cardType === "table") {
+                const rows = (card.config.rows as Array<{ title: string; value: string; meta?: string }> | undefined) ?? [];
+                return (
+                  <div key={card.id} style={{ ...panelStyle, gridColumn: card.gridWidth > 1 ? "span 2" : "span 1" }}>
+                    <div style={panelHeaderStyle}>
+                      <div>
+                        <p style={eyebrowStyle}>Vista</p>
+                        <h2 style={panelTitleStyle}>{card.title}</h2>
+                        {card.subtitle ? <p style={panelDescriptionStyle}>{card.subtitle}</p> : null}
+                      </div>
+                    </div>
+                    <div style={detailListStyle}>
+                      {rows.map((row) => (
+                        <div key={`${card.id}-${row.title}`} style={queueItemStyle}>
+                          <div>
+                            <p style={queueTitleStyle}>{row.title}</p>
+                            {row.meta ? <p style={queueSubtitleStyle}>{row.meta}</p> : null}
+                          </div>
+                          <strong style={recordFieldValueStyle}>{row.value}</strong>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              }
+
+              return null;
+            })}
+          </div>
+        </Panel>
+      </div>
+    );
+  }
 
   return (
     <div style={stackStyle}>
@@ -416,7 +574,17 @@ export function QueuePanel({ queueItems, recordBaseHref }: QueuePanelProps) {
   );
 }
 
-export function ChatPanel({ workspaceId, workspaceSlug, userId, contextSummary, copilotAgent, askPrompt }: ChatPanelProps) {
+export function ChatPanel({
+  workspaceId,
+  workspaceSlug,
+  userId,
+  connectedApps,
+  quickActions,
+  suggestedPrompts,
+  contextSummary,
+  copilotAgent,
+  askPrompt,
+}: ChatPanelProps) {
   const storageKey = `prisma-chat:${workspaceSlug}:${userId}:${copilotAgent?.id ?? "copilot"}`;
   const router = useRouter();
   const [sessions, setSessions] = useState<ChatSession[]>([]);
@@ -817,11 +985,66 @@ export function ChatPanel({ workspaceId, workspaceSlug, userId, contextSummary, 
                     </div>
                   ))
                 ) : (
-                  <EmptyState
-                    icon={MessageSquare}
-                    title="Inicia la primera conversacion"
-                    description="Pregunta que cambio hoy, que dataset necesita atencion o que sigue para el equipo."
-                  />
+                  <div style={chatEmptyStateStyle}>
+                    <div style={chatEmptyHeroStyle}>
+                      <div style={chatEmptyAvatarStyle}>
+                        <Sparkles size={20} />
+                      </div>
+                      <div>
+                        <p style={chatEmptyTitleStyle}>Hola, ¿cómo te ayudo hoy?</p>
+                        <p style={chatEmptyCopyStyle}>Pregúntame por tu workspace o dime qué necesitas construir.</p>
+                      </div>
+                    </div>
+
+                    <div style={chatCapabilityRowStyle}>
+                      {connectedApps.map((app) => (
+                        <span key={app.label} style={chatCapabilityChipStyle}>
+                          {app.label} {app.status === "connected" ? "✓" : "+"}
+                        </span>
+                      ))}
+                    </div>
+
+                    <div style={chatEmptySectionStyle}>
+                      <p style={chatEmptySectionTitleStyle}>Sugerido</p>
+                      <div style={chatActionListStyle}>
+                        {suggestedPrompts.map((prompt) => (
+                          <button
+                            key={prompt}
+                            type="button"
+                            style={chatPromptCardStyle}
+                            onClick={() => setInput(prompt)}
+                          >
+                            <Sparkles size={16} />
+                            <span>{prompt}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div style={chatEmptySectionStyle}>
+                      <p style={chatEmptySectionTitleStyle}>Acciones rápidas</p>
+                      <div style={chatActionListStyle}>
+                        {quickActions.map((action) =>
+                          action.href ? (
+                            <a key={action.label} href={action.href} style={chatPromptCardStyle}>
+                              <ArrowRight size={16} />
+                              <span>{action.label}</span>
+                            </a>
+                          ) : (
+                            <button
+                              key={action.label}
+                              type="button"
+                              style={chatPromptCardStyle}
+                              onClick={() => setInput(action.prompt ?? action.label)}
+                            >
+                              <ArrowRight size={16} />
+                              <span>{action.label}</span>
+                            </button>
+                          ),
+                        )}
+                      </div>
+                    </div>
+                  </div>
                 )}
               </div>
 
@@ -1596,6 +1819,159 @@ const metricGridStyle: React.CSSProperties = {
   gap: 16,
 };
 
+const dashboardGridStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+  gap: 16,
+};
+
+const dashboardCardShellStyle: React.CSSProperties = {
+  border: "1px solid var(--workspace-border)",
+  borderRadius: 22,
+  background: "var(--workspace-panel-soft)",
+  padding: 18,
+  display: "grid",
+  gap: 14,
+};
+
+const dashboardCardShellFullStyle: React.CSSProperties = {
+  gridColumn: "1 / -1",
+};
+
+const dashboardSectionTitleStyle: React.CSSProperties = {
+  margin: 0,
+  fontSize: 18,
+  fontWeight: 700,
+  color: "var(--workspace-text)",
+};
+
+const dashboardSectionSubtitleStyle: React.CSSProperties = {
+  margin: "4px 0 0",
+  color: "var(--workspace-muted)",
+  fontSize: 13,
+  lineHeight: 1.5,
+};
+
+const connectedAppsRowStyle: React.CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  gap: 10,
+};
+
+const connectedAppChipStyle: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 8,
+  padding: "8px 12px",
+  borderRadius: 999,
+  border: "1px solid var(--workspace-border)",
+  background: "var(--workspace-panel)",
+  color: "var(--workspace-text)",
+  fontSize: 13,
+  fontWeight: 600,
+};
+
+const suggestionGridStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 10,
+};
+
+const suggestionButtonStyle: React.CSSProperties = {
+  width: "100%",
+  border: "1px solid var(--workspace-border)",
+  borderRadius: 16,
+  background: "var(--workspace-panel)",
+  padding: "12px 14px",
+  textAlign: "left",
+  font: "inherit",
+  color: "var(--workspace-text)",
+  cursor: "pointer",
+};
+
+const quickActionGridStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+  gap: 10,
+};
+
+const quickActionCardStyle: React.CSSProperties = {
+  border: "1px solid var(--workspace-border)",
+  borderRadius: 18,
+  background: "var(--workspace-panel)",
+  padding: "14px 16px",
+  textAlign: "left",
+  color: "var(--workspace-text)",
+  textDecoration: "none",
+  display: "grid",
+  gap: 6,
+};
+
+const chatEmptyStateStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 18,
+  alignContent: "start",
+};
+
+const chatEmptyHeroStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 12,
+};
+
+const chatEmptyAvatarStyle: React.CSSProperties = {
+  width: 44,
+  height: 44,
+  borderRadius: 14,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  background: "rgba(51, 92, 255, 0.1)",
+  color: "#335cff",
+};
+
+const chatEmptyTitleStyle: React.CSSProperties = {
+  margin: 0,
+  fontSize: 30,
+  lineHeight: 1.1,
+  color: "var(--workspace-text)",
+  fontFamily: "var(--font-display)",
+};
+
+const chatEmptyCopyStyle: React.CSSProperties = {
+  margin: "8px 0 0",
+  color: "var(--workspace-muted)",
+  fontSize: 15,
+  lineHeight: 1.7,
+  maxWidth: 560,
+};
+
+const chatCapabilityRowStyle: React.CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  gap: 10,
+};
+
+const chatCapabilityChipStyle: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 6,
+  borderRadius: 999,
+  border: "1px solid var(--workspace-border)",
+  background: "var(--workspace-panel)",
+  padding: "8px 12px",
+  fontSize: 13,
+  fontWeight: 600,
+  color: "var(--workspace-text)",
+};
+
+const chatSearchCardStyle: React.CSSProperties = {
+  border: "1px dashed var(--workspace-border)",
+  borderRadius: 18,
+  background: "rgba(255,255,255,0.55)",
+  padding: "14px 16px",
+  color: "var(--workspace-muted)",
+  fontSize: 14,
+};
+
 const metricCardStyle: React.CSSProperties = {
   border: "1px solid var(--workspace-border)",
   borderRadius: 22,
@@ -1747,6 +2123,38 @@ const chatActionButtonStyle: React.CSSProperties = {
   fontSize: 12,
   fontWeight: 700,
   color: "var(--workspace-text)",
+  cursor: "pointer",
+};
+
+const chatEmptySectionStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 12,
+};
+
+const chatEmptySectionTitleStyle: React.CSSProperties = {
+  margin: 0,
+  fontSize: 12,
+  color: "var(--workspace-muted)",
+  letterSpacing: "0.12em",
+  textTransform: "uppercase",
+  fontWeight: 700,
+};
+
+const chatActionListStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 10,
+};
+
+const chatPromptCardStyle: React.CSSProperties = {
+  border: "1px solid var(--workspace-border)",
+  borderRadius: 18,
+  background: "var(--workspace-panel)",
+  padding: "14px 16px",
+  color: "var(--workspace-text)",
+  display: "grid",
+  gap: 8,
+  textAlign: "left",
+  textDecoration: "none",
   cursor: "pointer",
 };
 

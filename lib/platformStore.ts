@@ -10,6 +10,8 @@ export type AgentRoleType = 'intake_assistant' | 'lead_qualifier' | 'crm_updater
 export type AgentDeploymentStatus = 'pending' | 'building' | 'running' | 'degraded' | 'stopped' | 'failed'
 export type AgentRuntimeType = 'copilot' | 'channel' | 'worker'
 
+export type WorkspaceDashboardCardType = 'metric' | 'table' | 'queue' | 'activity' | 'status' | 'chart'
+
 export type Workspace = {
   id: string
   slug: string
@@ -41,6 +43,40 @@ export type LandingTemplate = {
   sectionSchema: unknown[]
   defaultContent: Record<string, unknown>
   isActive: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+export type AgentTemplate = {
+  id: string
+  name: string
+  description?: string
+  type: 'copilot' | 'channel' | 'worker' | 'chatbot'
+  category?: string
+  defaultSoulMd?: string
+  defaultSkills: string[]
+  defaultKnowledgeScope: Record<string, unknown>
+  defaultCronJobs: unknown[]
+  defaultChannelConfig: Record<string, unknown>
+  defaultMemoryConfig: Record<string, unknown>
+  icon?: string
+  isActive: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+export type WorkspaceDashboardCard = {
+  id: string
+  workspaceId: string
+  dashboardId?: string
+  cardType: WorkspaceDashboardCardType
+  title: string
+  subtitle?: string
+  config: Record<string, unknown>
+  position: number
+  gridWidth: number
+  isVisible: boolean
+  createdBy?: string
   createdAt: string
   updatedAt: string
 }
@@ -118,6 +154,8 @@ type PlatformState = {
   workspaces: Workspace[]
   projects: Project[]
   templates: LandingTemplate[]
+  agentTemplates: AgentTemplate[]
+  dashboardCards: WorkspaceDashboardCard[]
   sites: LandingSite[]
   agents: AgentDefinition[]
   deployments: AgentDeployment[]
@@ -237,6 +275,47 @@ const defaultTemplates: LandingTemplate[] = [
   }),
 ]
 
+const defaultAgentTemplates: AgentTemplate[] = [
+  withDate<AgentTemplate>({
+    id: 'agt_tmpl_whatsapp_qualifier',
+    name: 'WhatsApp Qualifier',
+    description: 'Califica leads entrantes y actualiza el workspace.',
+    type: 'channel',
+    category: 'lead_qualification',
+    defaultSoulMd: 'Eres un agente especializado en calificar leads entrantes por WhatsApp.',
+    defaultSkills: ['prisma-records', 'prisma-qualify'],
+    defaultKnowledgeScope: {
+      read: ['Contacts', 'Deals'],
+      write: ['Contacts', 'Deals'],
+      channels: ['whatsapp'],
+    },
+    defaultCronJobs: [],
+    defaultChannelConfig: { provider: 'whatsapp' },
+    defaultMemoryConfig: { recent: true, preferences: true, intelligence: false },
+    icon: 'message-square',
+    isActive: true,
+  }),
+  withDate<AgentTemplate>({
+    id: 'agt_tmpl_crm_monitor',
+    name: 'CRM Monitor',
+    description: 'Da seguimiento a pipeline, leads estancados y actividad pendiente.',
+    type: 'worker',
+    category: 'crm_monitor',
+    defaultSoulMd: 'Supervisa el CRM y prioriza seguimientos de alto impacto.',
+    defaultSkills: ['prisma-records'],
+    defaultKnowledgeScope: {
+      read: ['Contacts', 'Companies', 'Deals'],
+      write: ['Deals'],
+      channels: [],
+    },
+    defaultCronJobs: [{ schedule: '0 */2 * * *', job: 'check_stale_pipeline' }],
+    defaultChannelConfig: {},
+    defaultMemoryConfig: { recent: true, preferences: false, intelligence: true },
+    icon: 'bot',
+    isActive: true,
+  }),
+]
+
 async function readState(): Promise<PlatformState> {
   try {
     const raw = await readFile(dataPath, 'utf8')
@@ -245,6 +324,8 @@ async function readState(): Promise<PlatformState> {
       workspaces: parsed.workspaces ?? [],
       projects: parsed.projects ?? [],
       templates: parsed.templates?.length ? parsed.templates : defaultTemplates,
+      agentTemplates: parsed.agentTemplates?.length ? parsed.agentTemplates : defaultAgentTemplates,
+      dashboardCards: parsed.dashboardCards ?? [],
       sites: parsed.sites ?? [],
       agents: parsed.agents ?? [],
       deployments: parsed.deployments ?? [],
@@ -256,6 +337,8 @@ async function readState(): Promise<PlatformState> {
       workspaces: [],
       projects: [],
       templates: defaultTemplates,
+      agentTemplates: defaultAgentTemplates,
+      dashboardCards: [],
       sites: [],
       agents: [],
       deployments: [],
@@ -690,6 +773,70 @@ export async function createTemplate(input: CreateTemplateInput) {
   state.templates.push(record)
   await writeState(state)
   return record
+}
+
+export async function listAgentTemplates() {
+  const supabase = getSupabaseAdmin()
+  if (supabase) {
+    const { data, error } = await supabase.from('agent_templates').select('*').order('created_at', { ascending: false })
+    if (!error && data) {
+      return (data as Record<string, unknown>[]).map((row) => ({
+        id: String(row.id),
+        name: String(row.name),
+        description: row.description ? String(row.description) : undefined,
+        type: (row.type as AgentTemplate['type']) ?? 'worker',
+        category: row.category ? String(row.category) : undefined,
+        defaultSoulMd: row.default_soul_md ? String(row.default_soul_md) : undefined,
+        defaultSkills: Array.isArray(row.default_skills) ? (row.default_skills as string[]) : [],
+        defaultKnowledgeScope: (row.default_knowledge_scope as Record<string, unknown>) ?? {},
+        defaultCronJobs: Array.isArray(row.default_cron_jobs) ? (row.default_cron_jobs as unknown[]) : [],
+        defaultChannelConfig: (row.default_channel_config as Record<string, unknown>) ?? {},
+        defaultMemoryConfig: (row.default_memory_config as Record<string, unknown>) ?? {},
+        icon: row.icon ? String(row.icon) : undefined,
+        isActive: row.is_active === undefined ? true : Boolean(row.is_active),
+        createdAt: String(row.created_at ?? nowIso()),
+        updatedAt: String(row.updated_at ?? nowIso()),
+      }))
+    }
+  }
+
+  const state = await readState()
+  return [...state.agentTemplates].sort((a, b) => (a.createdAt > b.createdAt ? -1 : 1))
+}
+
+export async function listDashboardCardsForWorkspace(workspaceId: string) {
+  const supabase = getSupabaseAdmin()
+  if (supabase) {
+    const { data, error } = await supabase
+      .from('workspace_dashboard_cards')
+      .select('*')
+      .eq('workspace_id', workspaceId)
+      .eq('is_visible', true)
+      .order('position', { ascending: true })
+
+    if (!error && data) {
+      return (data as Record<string, unknown>[]).map((row) => ({
+        id: String(row.id),
+        workspaceId: String(row.workspace_id),
+        dashboardId: row.dashboard_id ? String(row.dashboard_id) : undefined,
+        cardType: (row.card_type as WorkspaceDashboardCardType) ?? 'metric',
+        title: String(row.title),
+        subtitle: row.subtitle ? String(row.subtitle) : undefined,
+        config: (row.config as Record<string, unknown>) ?? {},
+        position: Number(row.position ?? 0),
+        gridWidth: Number(row.grid_width ?? 1),
+        isVisible: row.is_visible === undefined ? true : Boolean(row.is_visible),
+        createdBy: row.created_by ? String(row.created_by) : undefined,
+        createdAt: String(row.created_at ?? nowIso()),
+        updatedAt: String(row.updated_at ?? nowIso()),
+      }))
+    }
+  }
+
+  const state = await readState()
+  return state.dashboardCards
+    .filter((card) => card.workspaceId === workspaceId && card.isVisible)
+    .sort((a, b) => a.position - b.position)
 }
 
 export async function listProjects(workspaceId?: string) {

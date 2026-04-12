@@ -4,6 +4,7 @@ import {
   getWorkspaceSnapshotForUser,
   getRecordFieldValue,
 } from "@/lib/workspaceStore";
+import { listDashboardCardsForWorkspace } from "@/lib/platformStore";
 import { WorkspaceShell } from "@/components/workspace/WorkspaceShell";
 import {
   AgentOverviewPanel,
@@ -124,6 +125,7 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
     );
   }
 
+  const dashboardCards = await listDashboardCardsForWorkspace(snapshot.workspace.id);
   const currentObject =
     snapshot.objects.find((object) => object.id === query.object) ?? snapshot.objects[0] ?? null;
   const currentView =
@@ -179,6 +181,14 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
 
   let content = (
     <HomeOverviewPanel
+      dashboardCards={dashboardCards.map((card) => ({
+        id: card.id,
+        cardType: card.cardType,
+        title: card.title,
+        subtitle: card.subtitle,
+        gridWidth: card.gridWidth,
+        config: card.config,
+      }))}
       metrics={metrics}
       queueItems={queueItems}
       activity={snapshot.activity}
@@ -218,6 +228,40 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
         workspaceId={snapshot.workspace.id}
         workspaceSlug={snapshot.workspace.subdomain}
         userId={user.id}
+        connectedApps={[
+          { label: "Supabase", status: "connected" as const },
+          { label: "WhatsApp", status: snapshot.agents.some((agent) => agent.type === "channel") ? "connected" as const : "available" as const },
+          { label: "Importaciones", status: snapshot.records.length > 0 ? "connected" as const : "available" as const },
+        ]}
+        quickActions={[
+          {
+            label: "Crear tabla",
+            prompt: "Quiero crear una nueva tabla en este workspace. Ayudame a definir los campos antes de confirmarla.",
+          },
+          {
+            label: "Crear dashboard",
+            prompt: "Quiero un dashboard para este workspace con metricas, actividad reciente y prioridades.",
+          },
+          {
+            label: "Importar datos",
+            prompt: "Necesito importar datos a este workspace. Guiame con la estructura y los siguientes pasos.",
+          },
+          {
+            label: "Crear agente",
+            href: `/workspaces/${snapshot.workspace.subdomain}?tab=agents`,
+          },
+        ]}
+        suggestedPrompts={[
+          queueItems.length
+            ? `Revisa ${queueItems.length} items pendientes y dime cuales requieren atencion hoy.`
+            : "Revisa el workspace y dime que bloqueos deberiamos atender primero.",
+          currentObject
+            ? `Resume el dataset ${currentObject.name} y sugiere la siguiente mejora operativa.`
+            : "Propone la primera tabla que deberiamos crear en este workspace.",
+          snapshot.records.length > 0
+            ? "Busca datos estancados o registros sin seguimiento en los ultimos 7 dias."
+            : "Prepara un plan para cargar mis datos iniciales al workspace.",
+        ]}
         contextSummary={{
           activeTab: selectedTab,
           activeObjectName: currentObject?.name ?? null,

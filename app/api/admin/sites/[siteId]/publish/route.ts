@@ -2,11 +2,11 @@ import { updateIntakeProvisioningStatus } from '@/lib/intakeStore'
 import { getSiteById, listProjects, trackUsageEvent, updateSitePublishStatus } from '@/lib/platformStore'
 
 type Context = {
-  params: { siteId: string }
+  params: Promise<{ siteId: string }>
 }
 
 export async function POST(_: Request, context: Context) {
-  const { siteId } = context.params
+  const { siteId } = await context.params
   const site = await getSiteById(siteId)
   if (!site) {
     return Response.json({ error: 'Site not found' }, { status: 404 })

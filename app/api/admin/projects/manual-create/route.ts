@@ -137,7 +137,7 @@ export async function POST(request: Request) {
           crmWrite: true,
         },
         integrationConfig: {
-          runtime: 'openclaw',
+          runtime: 'hermes',
           source: 'manual_admin_create',
         },
       })
@@ -145,10 +145,10 @@ export async function POST(request: Request) {
       deployment = await createDeployment({
         workspaceId: workspace.id,
         agentDefinitionId: agent.id,
-        dropletHost: body.dropletHost ?? process.env.OPENCLAW_DROPLET_HOST ?? 'shared-droplet',
-        containerName: sanitizeContainerName(`openclaw-${workspace.slug}-${agent.role}`),
-        imageRef: body.imageRef ?? process.env.OPENCLAW_IMAGE_REF ?? 'ghcr.io/prisma/openclaw:latest',
-        envSecretRef: `secret://${workspace.slug}/openclaw`,
+        dropletHost: body.dropletHost ?? process.env.HERMES_DROPLET_HOST ?? 'shared-droplet',
+        containerName: sanitizeContainerName(`hermes-${workspace.slug}-${agent.role}`),
+        imageRef: body.imageRef ?? process.env.HERMES_IMAGE_REF ?? 'prisma/hermes:stable',
+        envSecretRef: `secret://${workspace.slug}/hermes`,
         status: 'pending',
       })
     }

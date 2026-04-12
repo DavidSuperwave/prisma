@@ -50,4 +50,4 @@
 - Enforce workspace boundaries in API reads/writes.
 - Keep service-role operations inside control-plane backend.
 - Pass short-lived scoped tokens to runtime agents.
-- Avoid shared unrestricted DB keys inside OpenClaw containers.
+- Avoid shared unrestricted DB keys inside hErmes containers.

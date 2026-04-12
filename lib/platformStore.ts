@@ -8,6 +8,7 @@ export type ProjectStatus = 'draft' | 'onboarding' | 'active' | 'paused' | 'arch
 export type SitePublishStatus = 'draft' | 'reviewing' | 'ready' | 'published' | 'archived'
 export type AgentRoleType = 'intake_assistant' | 'lead_qualifier' | 'crm_updater' | 'follow_up' | 'ops_assistant' | 'custom'
 export type AgentDeploymentStatus = 'pending' | 'building' | 'running' | 'degraded' | 'stopped' | 'failed'
+export type AgentRuntimeType = 'copilot' | 'channel' | 'worker'
 
 export type Workspace = {
   id: string
@@ -179,6 +180,7 @@ type TrackUsageInput = {
 }
 
 const dataPath = path.join(process.cwd(), '.data', 'platform-state.json')
+const localFallbackDisabled = process.env.PRISMA_DISABLE_LOCAL_FALLBACK === 'true'
 
 function nowIso() {
   return new Date().toISOString()
@@ -200,6 +202,12 @@ function slugify(value: string) {
 function withDate<T extends { createdAt: string; updatedAt: string }>(value: Omit<T, 'createdAt' | 'updatedAt'>): T {
   const now = nowIso()
   return { ...value, createdAt: now, updatedAt: now } as T
+}
+
+function assertLocalFallbackAllowed(operation: string) {
+  if (localFallbackDisabled) {
+    throw new Error(`${operation} failed and PRISMA_DISABLE_LOCAL_FALLBACK=true.`)
+  }
 }
 
 const defaultTemplates: LandingTemplate[] = [
@@ -407,6 +415,136 @@ function toAgentRow(agent: AgentDefinition) {
     tools_config: agent.toolsConfig,
     integration_config: agent.integrationConfig,
     is_active: agent.isActive,
+    created_at: agent.createdAt,
+    updated_at: agent.updatedAt,
+  }
+}
+
+function isLegacyAgentRole(value: unknown): value is AgentRoleType {
+  return (
+    value === 'intake_assistant' ||
+    value === 'lead_qualifier' ||
+    value === 'crm_updater' ||
+    value === 'follow_up' ||
+    value === 'ops_assistant' ||
+    value === 'custom'
+  )
+}
+
+function roleToRuntimeType(role: AgentRoleType): AgentRuntimeType {
+  if (role === 'intake_assistant' || role === 'ops_assistant') {
+    return 'copilot'
+  }
+  if (role === 'lead_qualifier' || role === 'follow_up') {
+    return 'channel'
+  }
+  return 'worker'
+}
+
+function runtimeTypeToRole(type: AgentRuntimeType): AgentRoleType {
+  if (type === 'copilot') {
+    return 'intake_assistant'
+  }
+  if (type === 'channel') {
+    return 'lead_qualifier'
+  }
+  return 'custom'
+}
+
+function deploymentStatusFromRuntime(status: string): AgentDeploymentStatus {
+  if (status === 'deploying') return 'building'
+  if (status === 'active') return 'running'
+  if (status === 'paused') return 'stopped'
+  if (status === 'error') return 'failed'
+  return 'pending'
+}
+
+function runtimeStatusFromDeployment(status: AgentDeploymentStatus) {
+  if (status === 'running') return 'active'
+  if (status === 'building') return 'deploying'
+  if (status === 'stopped') return 'paused'
+  if (status === 'failed' || status === 'degraded') return 'error'
+  return 'deploying'
+}
+
+function hostFromEndpoint(endpoint: string) {
+  try {
+    return new URL(endpoint).hostname
+  } catch {
+    return endpoint
+  }
+}
+
+function fromWorkspaceAgentRow(row: Record<string, unknown>): AgentDefinition {
+  const knowledgeScope = (row.knowledge_scope as Record<string, unknown>) ?? {}
+  const runtimeType = (row.type as AgentRuntimeType) ?? 'worker'
+  const legacyRole = knowledgeScope.legacy_role
+  const resolvedRole = isLegacyAgentRole(legacyRole) ? legacyRole : runtimeTypeToRole(runtimeType)
+
+  return {
+    id: String(row.id),
+    workspaceId: String(row.workspace_id),
+    projectId: undefined,
+    name: String(row.name),
+    role: resolvedRole,
+    model: typeof knowledgeScope.model === 'string' ? knowledgeScope.model : process.env.HERMES_MODEL ?? 'hermes-agent',
+    promptPack: {
+      soulMd: row.soul_md ?? '',
+    },
+    toolsConfig: {
+      skills: (row.skills as string[]) ?? [],
+    },
+    integrationConfig: {
+      runtime: 'hermes',
+      endpoint: row.api_endpoint ?? '',
+      status: row.status ?? 'deploying',
+      type: runtimeType,
+    },
+    isActive: String(row.status ?? 'active') === 'active',
+    createdAt: String(row.created_at ?? nowIso()),
+    updatedAt: String(row.updated_at ?? nowIso()),
+  }
+}
+
+function toWorkspaceAgentRow(agent: AgentDefinition) {
+  const runtimeType = roleToRuntimeType(agent.role)
+  const configuredSkills = Array.isArray(agent.toolsConfig.skills)
+    ? (agent.toolsConfig.skills as string[])
+    : []
+  const endpoint =
+    (typeof agent.integrationConfig.endpoint === 'string' && agent.integrationConfig.endpoint) ||
+    'http://localhost:8642'
+  const apiKey =
+    (typeof agent.integrationConfig.apiKey === 'string' && agent.integrationConfig.apiKey) ||
+    'replace-me'
+  const version =
+    (typeof agent.integrationConfig.hermesVersion === 'string' && agent.integrationConfig.hermesVersion) ||
+    'v2026.4.1'
+
+  return {
+    id: agent.id,
+    workspace_id: agent.workspaceId,
+    name: agent.name,
+    type: runtimeType,
+    description:
+      typeof agent.promptPack.objective === 'string'
+        ? agent.promptPack.objective
+        : null,
+    container_name: `hermes-${agent.workspaceId.slice(0, 8)}-${agent.role}`,
+    api_endpoint: endpoint,
+    api_key: apiKey,
+    hermes_version: version,
+    status: agent.isActive ? 'active' : 'paused',
+    soul_md: typeof agent.promptPack.soulMd === 'string' ? agent.promptPack.soulMd : null,
+    skills: configuredSkills,
+    knowledge_scope: {
+      legacy_role: agent.role,
+      model: agent.model,
+    },
+    cron_jobs: [],
+    channel_config: {},
+    memory_limit_mb: 512,
+    cpu_limit: 0.5,
     created_at: agent.createdAt,
     updated_at: agent.updatedAt,
   }
@@ -689,16 +827,26 @@ export async function updateSitePublishStatus(siteId: string, publishStatus: Sit
 export async function listAgents(workspaceId?: string) {
   const supabase = getSupabaseAdmin()
   if (supabase) {
-    let query = supabase.from('agent_definitions').select('*').order('created_at', { ascending: false })
+    let workspaceAgentsQuery = supabase.from('workspace_agents').select('*').order('created_at', { ascending: false })
     if (workspaceId) {
-      query = query.eq('workspace_id', workspaceId)
+      workspaceAgentsQuery = workspaceAgentsQuery.eq('workspace_id', workspaceId)
     }
-    const { data, error } = await query
-    if (!error && data) {
-      return data.map((row) => fromAgentRow(row as Record<string, unknown>))
+    const workspaceAgentsResult = await workspaceAgentsQuery
+    if (!workspaceAgentsResult.error && workspaceAgentsResult.data) {
+      return workspaceAgentsResult.data.map((row) => fromWorkspaceAgentRow(row as Record<string, unknown>))
+    }
+
+    let legacyQuery = supabase.from('agent_definitions').select('*').order('created_at', { ascending: false })
+    if (workspaceId) {
+      legacyQuery = legacyQuery.eq('workspace_id', workspaceId)
+    }
+    const legacyResult = await legacyQuery
+    if (!legacyResult.error && legacyResult.data) {
+      return legacyResult.data.map((row) => fromAgentRow(row as Record<string, unknown>))
     }
   }
 
+  assertLocalFallbackAllowed('listAgents')
   const state = await readState()
   const agents = workspaceId ? state.agents.filter((agent) => agent.workspaceId === workspaceId) : state.agents
   return [...agents].sort((a, b) => (a.createdAt > b.createdAt ? -1 : 1))
@@ -720,13 +868,22 @@ export async function createAgentDefinition(input: CreateAgentInput) {
 
   const supabase = getSupabaseAdmin()
   if (supabase) {
-    const { data, error } = await supabase.from('agent_definitions').insert(toAgentRow(record)).select().single()
-    if (!error && data) {
-      return fromAgentRow(data as Record<string, unknown>)
+    const workspaceAgentInsert = await supabase.from('workspace_agents').insert(toWorkspaceAgentRow(record)).select().single()
+    if (!workspaceAgentInsert.error && workspaceAgentInsert.data) {
+      return fromWorkspaceAgentRow(workspaceAgentInsert.data as Record<string, unknown>)
     }
-    console.warn('Supabase createAgentDefinition failed, falling back to local state:', error?.message)
+
+    const legacyInsert = await supabase.from('agent_definitions').insert(toAgentRow(record)).select().single()
+    if (!legacyInsert.error && legacyInsert.data) {
+      return fromAgentRow(legacyInsert.data as Record<string, unknown>)
+    }
+    console.warn(
+      'Supabase createAgentDefinition failed, falling back to local state:',
+      workspaceAgentInsert.error?.message ?? legacyInsert.error?.message,
+    )
   }
 
+  assertLocalFallbackAllowed('createAgentDefinition')
   const state = await readState()
   state.agents.push(record)
   await writeState(state)
@@ -736,16 +893,45 @@ export async function createAgentDefinition(input: CreateAgentInput) {
 export async function listDeployments(workspaceId?: string) {
   const supabase = getSupabaseAdmin()
   if (supabase) {
-    let query = supabase.from('agent_deployments').select('*').order('created_at', { ascending: false })
+    let workspaceAgentsQuery = supabase.from('workspace_agents').select('*').order('created_at', { ascending: false })
     if (workspaceId) {
-      query = query.eq('workspace_id', workspaceId)
+      workspaceAgentsQuery = workspaceAgentsQuery.eq('workspace_id', workspaceId)
     }
-    const { data, error } = await query
-    if (!error && data) {
-      return data.map((row) => fromDeploymentRow(row as Record<string, unknown>))
+    const workspaceAgentsResult = await workspaceAgentsQuery
+    if (!workspaceAgentsResult.error && workspaceAgentsResult.data) {
+      return workspaceAgentsResult.data.map((row) => {
+        const typed = row as Record<string, unknown>
+        return {
+          id: String(typed.id),
+          workspaceId: String(typed.workspace_id),
+          agentDefinitionId: String(typed.id),
+          dropletHost: hostFromEndpoint(String(typed.api_endpoint)),
+          containerName: String(typed.container_name),
+          imageRef: `prisma/hermes:${typed.hermes_version ?? 'stable'}`,
+          envSecretRef: `secret://${typed.workspace_id}/hermes`,
+          deploymentVersion: 1,
+          status: deploymentStatusFromRuntime(String(typed.status ?? 'deploying')),
+          healthDetails: {
+            endpoint: typed.api_endpoint,
+            runtimeStatus: typed.status,
+          },
+          createdAt: String(typed.created_at ?? nowIso()),
+          updatedAt: String(typed.updated_at ?? nowIso()),
+        } satisfies AgentDeployment
+      })
+    }
+
+    let legacyQuery = supabase.from('agent_deployments').select('*').order('created_at', { ascending: false })
+    if (workspaceId) {
+      legacyQuery = legacyQuery.eq('workspace_id', workspaceId)
+    }
+    const legacyResult = await legacyQuery
+    if (!legacyResult.error && legacyResult.data) {
+      return legacyResult.data.map((row) => fromDeploymentRow(row as Record<string, unknown>))
     }
   }
 
+  assertLocalFallbackAllowed('listDeployments')
   const state = await readState()
   const deployments = workspaceId
     ? state.deployments.filter((deployment) => deployment.workspaceId === workspaceId)
@@ -769,13 +955,54 @@ export async function createDeployment(input: CreateDeploymentInput) {
 
   const supabase = getSupabaseAdmin()
   if (supabase) {
-    const { data, error } = await supabase.from('agent_deployments').insert(toDeploymentRow(record)).select().single()
-    if (!error && data) {
-      return fromDeploymentRow(data as Record<string, unknown>)
+    const endpointHost = input.dropletHost.startsWith('http') ? input.dropletHost : `http://${input.dropletHost}`
+    const endpoint = `${endpointHost.replace(/\/$/, '')}/v1`
+    const runtimeUpdate = await supabase
+      .from('workspace_agents')
+      .update({
+        container_name: input.containerName,
+        api_endpoint: endpoint,
+        hermes_version: input.imageRef,
+        status: runtimeStatusFromDeployment(input.status ?? 'pending'),
+        updated_at: nowIso(),
+      })
+      .eq('id', input.agentDefinitionId)
+      .eq('workspace_id', input.workspaceId)
+      .select()
+      .maybeSingle()
+
+    if (!runtimeUpdate.error && runtimeUpdate.data) {
+      const row = runtimeUpdate.data as Record<string, unknown>
+      return {
+        id: String(row.id),
+        workspaceId: String(row.workspace_id),
+        agentDefinitionId: String(row.id),
+        dropletHost: input.dropletHost,
+        containerName: String(row.container_name),
+        imageRef: String(input.imageRef),
+        envSecretRef: input.envSecretRef ?? `secret://${row.workspace_id}/hermes`,
+        deploymentVersion: 1,
+        status: deploymentStatusFromRuntime(String(row.status ?? 'deploying')),
+        healthDetails: {
+          endpoint: row.api_endpoint,
+          runtimeStatus: row.status,
+        },
+        createdAt: String(row.created_at ?? nowIso()),
+        updatedAt: String(row.updated_at ?? nowIso()),
+      }
     }
-    console.warn('Supabase createDeployment failed, falling back to local state:', error?.message)
+
+    const legacyInsert = await supabase.from('agent_deployments').insert(toDeploymentRow(record)).select().single()
+    if (!legacyInsert.error && legacyInsert.data) {
+      return fromDeploymentRow(legacyInsert.data as Record<string, unknown>)
+    }
+    console.warn(
+      'Supabase createDeployment failed, falling back to local state:',
+      runtimeUpdate.error?.message ?? legacyInsert.error?.message,
+    )
   }
 
+  assertLocalFallbackAllowed('createDeployment')
   const state = await readState()
   state.deployments.push(record)
   await writeState(state)
@@ -833,6 +1060,44 @@ async function createProvisioningJob(input: Omit<ProvisioningJob, 'id' | 'create
     ...input,
   })
 
+  const supabase = getSupabaseAdmin()
+  if (supabase) {
+    const { data, error } = await supabase
+      .from('provisioning_jobs')
+      .insert({
+        id: record.id,
+        workspace_id: record.workspaceId ?? null,
+        intake_submission_id: record.intakeSubmissionId ?? null,
+        job_type: record.jobType,
+        status: record.status,
+        payload: record.payload,
+        result: record.result,
+        error_message: record.errorMessage ?? null,
+        created_at: record.createdAt,
+        updated_at: record.updatedAt,
+      })
+      .select()
+      .maybeSingle()
+
+    if (!error && data) {
+      const row = data as Record<string, unknown>
+      return {
+        id: String(row.id),
+        workspaceId: row.workspace_id ? String(row.workspace_id) : undefined,
+        intakeSubmissionId: row.intake_submission_id ? String(row.intake_submission_id) : undefined,
+        jobType: String(row.job_type),
+        status: (row.status as ProvisioningJob['status']) ?? 'queued',
+        payload: (row.payload as Record<string, unknown>) ?? {},
+        result: (row.result as Record<string, unknown>) ?? {},
+        errorMessage: row.error_message ? String(row.error_message) : undefined,
+        createdAt: String(row.created_at ?? nowIso()),
+        updatedAt: String(row.updated_at ?? nowIso()),
+      } satisfies ProvisioningJob
+    }
+    console.warn('Supabase createProvisioningJob failed, falling back to local state:', error?.message)
+  }
+
+  assertLocalFallbackAllowed('createProvisioningJob')
   const state = await readState()
   state.provisioningJobs.push(record)
   await writeState(state)
@@ -947,6 +1212,34 @@ export async function queueProvisioningFromIntake(submission: IntakeSubmission) 
 }
 
 export async function listProvisioningJobs(limit = 50) {
+  const supabase = getSupabaseAdmin()
+  if (supabase) {
+    const { data, error } = await supabase
+      .from('provisioning_jobs')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(limit)
+
+    if (!error && data) {
+      return data.map((row) => {
+        const typed = row as Record<string, unknown>
+        return {
+          id: String(typed.id),
+          workspaceId: typed.workspace_id ? String(typed.workspace_id) : undefined,
+          intakeSubmissionId: typed.intake_submission_id ? String(typed.intake_submission_id) : undefined,
+          jobType: String(typed.job_type),
+          status: (typed.status as ProvisioningJob['status']) ?? 'queued',
+          payload: (typed.payload as Record<string, unknown>) ?? {},
+          result: (typed.result as Record<string, unknown>) ?? {},
+          errorMessage: typed.error_message ? String(typed.error_message) : undefined,
+          createdAt: String(typed.created_at ?? nowIso()),
+          updatedAt: String(typed.updated_at ?? nowIso()),
+        } satisfies ProvisioningJob
+      })
+    }
+  }
+
+  assertLocalFallbackAllowed('listProvisioningJobs')
   const state = await readState()
   return [...state.provisioningJobs].sort((a, b) => (a.createdAt > b.createdAt ? -1 : 1)).slice(0, limit)
 }

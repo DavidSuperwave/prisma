@@ -2,11 +2,11 @@ import { getIntakeSubmissionById, updateIntakeProvisioningStatus } from '@/lib/i
 import { listSites, trackUsageEvent, updateSitePublishStatus } from '@/lib/platformStore'
 
 type Context = {
-  params: { intakeId: string }
+  params: Promise<{ intakeId: string }>
 }
 
 export async function POST(_: Request, context: Context) {
-  const { intakeId } = context.params
+  const { intakeId } = await context.params
   const intake = await getIntakeSubmissionById(intakeId)
 
   if (!intake) {

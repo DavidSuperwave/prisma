@@ -9,7 +9,7 @@ import {
 } from '@/lib/platformStore'
 
 type Context = {
-  params: { workspaceId: string }
+  params: Promise<{ workspaceId: string }>
 }
 
 type BootstrapRequest = {
@@ -22,7 +22,7 @@ function sanitizeContainerName(input: string) {
 }
 
 export async function POST(request: Request, context: Context) {
-  const { workspaceId } = context.params
+  const { workspaceId } = await context.params
   const body = (await request.json().catch(() => ({}))) as BootstrapRequest
 
   const workspaces = await listWorkspaces()
@@ -52,14 +52,14 @@ export async function POST(request: Request, context: Context) {
         intakeAssist: true,
       },
       integrationConfig: {
-        runtime: 'openclaw',
+        runtime: 'hermes',
       },
     })
   }
 
-  const dropletHost = body.dropletHost ?? process.env.OPENCLAW_DROPLET_HOST ?? 'shared-droplet'
-  const imageRef = body.imageRef ?? process.env.OPENCLAW_IMAGE_REF ?? 'ghcr.io/prisma/openclaw:latest'
-  const containerName = sanitizeContainerName(`openclaw-${workspace.slug}-intake`)
+  const dropletHost = body.dropletHost ?? process.env.HERMES_DROPLET_HOST ?? 'shared-droplet'
+  const imageRef = body.imageRef ?? process.env.HERMES_IMAGE_REF ?? 'prisma/hermes:stable'
+  const containerName = sanitizeContainerName(`hermes-${workspace.slug}-intake`)
 
   let deployment = existingDeployments.find((entry) => entry.agentDefinitionId === agent.id)
   if (!deployment) {
@@ -69,7 +69,7 @@ export async function POST(request: Request, context: Context) {
       dropletHost,
       containerName,
       imageRef,
-      envSecretRef: `secret://${workspace.slug}/openclaw`,
+      envSecretRef: `secret://${workspace.slug}/hermes`,
       status: 'pending',
     })
   }

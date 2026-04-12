@@ -1,3 +1,13 @@
 import nextVitals from "eslint-config-next/core-web-vitals";
 
-export default nextVitals;
+const nextConfig = Array.isArray(nextVitals) ? nextVitals : [nextVitals];
+
+export default [
+  {
+    ignores: [
+      ".next/**",
+      "prisma/**",
+    ],
+  },
+  ...nextConfig,
+];

@@ -7,7 +7,7 @@ export default async function AdminDeploymentsPage() {
     <section>
       <h1 style={{ marginTop: 0 }}>Deployments</h1>
       <p style={{ color: 'var(--giga-muted)' }}>
-        One control plane can supervise multiple isolated OpenClaw containers on a shared droplet.
+        One control plane can supervise multiple isolated hErmes containers on a shared droplet.
       </p>
 
       <div style={panelStyle}>

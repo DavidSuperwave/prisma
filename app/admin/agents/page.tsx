@@ -7,7 +7,7 @@ export default async function AdminAgentsPage() {
     <section>
       <h1 style={{ marginTop: 0 }}>Agents</h1>
       <p style={{ color: 'var(--giga-muted)' }}>
-        Agent definitions describe role, model, tools, and integrations before deployment to OpenClaw runtimes.
+        Agent definitions describe role, model, tools, and integrations before deployment to isolated hErmes runtimes.
       </p>
 
       <div style={panelStyle}>

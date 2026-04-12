@@ -1,13 +1,13 @@
-# OpenClaw Runtime Model (Shared Droplet)
+# hErmes Runtime Model (Shared Droplet)
 
 ## Goal
-Run multiple isolated OpenClaw instances on one droplet while preserving strict client separation and centralized control from Prisma dashboard.
+Run multiple isolated hErmes instances on one droplet while preserving strict client separation and centralized control from Prisma dashboard.
 
 ## Isolation model
 
 - One container per workspace or per workspace-role pair.
 - Separate environment payload per container (`env_secret_ref`).
-- Dedicated container name convention: `openclaw-{workspace_slug}-{role}`.
+- Dedicated container name convention: `hermes-{workspace_slug}-{role}`.
 - Network-level isolation via per-service routing and explicit inbound webhook mapping.
 
 ## Data access model
@@ -19,8 +19,9 @@ Run multiple isolated OpenClaw instances on one droplet while preserving strict 
 
 ## Control-plane entities
 
-- `agent_definitions`: source-of-truth for prompts, models, tools, integration config.
-- `agent_deployments`: runtime state (host, container, image, version, health, status).
+- `workspace_agents`: source-of-truth for agent runtime config and endpoint routing.
+- `agent_activity`: auditable action log per workspace.
+- `agent_events`: inter-agent event bus through database state.
 - `usage_events`: execution, message, and deployment telemetry.
 
 ## Deployment workflow
@@ -28,7 +29,7 @@ Run multiple isolated OpenClaw instances on one droplet while preserving strict 
 1. Operator creates/updates agent definition.
 2. Control plane generates runtime config bundle.
 3. Provisioning service deploys/restarts target container on droplet.
-4. Deployment status and health are written to `agent_deployments`.
+4. Deployment status and health are written to `workspace_agents`.
 5. Runtime actions produce `usage_events` for observability and billing.
 
 ## Future hardening

@@ -1,3 +1,7 @@
+-- LEGACY REFERENCE ONLY.
+-- Do not use this file as the deployment source of truth.
+-- Active schema changes must be applied through supabase/migrations.
+--
 -- Prisma platform multi-tenant schema foundation.
 -- This keeps intake as the entry point but maps it to workspace/project/site.
 

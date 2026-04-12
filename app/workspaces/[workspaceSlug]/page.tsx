@@ -99,24 +99,24 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
     : [];
   const metrics = [
     {
-      label: "Open queues",
+      label: "Pendientes",
       value: String(deriveQueueItems(snapshot.objects, snapshot.records).length),
-      caption: "Items requiring operator action today.",
+      caption: "Items que requieren acción humana hoy.",
     },
     {
-      label: "Live agents",
+      label: "Agentes activos",
       value: String(snapshot.agents.filter((agent) => agent.status === "active").length),
-      caption: "Specialists available in this workspace.",
+      caption: "Especialistas disponibles en este workspace.",
     },
     {
-      label: "Views",
+      label: "Vistas",
       value: String(snapshot.views.length),
-      caption: "Saved operational views generated from the meta-model.",
+      caption: "Vistas operativas guardadas.",
     },
     {
-      label: "Records",
+      label: "Registros",
       value: String(snapshot.records.length),
-      caption: "Structured rows powering the workspace.",
+      caption: "Filas estructuradas en operación.",
     },
   ];
 
@@ -136,9 +136,9 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
       queueItems={queueItems}
       activity={snapshot.activity}
       suggestions={[
-        "Review leads with missing underwriting documents before the afternoon handoff.",
-        "Ask the CEO agent to draft a receivables view grouped by aging bucket.",
-        "Deploy the WhatsApp intake specialist once the qualification script is finalized.",
+        "Revisa los registros sin documentos completos antes del siguiente corte operativo.",
+        "Pide al agente CEO una vista de cobranza agrupada por antigüedad.",
+        "Confirma el flujo de WhatsApp para mantener la cola de entrada limpia.",
       ]}
       agents={formatAgentSummary(snapshot.agents)}
     />
@@ -182,7 +182,7 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
                   String(getRecordFieldValue(selectedRecord, "company_name"))) ||
                 (typeof getRecordFieldValue(selectedRecord, "document_name") === "string" &&
                   String(getRecordFieldValue(selectedRecord, "document_name"))) ||
-                "Selected record"
+                "Registro seleccionado"
               : null,
           queueTitles: queueItems.slice(0, 5).map((item) => `${item.title} (${item.status})`),
         }}
@@ -211,13 +211,13 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
             String(getRecordFieldValue(selectedRecord, "company_name"))) ||
           (typeof getRecordFieldValue(selectedRecord, "document_name") === "string" &&
             String(getRecordFieldValue(selectedRecord, "document_name"))) ||
-          "Record detail"
+          "Detalle del registro"
         }
         status={String(getRecordFieldValue(selectedRecord, "status") ?? "active")}
-        owner={String(getRecordFieldValue(selectedRecord, "owner") ?? "Unassigned")}
+        owner={String(getRecordFieldValue(selectedRecord, "owner") ?? "Sin responsable")}
         summary={
           currentObject?.description ??
-          "The detail panel keeps key fields, history, and AI-generated context in one place."
+          "El detalle reúne estado, responsable, campos clave y actividad para decidir rápido."
         }
         askHref={`/workspaces/${snapshot.workspace.subdomain}?tab=chat&ask=record${currentObject ? `&object=${currentObject.id}` : ""}${selectedRecord ? `&record=${selectedRecord.id}` : ""}`}
         fields={currentFields.map((field) => ({
@@ -270,42 +270,42 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
           href: `/workspaces/${snapshot.workspace.subdomain}?tab=chat`,
           active: selectedTab === "chat",
         },
-        { id: "home", label: "Home", href: `/workspaces/${snapshot.workspace.subdomain}?tab=home`, active: selectedTab === "home" },
+        { id: "home", label: "Inicio", href: `/workspaces/${snapshot.workspace.subdomain}?tab=home`, active: selectedTab === "home" },
         {
           id: "queue",
-          label: "Queue",
+          label: "Cola",
           href: `/workspaces/${snapshot.workspace.subdomain}?tab=queue`,
           badge: queueItems.length,
           active: selectedTab === "queue",
         },
         {
           id: "data",
-          label: currentObject?.name ?? "Data",
+          label: currentObject?.name ?? "Datos",
           href: `/workspaces/${snapshot.workspace.subdomain}?tab=data${currentObject ? `&object=${currentObject.id}` : ""}${currentView ? `&view=${currentView.id}` : ""}`,
           active: selectedTab === "data",
         },
         {
           id: "record",
-          label: "Record detail",
+          label: "Detalle",
           href: `/workspaces/${snapshot.workspace.subdomain}?tab=record${currentObject ? `&object=${currentObject.id}` : ""}${selectedRecord ? `&record=${selectedRecord.id}` : ""}`,
           active: selectedTab === "record",
         },
         {
           id: "agents",
-          label: "Agents",
+          label: "Agentes",
           href: `/workspaces/${snapshot.workspace.subdomain}?tab=agents`,
           active: selectedTab === "agents",
           hidden: membership.role === "viewer",
         },
       ]}
       contextRail={{
-        headline: "CEO agent context",
+        headline: "Contexto operativo",
         summary:
-          "The workspace shell keeps agent scope, queue pressure, and recent activity visible so operators always know what the system is doing.",
+          "Resumen continuo de cobertura de agentes, carga pendiente y señales recientes del sistema.",
         bullets: [
-          `${snapshot.objects.length} objects rendered from the meta-model`,
-          `${snapshot.agents.length} visible agents with scoped permissions`,
-          `${snapshot.activity.length} recent activity entries`,
+          `${snapshot.objects.length} objetos activos en el modelo`,
+          `${snapshot.agents.length} agentes visibles con alcance definido`,
+          `${snapshot.activity.length} eventos recientes registrados`,
         ],
       }}
     >

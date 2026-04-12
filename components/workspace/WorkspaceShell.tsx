@@ -1,5 +1,7 @@
 import Link from "next/link";
 import { ShieldCheck } from "lucide-react";
+import type { CSSProperties } from "react";
+import styles from "./workspace-shell.module.css";
 
 type NavItem = {
   id: string;
@@ -41,155 +43,154 @@ export function WorkspaceShell({
 }: Props) {
   const groupedItems = [
     {
-      label: "Operate",
-      items: navItems.filter((item) => ["home", "chat", "queue", "record"].includes(item.id) && !item.hidden),
+      label: "OPERAR",
+      items: navItems.filter((item) => ["home", "chat", "queue"].includes(item.id) && !item.hidden),
     },
     {
-      label: "Workspace",
-      items: navItems.filter((item) => ["data", "agents"].includes(item.id) && !item.hidden),
+      label: "DATOS",
+      items: navItems.filter((item) => ["data", "record"].includes(item.id) && !item.hidden),
+    },
+    {
+      label: "SISTEMA",
+      items: navItems.filter((item) => ["agents"].includes(item.id) && !item.hidden),
     },
   ].filter((group) => group.items.length > 0);
 
+  const itemMeta: Record<string, string> = {
+    home: "🏠",
+    chat: "💬",
+    queue: "📋",
+    data: "📄",
+    record: "🧾",
+    agents: "🤖",
+  };
+
+  const roleLabel = currentRole === "admin" ? "Administrador" : currentRole === "viewer" ? "Visualizador" : "Operador";
+  const sidebarStyle: CSSProperties = {
+    ["--workspace-accent-brand" as string]: accentColor ?? "var(--color-accent)",
+  };
+
   return (
-    <div className="workspace-app">
-      <div className="workspace-shell">
-        <aside className="workspace-sidebar">
-          <div className="workspace-brand">
-            <p className="workspace-brand__eyebrow">Prisma workspace</p>
-            <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-              <div
-                style={{
-                  width: 42,
-                  height: 42,
-                  borderRadius: 16,
-                  background: accentColor ?? "var(--workspace-accent)",
-                  color: "#ffffff",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  fontWeight: 700,
-                  boxShadow: "0 10px 24px rgba(51, 92, 255, 0.22)",
-                  overflow: "hidden",
-                }}
-              >
+    <div className={styles.appShell}>
+      <div className={styles.shellGrid}>
+        <aside className={styles.sidebar} style={sidebarStyle}>
+          <div className={styles.brand}>
+            <p className={styles.brandEyebrow}>PRISMA WORKSPACE</p>
+            <div className={styles.brandRow}>
+              <div className={styles.brandAvatar}>
                 {workspaceLogoUrl ? (
                   // eslint-disable-next-line @next/next/no-img-element
                   <img
                     src={workspaceLogoUrl}
                     alt={`${workspaceName} logo`}
-                    style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                    className={styles.brandAvatarImage}
                   />
                 ) : (
                   workspaceName.slice(0, 1)
                 )}
               </div>
               <div>
-                <h1 className="workspace-brand__title">{workspaceName}</h1>
-                <p className="workspace-brand__subtitle">{workspaceSlug}.prisma.com.mx</p>
+                <h1 className={styles.brandTitle}>{workspaceName}</h1>
+                <p className={styles.brandSubtitle}>{workspaceSlug}.prisma.com.mx</p>
+                <p className={styles.brandPlan}>base · {roleLabel}</p>
               </div>
             </div>
           </div>
 
-          <nav className="workspace-nav">
+          <nav className={styles.nav}>
             {groupedItems.map((group) => (
-              <div key={group.label} className="workspace-nav__group">
-                <p className="workspace-nav__label">{group.label}</p>
+              <div key={group.label} className={styles.navGroup}>
+                <p className={styles.navLabel}>{group.label}</p>
                 {group.items.map((item) => (
                   <Link
                     key={item.id}
                     href={item.href}
-                    className={`workspace-link workspace-nav__item ${item.active ? "workspace-nav__item--active" : ""}`}
+                    className={`${styles.navItem} ${item.active ? styles.navItemActive : ""}`}
                   >
-                    <div>
-                      <p className="workspace-nav__title">{item.label}</p>
-                      <p className="workspace-nav__meta">
-                        {item.id === "home" && "Overview, queue, suggestions"}
-                        {item.id === "chat" && "CEO agent conversations"}
-                        {item.id === "queue" && "Priority actions waiting"}
-                        {item.id === "data" && "Dynamic views and saved filters"}
-                        {item.id === "record" && "Context-rich record surface"}
-                        {item.id === "agents" && "Permissions, jobs, activity"}
-                      </p>
+                    <div className={styles.navContent}>
+                      <span className={styles.navIcon}>{itemMeta[item.id] ?? "•"}</span>
+                      <div>
+                        <p className={styles.navTitle}>{item.label}</p>
+                      </div>
                     </div>
                     {typeof item.badge === "number" && item.badge > 0 ? (
-                      <span className="workspace-pill workspace-pill--accent">{item.badge}</span>
+                      <span className={styles.navBadge}>{item.badge}</span>
                     ) : null}
                   </Link>
                 ))}
               </div>
             ))}
+
+            {currentRole === "admin" ? (
+              <div className={styles.navGroup}>
+                <p className={styles.navLabel}>ADMIN</p>
+                <Link href="/admin" className={styles.navItem}>
+                  <div className={styles.navContent}>
+                    <span className={styles.navIcon}>⚙️</span>
+                    <p className={styles.navTitle}>Configuración</p>
+                  </div>
+                </Link>
+              </div>
+            ) : null}
           </nav>
 
-          <div className="workspace-hero-note">
-            <p className="workspace-card__eyebrow">Operating model</p>
-            Database first. CEO agent for coordination. Worker agents for tightly scoped work.
-          </div>
-
-          {currentUserEmail ? (
-            <div className="workspace-hero-note">
-              <p className="workspace-card__eyebrow">Signed in</p>
-              <div style={{ display: "grid", gap: 6 }}>
-                <strong style={{ color: "#111827", fontSize: 14 }}>{currentUserEmail}</strong>
-                <span style={{ color: "#6b7280", fontSize: 13 }}>
-                  {currentRole ? `Workspace role: ${currentRole}` : "Workspace member"}
-                </span>
-              </div>
+          <div className={styles.sidebarBottom}>
+            <div className={styles.sessionCard}>
+              <p className={styles.cardEyebrow}>Sesión activa</p>
+              <strong>{currentUserEmail ?? "Usuario autenticado"}</strong>
+              <span>{roleLabel}</span>
             </div>
-          ) : null}
+          </div>
         </aside>
 
-        <main className="workspace-main">
-          <header className="workspace-header">
-            <div className="workspace-header__copy">
-              <p className="workspace-header__eyebrow">Premium operating layer</p>
-              <h2 className="workspace-header__title">{workspaceName}</h2>
-              <p className="workspace-header__description">
-                Calm, high-signal surfaces for structured operations, agent supervision, and workspace design driven by
-                the database model.
+        <main className={styles.content}>
+          <header className={styles.header}>
+            <div className={styles.headerCopy}>
+              <p className={styles.headerEyebrow}>OPERACIÓN</p>
+              <h2 className={styles.headerTitle}>{workspaceName}</h2>
+              <p className={styles.headerDescription}>
+                Donde estás, qué importa y qué sigue: estructura clara para operar sin ruido.
               </p>
             </div>
 
-            <div className="workspace-header__actions">
-              <div className="workspace-pill workspace-pill--neutral">
+            <div className={styles.headerActions}>
+              <div className={`${styles.pill} ${styles.pillStatus}`}>
                 <ShieldCheck size={14} />
-                Human-supervised
+                Supervisado por humano
               </div>
-              <Link href="/admin" className="workspace-link workspace-button">
-                Open admin
-              </Link>
-              <Link href="/workspaces" className="workspace-link workspace-button workspace-button--primary">
-                All workspaces
+              <Link href="/workspaces" className={`${styles.button} ${styles.buttonPrimary}`}>
+                Cambiar workspace
               </Link>
               <form action="/logout" method="post">
-                <button type="submit" className="workspace-button">
-                  Sign out
+                <button type="submit" className={styles.button}>
+                  Cerrar sesión
                 </button>
               </form>
             </div>
           </header>
 
-          {children}
+          <section className={styles.pageBody}>{children}</section>
         </main>
 
-        <aside className="workspace-rail">
-          <p className="workspace-card__eyebrow">{contextRail.headline}</p>
-          <div className="workspace-hero-stack">
-            <div className="workspace-hero-note">{contextRail.summary}</div>
-            <div className="workspace-panel">
-              <div className="workspace-panel__header">
+        <aside className={styles.rail}>
+          <p className={styles.cardEyebrow}>{contextRail.headline}</p>
+          <div className={styles.railStack}>
+            <div className={styles.railNote}>{contextRail.summary}</div>
+            <div className={styles.railPanel}>
+              <div className={styles.railPanelHeader}>
                 <div>
-                  <h3 className="workspace-panel__title">Visible system context</h3>
-                  <p className="workspace-panel__description">
-                    Agents should feel legible: what they can see, what they can change, and what still needs a human.
+                  <h3 className={styles.railPanelTitle}>Contexto visible</h3>
+                  <p className={styles.railPanelDescription}>
+                    Señales rápidas para entender estado, cobertura y carga operativa.
                   </p>
                 </div>
               </div>
-              <div className="workspace-panel__content">
-                <div className="workspace-kv">
+              <div className={styles.railPanelContent}>
+                <div className={styles.kv}>
                   {contextRail.bullets.map((bullet) => (
-                    <div key={bullet} className="workspace-kv__row">
-                      <span className="workspace-kv__label">Signal</span>
-                      <span className="workspace-kv__value">{bullet}</span>
+                    <div key={bullet} className={styles.kvRow}>
+                      <span className={styles.kvLabel}>Señal</span>
+                      <span className={styles.kvValue}>{bullet}</span>
                     </div>
                   ))}
                 </div>

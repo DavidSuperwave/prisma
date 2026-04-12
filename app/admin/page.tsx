@@ -14,17 +14,17 @@ export default async function AdminOverviewPage() {
   const stats = [
     { label: 'Workspaces', value: workspaces.length, href: '/admin/clients' },
     { label: 'Templates', value: templates.length, href: '/admin/templates' },
-    { label: 'Landing Sites', value: sites.length, href: '/admin/clients' },
+    { label: 'Sites', value: sites.length, href: '/admin/clients' },
     { label: 'Agents', value: agents.length, href: '/admin/agents' },
     { label: 'Deployments', value: deployments.length, href: '/admin/deployments' },
-    { label: 'Provisioning Jobs', value: jobs.length, href: '/admin/usage' },
+    { label: 'Ops events', value: jobs.length, href: '/admin/usage' },
   ]
 
   return (
     <section>
-      <h1 style={{ marginTop: 0 }}>Platform Overview</h1>
+      <h1 style={{ marginTop: 0 }}>Launch & monitor</h1>
       <p style={{ color: 'var(--giga-muted)' }}>
-        Shared control plane for client onboarding, landing templates, agent definitions, and runtime deployments.
+        Control plane for workspace provisioning, template management, deployment health, and operations visibility.
       </p>
 
       <div style={gridStyle}>

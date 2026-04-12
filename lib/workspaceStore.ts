@@ -6,6 +6,8 @@ export type PrismaWorkspace = {
   subdomain: string;
   logoUrl: string | null;
   primaryColor: string | null;
+  agentLimit: number;
+  planTier: string;
   metadata: Record<string, unknown>;
   createdAt: string;
 };
@@ -96,6 +98,7 @@ export type WorkspaceSnapshot = {
 export type WorkspaceMembership = {
   workspaceId: string;
   role: "admin" | "operator" | "viewer";
+  isPlatformAdmin: boolean;
   workspace: PrismaWorkspace;
 };
 
@@ -114,13 +117,35 @@ function requireSupabaseAdmin() {
 }
 
 function mapWorkspace(row: Record<string, unknown>): PrismaWorkspace {
+  const metadata = (row.metadata as Record<string, unknown>) ?? {};
+  const agentLimitFromMetadata =
+    typeof metadata.agent_limit === "number"
+      ? metadata.agent_limit
+      : typeof metadata.agentLimit === "number"
+        ? metadata.agentLimit
+        : null;
+  const planTierFromMetadata =
+    typeof metadata.plan_tier === "string"
+      ? metadata.plan_tier
+      : typeof metadata.planTier === "string"
+        ? metadata.planTier
+        : null;
+
   return {
     id: String(row.id),
     name: String(row.name),
     subdomain: String(row.subdomain),
     logoUrl: row.logo_url ? String(row.logo_url) : null,
     primaryColor: row.primary_color ? String(row.primary_color) : null,
-    metadata: (row.metadata as Record<string, unknown>) ?? {},
+    agentLimit:
+      typeof row.agent_limit === "number"
+        ? row.agent_limit
+        : typeof row.agent_limit === "string"
+          ? Number(row.agent_limit)
+          : agentLimitFromMetadata ?? 3,
+    planTier:
+      typeof row.plan_tier === "string" && row.plan_tier.length > 0 ? row.plan_tier : planTierFromMetadata ?? "base",
+    metadata,
     createdAt: String(row.created_at),
   };
 }
@@ -312,6 +337,33 @@ export function deriveQueueItems(
     .slice(0, 12);
 }
 
+async function listWorkspaceMembershipRows(
+  userId: string,
+): Promise<Array<Record<string, unknown>>> {
+  const supabase = requireSupabaseAdmin();
+  const withPlatformFlag = await supabase
+    .from("workspace_members")
+    .select(
+      "workspace_id, role, is_platform_admin, workspaces!inner(id, name, subdomain, logo_url, primary_color, agent_limit, plan_tier, metadata, created_at)",
+    )
+    .eq("user_id", userId);
+
+  if (!withPlatformFlag.error) {
+    return (withPlatformFlag.data ?? []) as Record<string, unknown>[];
+  }
+
+  const fallback = await supabase
+    .from("workspace_members")
+    .select("workspace_id, role, workspaces!inner(id, name, subdomain, logo_url, primary_color, metadata, created_at)")
+    .eq("user_id", userId);
+
+  if (fallback.error) {
+    throw new Error(fallback.error.message);
+  }
+
+  return (fallback.data ?? []) as Record<string, unknown>[];
+}
+
 export async function listWorkspaceSummaries() {
   const supabase = requireSupabaseAdmin();
   const { data, error } = await supabase
@@ -326,46 +378,74 @@ export async function listWorkspaceSummaries() {
   return (data ?? []).map((row) => mapWorkspace(row as Record<string, unknown>));
 }
 
-export async function listWorkspaceMembershipsForUser(userId: string): Promise<WorkspaceMembership[]> {
+export async function listWorkspaceMembershipsForUser(
+  userId: string,
+  isPlatformAdmin = false,
+): Promise<WorkspaceMembership[]> {
   const supabase = requireSupabaseAdmin();
-  const { data, error } = await supabase
-    .from("workspace_members")
-    .select(
-      "workspace_id, role, workspaces!inner(id, name, subdomain, logo_url, primary_color, metadata, created_at)",
-    )
-    .eq("user_id", userId);
-
-  if (error) {
-    throw new Error(error.message);
-  }
-
-  return (data ?? []).map((row) => ({
+  const membershipRows = await listWorkspaceMembershipRows(userId);
+  const memberships = membershipRows.map((row) => ({
     workspaceId: String(row.workspace_id),
     role: row.role as "admin" | "operator" | "viewer",
+    isPlatformAdmin: Boolean(row.is_platform_admin),
     workspace: mapWorkspace(
       ((row as Record<string, unknown>).workspaces as Record<string, unknown>) ?? ({} as Record<string, unknown>),
     ),
   }));
+
+  if (!isPlatformAdmin) {
+    return memberships;
+  }
+
+  const workspaces = await listWorkspaceSummaries();
+  const membershipByWorkspace = new Map(memberships.map((entry) => [entry.workspaceId, entry]));
+
+  return workspaces.map((workspace) => {
+    const existing = membershipByWorkspace.get(workspace.id);
+    if (existing) {
+      return {
+        ...existing,
+        isPlatformAdmin: true,
+      };
+    }
+
+    return {
+      workspaceId: workspace.id,
+      role: "admin" as const,
+      isPlatformAdmin: true,
+      workspace,
+    };
+  });
 }
 
-export async function listWorkspaceSummariesForUser(userId: string) {
-  const memberships = await listWorkspaceMembershipsForUser(userId);
+export async function listWorkspaceSummariesForUser(userId: string, isPlatformAdmin = false) {
+  const memberships = await listWorkspaceMembershipsForUser(userId, isPlatformAdmin);
   return memberships.map((membership) => membership.workspace);
 }
 
 export async function getWorkspaceBySlug(workspaceSlug: string) {
   const supabase = requireSupabaseAdmin();
-  const { data, error } = await supabase
+  const withPlanFields = await supabase
+    .from("workspaces")
+    .select("id, name, subdomain, logo_url, primary_color, agent_limit, plan_tier, metadata, created_at")
+    .eq("subdomain", workspaceSlug)
+    .maybeSingle();
+
+  if (!withPlanFields.error) {
+    return withPlanFields.data ? mapWorkspace(withPlanFields.data as Record<string, unknown>) : null;
+  }
+
+  const fallback = await supabase
     .from("workspaces")
     .select("id, name, subdomain, logo_url, primary_color, metadata, created_at")
     .eq("subdomain", workspaceSlug)
     .maybeSingle();
 
-  if (error) {
-    throw new Error(error.message);
+  if (fallback.error) {
+    throw new Error(fallback.error.message);
   }
 
-  return data ? mapWorkspace(data as Record<string, unknown>) : null;
+  return fallback.data ? mapWorkspace(fallback.data as Record<string, unknown>) : null;
 }
 
 export async function listWorkspaceObjects(workspaceId: string) {
@@ -507,8 +587,8 @@ export async function getWorkspaceSnapshot(workspaceSlug: string): Promise<Works
   return { workspace, objects, fields, views, records, agents, activity };
 }
 
-export async function getWorkspaceSnapshotForUser(workspaceSlug: string, userId: string) {
-  const memberships = await listWorkspaceMembershipsForUser(userId);
+export async function getWorkspaceSnapshotForUser(workspaceSlug: string, userId: string, isPlatformAdmin = false) {
+  const memberships = await listWorkspaceMembershipsForUser(userId, isPlatformAdmin);
   const membership = memberships.find((entry) => entry.workspace.subdomain === workspaceSlug) ?? null;
 
   if (!membership) {

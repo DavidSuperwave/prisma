@@ -62,6 +62,7 @@ type DataPanelProps = {
   fields: PrismaWorkspaceField[];
   views: PrismaWorkspaceView[];
   records: PrismaWorkspaceRecord[];
+  recordBaseHref?: string;
   askHref?: string;
 };
 
@@ -85,11 +86,13 @@ type AgentPanelProps = {
 };
 
 type QueuePanelProps = {
+  recordBaseHref?: string;
   queueItems: Array<{
     id: string;
     title: string;
     subtitle: string;
     status: string;
+    objectId: string;
   }>;
 };
 
@@ -183,7 +186,7 @@ function createSession(userId: string) {
   const sessionId = typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}`;
   return {
     id: sessionId,
-    title: "New chat",
+    title: "Nuevo chat",
     conversationId: `user-${userId}-${sessionId}`,
     messages: [],
     attachments: [],
@@ -218,8 +221,8 @@ export function OverviewPanel({ metrics, queueItems, activity, suggestions, agen
     <div style={stackStyle}>
       <Panel
         eyebrow="Home"
-        title="Workspace operativo"
-        description="Un tablero claro, premium y centrado en decisiones, no en ruido."
+        title="Resumen operativo"
+        description="Lo importante del dia en un solo lugar."
       >
         <div style={metricGridStyle}>
           {stats.map((stat) => {
@@ -242,7 +245,7 @@ export function OverviewPanel({ metrics, queueItems, activity, suggestions, agen
         <Panel
           eyebrow="Queue"
           title="Prioridades que requieren intervención"
-          description="La cola diaria debe sentirse como un centro de mando sereno y accionable."
+          description={`${queueItems.length} items requieren seguimiento.`}
         >
           {queueItems.length === 0 ? (
             <EmptyState
@@ -270,8 +273,8 @@ export function OverviewPanel({ metrics, queueItems, activity, suggestions, agen
 
         <Panel
           eyebrow="Activity"
-          title="Lo último que hicieron los agentes"
-          description="Actividad legible y confiable para supervisión humana."
+          title="Actividad reciente"
+          description="Cambios recientes en lenguaje claro."
         >
           {activity.length === 0 ? (
             <EmptyState
@@ -287,15 +290,9 @@ export function OverviewPanel({ metrics, queueItems, activity, suggestions, agen
                     {entry.action.includes("flagged") ? <AlertTriangle size={16} /> : <ShieldCheck size={16} />}
                   </div>
                   <div>
-                    <p style={activityActionStyle}>{entry.action}</p>
+                    <p style={activityActionStyle}>{formatActivityLabel(entry.action)}</p>
                     <p style={activityDetailStyle}>
-                      {typeof entry.details.title === "string"
-                        ? entry.details.title
-                        : typeof entry.details.lead === "string"
-                          ? entry.details.lead
-                          : typeof entry.details.debtor === "string"
-                            ? entry.details.debtor
-                            : "Evento registrado"}
+                      {formatActivityDetails(entry.details)}
                     </p>
                   </div>
                   <p style={activityDateStyle}>{new Date(entry.createdAt).toLocaleString("es-MX")}</p>
@@ -308,9 +305,9 @@ export function OverviewPanel({ metrics, queueItems, activity, suggestions, agen
 
       <div style={overviewGridStyle}>
         <Panel
-          eyebrow="CEO Agent"
-          title="Suggested next actions"
-          description="The intelligence layer should propose crisp, operational next steps."
+        eyebrow="Copilot"
+          title="Siguientes pasos sugeridos"
+          description="Recomendaciones concretas para avanzar."
         >
           <div style={detailListStyle}>
             {suggestions.map((suggestion) => (
@@ -325,18 +322,18 @@ export function OverviewPanel({ metrics, queueItems, activity, suggestions, agen
         </Panel>
 
         <Panel
-          eyebrow="Agent coverage"
-          title="Visible responsibilities"
-          description="Agents should feel explicit, constrained, and easy to inspect."
+          eyebrow="Agents"
+          title="Cobertura del equipo"
+          description="Quien esta activo y que esta cubriendo."
         >
           <div style={detailListStyle}>
             {agents.slice(0, 4).map((agent) => (
               <div key={agent.id} style={queueItemStyle}>
                 <div>
                   <p style={queueTitleStyle}>{agent.name}</p>
-                  <p style={queueSubtitleStyle}>{agent.description ?? "No description available."}</p>
+                  <p style={queueSubtitleStyle}>{agent.description ?? "Sin descripcion."}</p>
                 </div>
-                <StatusPill tone={agent.status.toLowerCase()}>{agent.type}</StatusPill>
+                <StatusPill tone={agent.status.toLowerCase()}>{formatAgentTypeLabel(agent.type)}</StatusPill>
               </div>
             ))}
           </div>
@@ -346,15 +343,43 @@ export function OverviewPanel({ metrics, queueItems, activity, suggestions, agen
   );
 }
 
-export function QueuePanel({ queueItems }: QueuePanelProps) {
+export function QueuePanel({ queueItems, recordBaseHref }: QueuePanelProps) {
+  const [filter, setFilter] = useState<string>("all");
+  const filteredQueueItems =
+    filter === "all" ? queueItems : queueItems.filter((item) => item.status.toLowerCase() === filter);
+  const filters = [
+    { id: "all", label: "Todas" },
+    { id: "pending", label: "Pendientes" },
+    { id: "needs_review", label: "Por revisar" },
+    { id: "follow_up", label: "Seguimiento" },
+  ];
+
   return (
     <div style={stackStyle}>
       <Panel
         eyebrow="Queue"
-        title="Centro de decisiones humano"
-        description="La cola diaria debe mostrar excepciones, bloqueos y tareas operativas con claridad inmediata."
+        title="Queue"
+        description={`${queueItems.length} items requieren accion.`}
       >
-        {queueItems.length === 0 ? (
+        <div style={filterRowStyle}>
+          {filters.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => setFilter(item.id)}
+              style={{
+                ...filterButtonStyle,
+                background: filter === item.id ? "rgba(51, 92, 255, 0.12)" : "var(--workspace-panel)",
+                borderColor: filter === item.id ? "rgba(51, 92, 255, 0.2)" : "var(--workspace-border)",
+                color: filter === item.id ? "#2947cc" : "var(--workspace-text)",
+              }}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+
+        {filteredQueueItems.length === 0 ? (
           <EmptyState
             icon={Sparkles}
             title="No hay tareas urgentes"
@@ -362,14 +387,27 @@ export function QueuePanel({ queueItems }: QueuePanelProps) {
           />
         ) : (
           <div style={queueTableStyle}>
-            {queueItems.map((item) => (
-              <div key={item.id} style={queueTableRowStyle}>
+            {filteredQueueItems.map((item) => (
+              <a
+                key={item.id}
+                href={recordBaseHref ? `${recordBaseHref}&object=${item.objectId}&record=${item.id}` : undefined}
+                style={{
+                  ...queueTableRowStyle,
+                  borderLeft: `4px solid ${resolvePriorityColor(item.status)}`,
+                  textDecoration: "none",
+                }}
+              >
                 <div>
                   <p style={queueTitleStyle}>{item.title}</p>
-                  <p style={queueSubtitleStyle}>{item.subtitle}</p>
+                  <p style={queueSubtitleStyle}>
+                    {item.subtitle} · {formatQueueAction(item.status)}
+                  </p>
                 </div>
-                <StatusPill tone={item.status.toLowerCase()}>{item.status}</StatusPill>
-              </div>
+                <div style={queueRightStyle}>
+                  <StatusPill tone={item.status.toLowerCase()}>{formatStatusLabel(item.status)}</StatusPill>
+                  <ArrowRight size={16} color="var(--workspace-muted)" />
+                </div>
+              </a>
             ))}
           </div>
         )}
@@ -429,20 +467,20 @@ export function ChatPanel({ workspaceId, workspaceSlug, userId, contextSummary, 
   const selectedSessionMessageCount = selectedSession?.messages.length ?? 0;
 
   useEffect(() => {
-    if (!selectedSession) {
+    if (!selectedSessionId) {
       return;
     }
     setRenameDraft(selectedSessionTitle);
-  }, [selectedSession?.id, selectedSessionTitle]);
+  }, [selectedSessionId, selectedSessionTitle]);
 
   useEffect(() => {
-    if (!askPrompt || !selectedSession) {
+    if (!askPrompt || !selectedSessionId) {
       return;
     }
     if (selectedSessionMessageCount === 0 && !input.trim()) {
       setInput(askPrompt);
     }
-  }, [askPrompt, input, selectedSession?.id, selectedSessionMessageCount]);
+  }, [askPrompt, input, selectedSessionId, selectedSessionMessageCount]);
 
   function updateSession(sessionId: string, updater: (session: ChatSession) => ChatSession) {
     setSessions((current) =>
@@ -603,7 +641,7 @@ export function ChatPanel({ workspaceId, workspaceSlug, userId, contextSummary, 
       });
 
       if (!response.ok || !response.body) {
-        throw new Error("No se pudo conectar con el CEO agent.");
+        throw new Error("No se pudo conectar con el copilot.");
       }
 
       const reader = response.body.getReader();
@@ -663,25 +701,25 @@ export function ChatPanel({ workspaceId, workspaceSlug, userId, contextSummary, 
     <div style={stackStyle}>
       <Panel
         eyebrow="Chat"
-        title="CEO agent chat"
-        description="Conversation-first workspace intelligence with persistent named sessions for the current user."
+        title="Chat con CEO"
+        description="Conversaciones separadas por usuario dentro del workspace."
       >
         {!copilotAgent ? (
           <EmptyState
             icon={Bot}
-            title="No CEO agent available"
-            description="Seed or deploy a copilot agent before using the workspace chat surface."
+            title="No hay copilot disponible"
+            description="Activa un agente copilot para usar el chat del workspace."
           />
         ) : (
           <div style={chatLayoutStyle}>
             <div style={chatSidebarStyle}>
               <div style={chatSidebarHeaderStyle}>
                 <div>
-                  <p style={eyebrowStyle}>Sessions</p>
+                  <p style={eyebrowStyle}>Sesiones</p>
                   <p style={chatSidebarCopyStyle}>{copilotAgent.name}</p>
                 </div>
                 <button type="button" onClick={createNewChat} style={chatActionButtonStyle}>
-                  New chat
+                  Nuevo chat
                 </button>
               </div>
 
@@ -704,14 +742,14 @@ export function ChatPanel({ workspaceId, workspaceSlug, userId, contextSummary, 
                     >
                       <strong style={chatSessionTitleStyle}>{session.title}</strong>
                       <span style={chatSessionMetaStyle}>
-                        {session.messages.length ? `${session.messages.length} messages` : "Fresh session"}
+                        {session.messages.length ? `${session.messages.length} mensajes` : "Sesión nueva"}
                       </span>
                     </button>
                     <button
                       type="button"
                       onClick={() => deleteSession(session.id)}
                       style={chatDeleteButtonStyle}
-                      aria-label={`Delete ${session.title}`}
+                      aria-label={`Eliminar ${session.title}`}
                     >
                       ×
                     </button>
@@ -723,8 +761,8 @@ export function ChatPanel({ workspaceId, workspaceSlug, userId, contextSummary, 
             <div style={chatMainStyle}>
               <div style={chatHeaderStyle}>
                 <div>
-                  <p style={eyebrowStyle}>Current conversation</p>
-                  <h3 style={chatTitleStyle}>{selectedSession?.title ?? "New chat"}</h3>
+                  <p style={eyebrowStyle}>Conversación actual</p>
+                  <h3 style={chatTitleStyle}>{selectedSession?.title ?? "Nuevo chat"}</h3>
                 </div>
                 <StatusPill tone={copilotAgent.status.toLowerCase()}>{copilotAgent.status}</StatusPill>
               </div>
@@ -741,10 +779,10 @@ export function ChatPanel({ workspaceId, workspaceSlug, userId, contextSummary, 
                     }
                   }}
                   style={chatRenameInputStyle}
-                  aria-label="Rename current chat"
+                  aria-label="Renombrar conversación actual"
                 />
                 <label style={chatUploadLabelStyle}>
-                  {isUploading ? "Uploading..." : "Upload document"}
+                  {isUploading ? "Subiendo..." : "Subir documento"}
                   <input
                     type="file"
                     hidden
@@ -781,8 +819,8 @@ export function ChatPanel({ workspaceId, workspaceSlug, userId, contextSummary, 
                 ) : (
                   <EmptyState
                     icon={MessageSquare}
-                    title="Start the first conversation"
-                    description="Ask the CEO agent about this workspace, what changed today, or what dataset needs attention next."
+                    title="Inicia la primera conversacion"
+                    description="Pregunta que cambio hoy, que dataset necesita atencion o que sigue para el equipo."
                   />
                 )}
               </div>
@@ -799,7 +837,7 @@ export function ChatPanel({ workspaceId, workspaceSlug, userId, contextSummary, 
                     >
                       <div>
                         <strong style={chatAttachmentTitleStyle}>{attachment.fileName}</strong>
-                        <p style={chatAttachmentMetaStyle}>Documents record · {attachment.id.slice(0, 8)}…</p>
+                        <p style={chatAttachmentMetaStyle}>Registro en documentos · {attachment.id.slice(0, 8)}…</p>
                       </div>
                       <ArrowRight size={16} color="var(--workspace-muted)" />
                     </a>
@@ -811,16 +849,13 @@ export function ChatPanel({ workspaceId, workspaceSlug, userId, contextSummary, 
                 <textarea
                   value={input}
                   onChange={(event) => setInput(event.target.value)}
-                  placeholder="Ask the CEO agent about this workspace..."
+                  placeholder="Escribe una pregunta sobre este workspace..."
                   rows={4}
                   style={chatTextareaStyle}
                 />
                 <div style={chatComposerFooterStyle}>
-                  <span style={chatHintStyle}>
-                    Sessions persist locally per user/workspace and include the current tab, dataset, record, queue context, and uploaded documents.
-                  </span>
                   <button type="button" onClick={sendMessage} disabled={isLoading || !input.trim()} style={chatSendButtonStyle}>
-                    {isLoading ? <LoaderCircle size={16} className="workspace-spin" /> : "Send"}
+                    {isLoading ? <LoaderCircle size={16} className="workspace-spin" /> : "Enviar"}
                   </button>
                 </div>
                 {error ? <p style={chatErrorStyle}>{error}</p> : null}
@@ -833,7 +868,7 @@ export function ChatPanel({ workspaceId, workspaceSlug, userId, contextSummary, 
   );
 }
 
-export function DataPanel({ objects, fields, views, records, askHref }: DataPanelProps) {
+export function DataPanel({ objects, fields, views, records, recordBaseHref, askHref }: DataPanelProps) {
   const [selectedObjectId, setSelectedObjectId] = useState<string>(objects[0]?.id ?? "");
   const [selectedViewId, setSelectedViewId] = useState<string>("all");
   const [query, setQuery] = useState("");
@@ -862,9 +897,9 @@ export function DataPanel({ objects, fields, views, records, askHref }: DataPane
   return (
     <div style={stackStyle}>
       <Panel
-        eyebrow="Data Views"
-        title="Vistas dinámicas del negocio"
-        description="La base de datos es el centro del producto; las vistas deben sentirse operativas, claras y vivas."
+        eyebrow="Data"
+        title={object?.name ?? "Datos"}
+        description={object ? `${visibleRecords.length} registros visibles en esta vista.` : "Selecciona un objeto para empezar."}
       >
         <div style={toolbarStyle}>
           <div style={pickerGroupStyle}>
@@ -924,11 +959,11 @@ export function DataPanel({ objects, fields, views, records, askHref }: DataPane
             ) : null}
             {askHref ? (
               <a href={askHref} style={metaActionLinkStyle}>
-                Ask CEO about this dataset
+                Consultar con CEO
               </a>
             ) : null}
           </div>
-          <p style={metaCopyStyle}>{summary}</p>
+          <p style={metaCopyStyle}>{summary.replace("campos activos", "columnas").replace("1 vistas guardadas", "1 vista guardada")}</p>
         </div>
 
         {object && visibleRecords.length > 0 ? (
@@ -939,20 +974,29 @@ export function DataPanel({ objects, fields, views, records, askHref }: DataPane
                   {objectFields.map((field) => (
                     <th key={field.id} style={tableHeadStyle}>
                       <span>{field.name}</span>
-                      <small style={tableHeadMetaStyle}>{field.type}</small>
                     </th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {visibleRecords.map((record) => (
-                  <tr key={record.id}>
+                  <tr
+                    key={record.id}
+                    style={recordBaseHref ? clickableRowStyle : undefined}
+                    onClick={() => {
+                      if (!recordBaseHref || !object?.id) {
+                        return;
+                      }
+
+                      window.location.href = `${recordBaseHref}&object=${object.id}&record=${record.id}`;
+                    }}
+                  >
                     {objectFields.map((field) => {
                       const value = getRecordFieldValue(record, field.key);
                       return (
                         <td key={`${record.id}-${field.id}`} style={tableCellStyle}>
                           {field.key === "status" ? (
-                            <StatusPill tone={String(value ?? "").toLowerCase()}>{String(value ?? "—")}</StatusPill>
+                            <StatusPill tone={String(value ?? "").toLowerCase()}>{formatStatusLabel(String(value ?? "—"))}</StatusPill>
                           ) : (
                             <span>{value ? String(value) : "—"}</span>
                           )}
@@ -970,7 +1014,7 @@ export function DataPanel({ objects, fields, views, records, askHref }: DataPane
             title={object ? "No hay registros visibles" : "No hay objetos configurados"}
             description={
               object
-                ? "Ajusta la vista o la búsqueda, o usa el CEO agent para crear los primeros registros."
+                ? "Ajusta la vista o la búsqueda, o usa el copilot para crear los primeros registros."
                 : "Primero crea objetos y campos para que la vista dinámica tenga estructura."
             }
           />
@@ -988,7 +1032,7 @@ export function AgentsPanel({ agents, activity }: AgentPanelProps) {
   const [chatMessages, setChatMessages] = useState<Array<{ role: "user" | "assistant"; content: string }>>([
     {
       role: "assistant",
-      content: "Use this test chat to validate the selected agent without leaving the workspace.",
+      content: "Usa este chat para validar el agente seleccionado sin salir del workspace.",
     },
   ]);
   const selectedAgent = agents.find((agent) => agent.id === selectedAgentId) ?? agents[0] ?? null;
@@ -1025,7 +1069,7 @@ export function AgentsPanel({ agents, activity }: AgentPanelProps) {
 
       if (!response.ok || !response.body) {
         const errorText = await response.text();
-        throw new Error(errorText || "Unable to reach the selected agent.");
+        throw new Error(errorText || "No se pudo contactar al agente seleccionado.");
       }
 
       const reader = response.body.getReader();
@@ -1064,19 +1108,19 @@ export function AgentsPanel({ agents, activity }: AgentPanelProps) {
             }
 
             if (parsed.type === "error") {
-              throw new Error(parsed.error ?? "Agent request failed.");
+              throw new Error(parsed.error ?? "La solicitud al agente falló.");
             }
           }
         }
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Unknown error while contacting the agent.";
+      const message = error instanceof Error ? error.message : "Error desconocido al contactar al agente.";
       setChatError(message);
       setChatMessages((current) => {
         const updated = [...current];
         updated[updated.length - 1] = {
           role: "assistant",
-          content: "The selected agent could not answer right now. Check runtime configuration and try again.",
+          content: "El agente seleccionado no pudo responder en este momento. Revisa la configuración e inténtalo de nuevo.",
         };
         return updated;
       });
@@ -1089,8 +1133,8 @@ export function AgentsPanel({ agents, activity }: AgentPanelProps) {
     <div style={stackStyle}>
       <Panel
         eyebrow="Agents"
-        title="Agentes transparentes y con alcance visible"
-        description="Cada agente debe sentirse legible: misión, acceso, herramientas, memoria y límites."
+        title="Agentes"
+        description="Selecciona un agente para revisar su alcance, actividad y chat de prueba."
       >
         <div style={agentGridStyle}>
           <div style={agentListStyle}>
@@ -1122,8 +1166,8 @@ export function AgentsPanel({ agents, activity }: AgentPanelProps) {
                   <p style={agentDescriptionStyle}>{agent.description ?? "Sin descripción"}</p>
                 </div>
                 <div style={agentMetaWrapStyle}>
-                  <StatusPill tone="neutral">{agent.type}</StatusPill>
-                  <StatusPill tone="neutral">{agent.tools.length} skills</StatusPill>
+                  <StatusPill tone={resolveAgentTypeTone(agent.type)}>{formatAgentTypeLabel(agent.type)}</StatusPill>
+                  <StatusPill tone="neutral">{agent.tools.length} herramientas</StatusPill>
                 </div>
               </button>
             ))}
@@ -1134,11 +1178,11 @@ export function AgentsPanel({ agents, activity }: AgentPanelProps) {
               <>
                 <div style={agentDetailHeaderStyle}>
                   <div>
-                    <p style={eyebrowStyle}>Agent detail</p>
+                    <p style={eyebrowStyle}>Detalle</p>
                     <h3 style={agentDetailTitleStyle}>{selectedAgent.name}</h3>
                     <p style={agentDescriptionStyle}>{selectedAgent.description ?? "Sin descripción"}</p>
                   </div>
-                  <StatusPill tone={selectedAgent.status.toLowerCase()}>{selectedAgent.status}</StatusPill>
+                  <StatusPill tone={selectedAgent.status.toLowerCase()}>{formatStatusLabel(selectedAgent.status)}</StatusPill>
                 </div>
 
                 <div style={agentSectionGridStyle}>
@@ -1157,22 +1201,22 @@ export function AgentsPanel({ agents, activity }: AgentPanelProps) {
                     title="Acceso"
                     icon={ShieldCheck}
                     items={[
-                      `Lectura: ${selectedAgent.read.length ? selectedAgent.read.join(", ") : "—"}`,
-                      `Escritura: ${selectedAgent.write.length ? selectedAgent.write.join(", ") : "—"}`,
+                      `Lectura: ${selectedAgent.read.length ? selectedAgent.read.map(formatKnowledgeLabel).join(", ") : "—"}`,
+                      `Escritura: ${selectedAgent.write.length ? selectedAgent.write.map(formatKnowledgeLabel).join(", ") : "—"}`,
                       `Canales: ${selectedAgent.channels.length ? selectedAgent.channels.join(", ") : "Ninguno"}`,
                     ]}
                   />
                   <DetailBlock
-                    title="Skills y herramientas"
+                    title="Skills"
                     icon={Sparkles}
-                    items={selectedAgent.tools.length ? selectedAgent.tools : ["Sin skills adjuntas"]}
+                    items={selectedAgent.tools.length ? selectedAgent.tools : ["Sin herramientas adjuntas"]}
                   />
                   <DetailBlock
-                    title="Memoria y jobs"
+                    title="Memoria y programacion"
                     icon={CircleDot}
                     items={[
                       `Memoria: ${selectedAgent.memoryLabel}`,
-                      `Cron jobs: ${selectedAgent.cronJobs.length || 0}`,
+                      `Tareas programadas: ${selectedAgent.cronJobs.length || 0}`,
                     ]}
                   />
                 </div>
@@ -1181,9 +1225,6 @@ export function AgentsPanel({ agents, activity }: AgentPanelProps) {
                   <div style={detailRailStyle}>
                     <h4 style={detailRailTitleStyle}>SOUL.md</h4>
                     <p style={detailRailCopyStyle}>{selectedAgent.soulMd ?? "Sin instrucciones cargadas."}</p>
-                    {selectedAgent.runtimeLabel ? (
-                      <p style={detailRailMetaStyle}>Runtime: {selectedAgent.runtimeLabel}</p>
-                    ) : null}
                   </div>
 
                   <div style={detailRailStyle}>
@@ -1192,16 +1233,8 @@ export function AgentsPanel({ agents, activity }: AgentPanelProps) {
                       <div style={activityListStyle}>
                         {selectedActivity.map((entry) => (
                           <div key={entry.id} style={agentActivityRowStyle}>
-                            <p style={activityActionStyle}>{entry.action}</p>
-                            <p style={activityDetailStyle}>
-                              {typeof entry.details.title === "string"
-                                ? entry.details.title
-                                : typeof entry.details.lead === "string"
-                                  ? entry.details.lead
-                                  : typeof entry.details.debtor === "string"
-                                    ? entry.details.debtor
-                                    : "Acción registrada"}
-                            </p>
+                            <p style={activityActionStyle}>{formatActivityLabel(entry.action)}</p>
+                            <p style={activityDetailStyle}>{formatActivityDetails(entry.details)}</p>
                           </div>
                         ))}
                       </div>
@@ -1212,10 +1245,7 @@ export function AgentsPanel({ agents, activity }: AgentPanelProps) {
                 </div>
 
                 <div style={detailRailStyle}>
-                  <h4 style={detailRailTitleStyle}>Test chat</h4>
-                  <p style={detailRailCopyStyle}>
-                    Validate the selected agent from the workspace surface before wiring broader operator chat.
-                  </p>
+                  <h4 style={detailRailTitleStyle}>Chat de prueba</h4>
                   <div style={agentChatThreadStyle}>
                     {chatMessages.map((message, index) => (
                       <div
@@ -1228,9 +1258,9 @@ export function AgentsPanel({ agents, activity }: AgentPanelProps) {
                         }}
                       >
                         <strong style={agentChatRoleStyle}>
-                          {message.role === "user" ? "You" : selectedAgent.name}
+                          {message.role === "user" ? "Tu" : selectedAgent.name}
                         </strong>
-                        <p style={agentChatCopyStyle}>{message.content || (isSending ? "Thinking..." : "")}</p>
+                        <p style={agentChatCopyStyle}>{message.content || (isSending ? "Pensando..." : "")}</p>
                       </div>
                     ))}
                   </div>
@@ -1238,11 +1268,11 @@ export function AgentsPanel({ agents, activity }: AgentPanelProps) {
                     <input
                       value={chatInput}
                       onChange={(event) => setChatInput(event.target.value)}
-                      placeholder={`Message ${selectedAgent.name}`}
+                      placeholder={`Escribe a ${selectedAgent.name}`}
                       style={chatInputStyle}
                     />
                     <button type="button" onClick={sendTestMessage} style={chatButtonStyle} disabled={isSending}>
-                      {isSending ? "Sending..." : "Send"}
+                      {isSending ? "Enviando..." : "Enviar"}
                     </button>
                   </div>
                   {chatError ? <p style={agentChatErrorStyle}>{chatError}</p> : null}
@@ -1252,7 +1282,7 @@ export function AgentsPanel({ agents, activity }: AgentPanelProps) {
               <EmptyState
                 icon={Bot}
                 title="No hay agentes configurados"
-                description="Cuando registremos el CEO agent y el primer intake agent, aparecerán aquí."
+                description="Cuando registremos el copilot y el primer agente operativo, aparecerán aquí."
               />
             )}
           </div>
@@ -1276,17 +1306,17 @@ export function RecordDetailPanel({
       <Panel
         eyebrow="Record Detail"
         title={title}
-        description="El registro debe sentirse como un espacio operativo: contexto, estado, responsable y trazabilidad cerca del trabajo."
+        description="Contexto, estado y trazabilidad del registro actual."
       >
         <div style={recordHeroStyle}>
           <div>
             <p style={recordSummaryStyle}>{summary}</p>
             <div style={recordMetaStyle}>
-              <StatusPill tone={status.toLowerCase()}>{status}</StatusPill>
+              <StatusPill tone={status.toLowerCase()}>{formatStatusLabel(status)}</StatusPill>
               <StatusPill tone="neutral">{owner}</StatusPill>
               {askHref ? (
                 <a href={askHref} style={metaActionLinkStyle}>
-                  Ask CEO about this record
+                  Consultar con CEO
                 </a>
               ) : null}
             </div>
@@ -1299,7 +1329,9 @@ export function RecordDetailPanel({
               <div key={field.label} style={recordFieldStyle}>
                 <p style={eyebrowStyle}>{field.label}</p>
                 {field.tone ? (
-                  <StatusPill tone={field.tone === "positive" ? "active" : "neutral"}>{field.value}</StatusPill>
+                  <StatusPill tone={field.tone === "positive" ? "active" : "neutral"}>
+                    {field.label.toLowerCase() === "status" ? formatStatusLabel(field.value) : field.value}
+                  </StatusPill>
                 ) : (
                   <strong style={recordFieldValueStyle}>{field.value}</strong>
                 )}
@@ -1332,6 +1364,95 @@ export function RecordDetailPanel({
 export const HomeOverviewPanel = OverviewPanel;
 export const DatasetPanel = DataPanel;
 export const AgentOverviewPanel = AgentsPanel;
+
+function formatStatusLabel(status: string) {
+  const normalized = status.toLowerCase();
+  if (normalized === "pending") return "Pendiente";
+  if (normalized === "needs_review") return "Por revisar";
+  if (normalized === "follow_up") return "Seguimiento";
+  if (normalized === "pending_docs") return "Faltan documentos";
+  if (normalized === "awaiting_approval") return "Esperando aprobacion";
+  if (normalized === "active") return "Activo";
+  if (normalized === "review") return "En revision";
+  if (normalized === "deploying") return "Desplegando";
+  if (normalized === "paused") return "Pausado";
+  if (normalized === "error") return "Con error";
+  if (normalized === "qualified") return "Calificado";
+  if (normalized === "copilot") return "Copilot";
+  if (normalized === "channel") return "Canal";
+  if (normalized === "worker") return "Operativo";
+  return status.replace(/_/g, " ");
+}
+
+function formatActivityLabel(action: string) {
+  if (action === "receivable.flagged") return "Cobranza marcada para revision";
+  if (action === "lead.qualified") return "Lead calificado";
+  if (action === "document.uploaded_via_chat") return "Documento agregado desde chat";
+  if (action === "workspace.seeded") return "Workspace inicializado";
+  return action.replace(/[._]/g, " ").replace(/^\w/, (value) => value.toUpperCase());
+}
+
+function formatActivityDetails(details: Record<string, unknown>) {
+  if (typeof details.title === "string") {
+    return details.title;
+  }
+  if (typeof details.lead === "string") {
+    return details.lead;
+  }
+  if (typeof details.debtor === "string") {
+    return details.debtor;
+  }
+  if (typeof details.recommendation === "string") {
+    return details.recommendation;
+  }
+  if (typeof details.next_step === "string") {
+    return details.next_step;
+  }
+
+  const entries = Object.entries(details)
+    .filter(([, value]) => value !== null && value !== undefined && value !== "")
+    .slice(0, 3)
+    .map(([key, value]) => `${key.replace(/_/g, " ")}: ${String(value)}`);
+
+  return entries.join(" · ") || "Actividad registrada";
+}
+
+function formatAgentTypeLabel(type: string) {
+  if (type === "copilot") return "Copilot";
+  if (type === "channel") return "Canal";
+  if (type === "worker") return "Operativo";
+  return type;
+}
+
+function resolveAgentTypeTone(type: string) {
+  if (type === "copilot") return "info";
+  if (type === "channel") return "warning";
+  return "neutral";
+}
+
+function formatKnowledgeLabel(value: string) {
+  if (value === "workspace_views") return "Vistas";
+  return value.replace(/_/g, " ").replace(/^\w/, (letter) => letter.toUpperCase());
+}
+
+function resolvePriorityColor(status: string) {
+  const normalized = status.toLowerCase();
+  if (normalized === "needs_review") return "#f59e0b";
+  if (normalized === "follow_up") return "#335cff";
+  if (normalized === "pending_docs") return "#c2410c";
+  if (normalized === "blocked") return "#b42318";
+  return "#d0d5dd";
+}
+
+function formatQueueAction(status: string) {
+  const normalized = status.toLowerCase();
+  if (normalized === "needs_review") return "Requiere revisión humana";
+  if (normalized === "follow_up") return "Da seguimiento hoy";
+  if (normalized === "pending_docs") return "Solicita documentos faltantes";
+  if (normalized === "pending") return "Confirma el siguiente paso";
+  if (normalized === "blocked") return "Desbloquea este proceso";
+  return "Abrir para revisar";
+}
 
 function DetailBlock({
   icon: Icon,
@@ -1554,6 +1675,21 @@ const queueRightStyle: React.CSSProperties = {
   gap: 8,
 };
 
+const filterRowStyle: React.CSSProperties = {
+  display: "flex",
+  gap: 10,
+  flexWrap: "wrap",
+};
+
+const filterButtonStyle: React.CSSProperties = {
+  borderRadius: 999,
+  border: "1px solid var(--workspace-border)",
+  padding: "8px 12px",
+  fontSize: 12,
+  fontWeight: 700,
+  cursor: "pointer",
+};
+
 const queueTableStyle: React.CSSProperties = {
   display: "grid",
   gap: 12,
@@ -1568,6 +1704,10 @@ const queueTableRowStyle: React.CSSProperties = {
   alignItems: "center",
   justifyContent: "space-between",
   gap: 16,
+};
+
+const clickableRowStyle: React.CSSProperties = {
+  cursor: "pointer",
 };
 
 const chatLayoutStyle: React.CSSProperties = {

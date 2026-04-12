@@ -47,17 +47,64 @@ function formatAgentSummary(agents: Array<{
     channels:
       Array.isArray(agent.knowledgeScope.channels) ? (agent.knowledgeScope.channels as string[]) : [],
     cronJobs: agent.cronJobs,
-    memoryLabel: `${agent.memoryLimitMb} MB`,
+    memoryLabel: agent.memoryLimitMb > 0 ? "Activada" : "Desactivada",
     soulMd: agent.soulMd,
     runtimeLabel: agent.containerName,
   }));
+}
+
+function humanizeStatus(status: string) {
+  const normalized = status.toLowerCase();
+  if (normalized === "pending") return "Pendiente";
+  if (normalized === "needs_review") return "Revisar";
+  if (normalized === "follow_up") return "Seguimiento";
+  if (normalized === "pending_docs") return "Faltan documentos";
+  if (normalized === "awaiting_approval") return "Esperando aprobacion";
+  if (normalized === "active") return "Activo";
+  if (normalized === "review") return "En revision";
+  if (normalized === "blocked") return "Bloqueado";
+  if (normalized === "qualified") return "Calificado";
+  return status.replace(/_/g, " ");
+}
+
+function formatActivityTitle(action: string) {
+  if (action === "receivable.flagged") return "Cobranza marcada para revision";
+  if (action === "lead.qualified") return "Lead calificado";
+  if (action === "document.uploaded_via_chat") return "Documento agregado desde chat";
+  if (action === "workspace.seeded") return "Workspace inicializado";
+  return action.replace(/[._]/g, " ").replace(/^\w/, (value) => value.toUpperCase());
+}
+
+function formatActivityDetail(details: Record<string, unknown>) {
+  if (typeof details.title === "string") {
+    return details.title;
+  }
+  if (typeof details.lead === "string") {
+    return details.lead;
+  }
+  if (typeof details.debtor === "string") {
+    return details.debtor;
+  }
+  if (typeof details.recommendation === "string") {
+    return details.recommendation;
+  }
+  if (typeof details.next_step === "string") {
+    return details.next_step;
+  }
+
+  const entries = Object.entries(details)
+    .filter(([, value]) => value !== null && value !== undefined && value !== "")
+    .slice(0, 3)
+    .map(([key, value]) => `${key.replace(/_/g, " ")}: ${String(value)}`);
+
+  return entries.join(" · ") || "Actividad registrada";
 }
 
 export default async function WorkspaceDetailPage({ params, searchParams }: PageProps) {
   const { workspaceSlug } = await params;
   const query = await searchParams;
   const user = await requireAuthenticatedUser(`/workspaces/${workspaceSlug}`);
-  const workspaceResult = await getWorkspaceSnapshotForUser(workspaceSlug, user.id);
+  const workspaceResult = await getWorkspaceSnapshotForUser(workspaceSlug, user.id, user.isPlatformAdmin);
   const snapshot = workspaceResult?.snapshot ?? null;
   const membership = workspaceResult?.membership ?? null;
 
@@ -99,24 +146,24 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
     : [];
   const metrics = [
     {
-      label: "Open queues",
+      label: "Pendientes",
       value: String(deriveQueueItems(snapshot.objects, snapshot.records).length),
-      caption: "Items requiring operator action today.",
+      caption: "Items que requieren atencion hoy.",
     },
     {
-      label: "Live agents",
+      label: "Agentes activos",
       value: String(snapshot.agents.filter((agent) => agent.status === "active").length),
-      caption: "Specialists available in this workspace.",
+      caption: "Especialistas disponibles en este espacio.",
     },
     {
-      label: "Views",
+      label: "Vistas",
       value: String(snapshot.views.length),
-      caption: "Saved operational views generated from the meta-model.",
+      caption: "Vistas guardadas listas para operar.",
     },
     {
-      label: "Records",
+      label: "Registros",
       value: String(snapshot.records.length),
-      caption: "Structured rows powering the workspace.",
+      caption: "Registros visibles en el workspace.",
     },
   ];
 
@@ -136,9 +183,9 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
       queueItems={queueItems}
       activity={snapshot.activity}
       suggestions={[
-        "Review leads with missing underwriting documents before the afternoon handoff.",
-        "Ask the CEO agent to draft a receivables view grouped by aging bucket.",
-        "Deploy the WhatsApp intake specialist once the qualification script is finalized.",
+        "Revisa los leads que siguen sin documentos antes del cierre del dia.",
+        "Pidele al CEO que prepare una vista por antiguedad de cartera.",
+        "Confirma el flujo de WhatsApp antes de activar el siguiente agente.",
       ]}
       agents={formatAgentSummary(snapshot.agents)}
     />
@@ -151,17 +198,18 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
         fields={snapshot.fields}
         views={snapshot.views}
         records={snapshot.records}
-        askHref={
-          currentObject
-            ? `/workspaces/${snapshot.workspace.subdomain}?tab=chat&ask=dataset&object=${currentObject.id}${currentView ? `&view=${currentView.id}` : ""}`
-            : undefined
-        }
+        recordBaseHref={`/workspaces/${snapshot.workspace.subdomain}?tab=record`}
       />
     );
   }
 
   if (selectedTab === "queue") {
-    content = <QueuePanel queueItems={queueItems} />;
+    content = (
+      <QueuePanel
+        queueItems={queueItems}
+        recordBaseHref={`/workspaces/${snapshot.workspace.subdomain}?tab=record`}
+      />
+    );
   }
 
   if (selectedTab === "chat") {
@@ -217,7 +265,7 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
         owner={String(getRecordFieldValue(selectedRecord, "owner") ?? "Unassigned")}
         summary={
           currentObject?.description ??
-          "The detail panel keeps key fields, history, and AI-generated context in one place."
+          "Este registro concentra contexto, responsables y trazabilidad operativa."
         }
         askHref={`/workspaces/${snapshot.workspace.subdomain}?tab=chat&ask=record${currentObject ? `&object=${currentObject.id}` : ""}${selectedRecord ? `&record=${selectedRecord.id}` : ""}`}
         fields={currentFields.map((field) => ({
@@ -233,13 +281,8 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
         activity={snapshot.activity
           .slice(0, 6)
           .map((item) => ({
-            title: item.action,
-            detail:
-              typeof item.details.title === "string"
-                ? item.details.title
-                : typeof item.details.recommendation === "string"
-                  ? item.details.recommendation
-                  : JSON.stringify(item.details),
+            title: formatActivityTitle(item.action),
+            detail: formatActivityDetail(item.details),
             timestamp: new Date(item.createdAt).toLocaleString("es-MX"),
           }))}
       />
@@ -268,46 +311,65 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
           id: "chat",
           label: "Chat",
           href: `/workspaces/${snapshot.workspace.subdomain}?tab=chat`,
+          meta: "Conversaciones con el CEO",
           active: selectedTab === "chat",
         },
-        { id: "home", label: "Home", href: `/workspaces/${snapshot.workspace.subdomain}?tab=home`, active: selectedTab === "home" },
+        {
+          id: "home",
+          label: "Home",
+          href: `/workspaces/${snapshot.workspace.subdomain}?tab=home`,
+          meta: "Resumen del dia",
+          active: selectedTab === "home",
+        },
         {
           id: "queue",
           label: "Queue",
           href: `/workspaces/${snapshot.workspace.subdomain}?tab=queue`,
           badge: queueItems.length,
+          meta: "Tareas que requieren accion",
           active: selectedTab === "queue",
         },
-        {
-          id: "data",
-          label: currentObject?.name ?? "Data",
-          href: `/workspaces/${snapshot.workspace.subdomain}?tab=data${currentObject ? `&object=${currentObject.id}` : ""}${currentView ? `&view=${currentView.id}` : ""}`,
-          active: selectedTab === "data",
-        },
-        {
-          id: "record",
-          label: "Record detail",
-          href: `/workspaces/${snapshot.workspace.subdomain}?tab=record${currentObject ? `&object=${currentObject.id}` : ""}${selectedRecord ? `&record=${selectedRecord.id}` : ""}`,
-          active: selectedTab === "record",
-        },
+        ...snapshot.objects.map((object) => ({
+          id: `object-${object.id}`,
+          label: object.name,
+          href: `/workspaces/${snapshot.workspace.subdomain}?tab=data&object=${object.id}`,
+          meta: object.description ?? "Vista operativa",
+          active: selectedTab === "data" && currentObject?.id === object.id,
+        })),
         {
           id: "agents",
           label: "Agents",
           href: `/workspaces/${snapshot.workspace.subdomain}?tab=agents`,
+          meta: `${snapshot.agents.length} configurados`,
           active: selectedTab === "agents",
           hidden: membership.role === "viewer",
         },
       ]}
-      contextRail={{
-        headline: "CEO agent context",
-        summary:
-          "The workspace shell keeps agent scope, queue pressure, and recent activity visible so operators always know what the system is doing.",
-        bullets: [
-          `${snapshot.objects.length} objects rendered from the meta-model`,
-          `${snapshot.agents.length} visible agents with scoped permissions`,
-          `${snapshot.activity.length} recent activity entries`,
-        ],
-      }}
+      contextRail={
+        selectedTab === "queue"
+          ? null
+          : {
+              headline: selectedTab === "agents" ? "Workspace agents" : selectedTab === "record" ? "Record context" : "Workspace context",
+              summary:
+                selectedTab === "agents"
+                  ? `${snapshot.agents.filter((agent) => agent.status === "active").length} agentes activos y ${snapshot.workspace.agentLimit} permitidos en este plan.`
+                  : selectedTab === "record"
+                    ? "Estado, responsables y trazabilidad del registro actual."
+                    : "Resumen rapido del estado operativo del workspace.",
+              bullets:
+                selectedTab === "record"
+                  ? [
+                      { label: "Estado", value: humanizeStatus(String(getRecordFieldValue(selectedRecord ?? currentRecords[0] ?? snapshot.records[0], "status") ?? "active")) },
+                      { label: "Responsable", value: String(getRecordFieldValue(selectedRecord ?? currentRecords[0] ?? snapshot.records[0], "owner") ?? "Sin asignar") },
+                      { label: "Actividad", value: `${snapshot.activity.length} acciones recientes` },
+                    ]
+                  : [
+                      { label: "Plan", value: `${snapshot.workspace.planTier} · ${snapshot.agents.length}/${snapshot.workspace.agentLimit} agentes` },
+                      { label: "Datos", value: `${snapshot.objects.length} tablas y ${snapshot.records.length} registros` },
+                      { label: "Actividad", value: `${snapshot.activity.length} acciones recientes` },
+                    ],
+            }
+      }
     >
       {content}
     </WorkspaceShell>

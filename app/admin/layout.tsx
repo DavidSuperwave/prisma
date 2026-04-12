@@ -4,13 +4,13 @@ import { requireAdminUser } from '@/lib/auth'
 
 const navItems = [
   { href: '/admin', label: 'Overview' },
-  { href: '/admin/new-project', label: 'New Project' },
-  { href: '/admin/users', label: 'Users' },
-  { href: '/admin/clients', label: 'Clients' },
+  { href: '/admin/new-project', label: 'Create Workspace' },
+  { href: '/admin/clients', label: 'Workspaces' },
   { href: '/admin/templates', label: 'Templates' },
-  { href: '/admin/agents', label: 'Agents' },
+  { href: '/admin/agents', label: 'Agent Monitor' },
   { href: '/admin/deployments', label: 'Deployments' },
   { href: '/admin/usage', label: 'Usage' },
+  { href: '/admin/users', label: 'Users' },
 ]
 
 export default function AdminLayout({ children }: { children: ReactNode }) {
@@ -20,7 +20,10 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
     return (
       <div style={shellStyle}>
         <aside style={sidebarStyle}>
-          <p style={brandStyle}>Prisma Admin</p>
+          <div style={brandBlockStyle}>
+            <p style={brandStyle}>Prisma Admin</p>
+            <p style={brandCopyStyle}>Launch and monitor workspaces.</p>
+          </div>
           <nav style={navStyle}>
             {navItems.map((item) => (
               <Link key={item.href} href={item.href} style={linkStyle}>
@@ -53,8 +56,20 @@ const sidebarStyle: React.CSSProperties = {
 
 const brandStyle: React.CSSProperties = {
   margin: 0,
-  marginBottom: 16,
   fontWeight: 700,
+  fontSize: 18,
+}
+
+const brandBlockStyle: React.CSSProperties = {
+  display: 'grid',
+  gap: 6,
+  marginBottom: 20,
+}
+
+const brandCopyStyle: React.CSSProperties = {
+  margin: 0,
+  color: 'var(--giga-muted)',
+  fontSize: 13,
 }
 
 const navStyle: React.CSSProperties = {

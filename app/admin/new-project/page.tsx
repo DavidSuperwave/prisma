@@ -6,9 +6,9 @@ export default async function AdminNewProjectPage() {
 
   return (
     <section>
-      <h1 style={{ marginTop: 0 }}>New Project</h1>
+      <h1 style={{ marginTop: 0 }}>Create workspace</h1>
       <p style={{ color: 'var(--giga-muted)' }}>
-        Manually create a project for testing without using intake checkout. This can create workspace, site, and agent runtime metadata in one flow.
+        Provision the workspace shell, assign branding, and optionally prepare monitoring metadata for an initial runtime.
       </p>
       <ManualProjectCreator
         workspaces={workspaces.map((workspace) => ({

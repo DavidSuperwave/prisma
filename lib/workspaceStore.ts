@@ -116,6 +116,30 @@ function requireSupabaseAdmin() {
   return supabase;
 }
 
+async function readPlatformState() {
+  try {
+    const { readFile } = await import("node:fs/promises");
+    const raw = await readFile(`${process.cwd()}/.data/platform-state.json`, "utf8");
+    return JSON.parse(raw) as {
+      agents?: Array<{
+        id: string;
+        workspaceId: string;
+        name: string;
+        role: string;
+        model?: string;
+        promptPack?: Record<string, unknown>;
+        toolsConfig?: Record<string, unknown>;
+        integrationConfig?: Record<string, unknown>;
+        isActive?: boolean;
+        createdAt: string;
+        updatedAt: string;
+      }>;
+    };
+  } catch {
+    return {};
+  }
+}
+
 function mapWorkspace(row: Record<string, unknown>): PrismaWorkspace {
   const metadata = (row.metadata as Record<string, unknown>) ?? {};
   const agentLimitFromMetadata =
@@ -221,6 +245,58 @@ function mapAgent(row: Record<string, unknown>): PrismaWorkspaceAgent {
     memoryLimitMb: Number(row.memory_limit_mb ?? 0),
     cpuLimit: Number(row.cpu_limit ?? 0),
     createdAt: String(row.created_at),
+  };
+}
+
+function mapPlatformStateAgent(row: {
+  id: string;
+  workspaceId: string;
+  name: string;
+  role: string;
+  model?: string;
+  promptPack?: Record<string, unknown>;
+  toolsConfig?: Record<string, unknown>;
+  integrationConfig?: Record<string, unknown>;
+  isActive?: boolean;
+  createdAt: string;
+  updatedAt: string;
+}): PrismaWorkspaceAgent {
+  const runtimeType =
+    row.role === "intake_assistant" || row.role === "ops_assistant"
+      ? "copilot"
+      : row.role === "lead_qualifier" || row.role === "follow_up"
+        ? "channel"
+        : "worker";
+  const skills = Array.isArray(row.toolsConfig?.skills) ? (row.toolsConfig?.skills as string[]) : [];
+  const knowledgeScope =
+    (row.integrationConfig?.knowledgeScope as Record<string, unknown> | undefined) ??
+    (row.toolsConfig?.knowledgeScope as Record<string, unknown> | undefined) ??
+    {};
+  const cronJobs = Array.isArray(row.integrationConfig?.cronJobs) ? (row.integrationConfig?.cronJobs as unknown[]) : [];
+
+  return {
+    id: row.id,
+    workspaceId: row.workspaceId,
+    name: row.name,
+    type: runtimeType,
+    description:
+      typeof row.promptPack?.objective === "string"
+        ? row.promptPack.objective
+        : typeof row.promptPack?.description === "string"
+          ? row.promptPack.description
+          : null,
+    apiEndpoint: typeof row.integrationConfig?.endpoint === "string" ? row.integrationConfig.endpoint : "local://fallback",
+    apiKey: typeof row.integrationConfig?.apiKey === "string" ? row.integrationConfig.apiKey : "local-fallback",
+    containerName: `hermes-${row.workspaceId.slice(0, 8)}-${row.role}`,
+    status: row.isActive === false ? "paused" : "active",
+    soulMd: typeof row.promptPack?.soulMd === "string" ? row.promptPack.soulMd : null,
+    skills,
+    knowledgeScope,
+    cronJobs,
+    channelConfig: (row.integrationConfig?.channelConfig as Record<string, unknown> | undefined) ?? {},
+    memoryLimitMb: 512,
+    cpuLimit: 0.5,
+    createdAt: row.createdAt,
   };
 }
 
@@ -531,8 +607,27 @@ export async function listWorkspaceAgents(workspaceId: string) {
   if (error) {
     throw new Error(error.message);
   }
+  const supabaseAgents = (data ?? []).map((row) => mapAgent(row as Record<string, unknown>));
+  const fallbackState = await readPlatformState();
+  const fallbackAgents = (fallbackState.agents ?? [])
+    .filter((agent) => agent.workspaceId === workspaceId)
+    .map((agent) => mapPlatformStateAgent(agent));
 
-  return (data ?? []).map((row) => mapAgent(row as Record<string, unknown>));
+  if (fallbackAgents.length === 0) {
+    return supabaseAgents;
+  }
+
+  const merged = new Map<string, PrismaWorkspaceAgent>();
+  for (const agent of supabaseAgents) {
+    merged.set(agent.id, agent);
+  }
+  for (const agent of fallbackAgents) {
+    if (!merged.has(agent.id)) {
+      merged.set(agent.id, agent);
+    }
+  }
+
+  return Array.from(merged.values()).sort((left, right) => (left.createdAt > right.createdAt ? 1 : -1));
 }
 
 export async function getWorkspaceAgent(workspaceId: string, agentId: string) {

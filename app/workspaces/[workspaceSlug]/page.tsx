@@ -254,11 +254,11 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
           },
           {
             label: "Crear dashboard",
-            prompt: "Quiero un dashboard para este workspace con metricas, actividad reciente y prioridades.",
+            action: "bootstrap-dashboard",
           },
           {
-            label: "Importar datos",
-            prompt: "Necesito importar datos a este workspace. Guiame con la estructura y los siguientes pasos.",
+            label: "Crear CRM",
+            action: "bootstrap-crm",
           },
           {
             label: "Crear agente",

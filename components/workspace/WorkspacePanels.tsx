@@ -131,6 +131,8 @@ type ChatPanelProps = {
     label: string;
     href?: string;
     prompt?: string;
+    action?: "bootstrap-crm" | "bootstrap-dashboard";
+    preset?: "operations" | "sales" | "crm" | "custom";
   }>;
   suggestedPrompts: string[];
   contextSummary: {
@@ -637,6 +639,7 @@ export function ChatPanel({
   const [isUploading, setIsUploading] = useState(false);
   const [renameDraft, setRenameDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [actionFeedback, setActionFeedback] = useState<string | null>(null);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -908,6 +911,33 @@ export function ChatPanel({
     }
   }
 
+  async function runWorkspaceAction(action: "bootstrap-crm" | "bootstrap-dashboard", preset?: "operations" | "sales" | "crm" | "custom") {
+    setError(null);
+    setActionFeedback(null);
+    try {
+      const response = await fetch(`/api/workspaces/${workspaceSlug}/actions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: action === "bootstrap-dashboard" ? "create-dashboard" : action,
+          preset,
+        }),
+      });
+      const data = (await response.json().catch(() => ({}))) as { error?: string };
+      if (!response.ok) {
+        throw new Error(data.error ?? "No se pudo ejecutar la acción.");
+      }
+      setActionFeedback(
+        action === "bootstrap-crm"
+          ? "CRM inicial creado. Recarga el workspace para ver tablas, vistas y datos base."
+          : "Dashboard inicial creado. Regresa a Home para ver las nuevas tarjetas.",
+      );
+      router.refresh();
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "No se pudo ejecutar la acción.");
+    }
+  }
+
   return (
     <div style={stackStyle}>
       <Panel
@@ -1073,6 +1103,16 @@ export function ChatPanel({
                               <ArrowRight size={16} />
                               <span>{action.label}</span>
                             </a>
+                          ) : action.action ? (
+                            <button
+                              key={action.label}
+                              type="button"
+                              style={chatPromptCardStyle}
+                              onClick={() => void runWorkspaceAction(action.action!, action.preset)}
+                            >
+                              <ArrowRight size={16} />
+                              <span>{action.label}</span>
+                            </button>
                           ) : (
                             <button
                               key={action.label}
@@ -1124,6 +1164,7 @@ export function ChatPanel({
                     {isLoading ? <LoaderCircle size={16} className="workspace-spin" /> : "Enviar"}
                   </button>
                 </div>
+                {actionFeedback ? <p style={inlineSuccessStyle}>{actionFeedback}</p> : null}
                 {error ? <p style={chatErrorStyle}>{error}</p> : null}
               </div>
             </div>
@@ -1901,9 +1942,11 @@ export function TeamChatPanel({ workspaceSlug, workspaceName, currentUserEmail }
     setIsLoading(true);
     setError("");
     try {
-      const response = await fetch(
-        `/api/workspaces/${workspaceSlug}/team-chat?scopeType=${target.type}&scopeId=${encodeURIComponent(target.id)}`,
-      );
+      const query =
+        target.type === "channel"
+          ? `channelId=${encodeURIComponent(target.id)}`
+          : `directMessageId=${encodeURIComponent(target.id)}`;
+      const response = await fetch(`/api/workspaces/${workspaceSlug}/team-chat?${query}`);
       const data = (await response.json()) as {
         error?: string;
         channels?: Array<{ id: string; name: string; description?: string; isPrivate: boolean }>;
@@ -1971,7 +2014,7 @@ export function TeamChatPanel({ workspaceSlug, workspaceName, currentUserEmail }
     const response = await fetch(`/api/workspaces/${workspaceSlug}/team-chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode: "channel", name: newChannelName, description: `Canal de ${newChannelName}` }),
+      body: JSON.stringify({ action: "create-channel", name: newChannelName, description: `Canal de ${newChannelName}` }),
     });
     const data = (await response.json()) as { error?: string; channel?: { id: string; name: string } };
     if (!response.ok || !data.channel) {
@@ -1994,7 +2037,7 @@ export function TeamChatPanel({ workspaceSlug, workspaceName, currentUserEmail }
     const response = await fetch(`/api/workspaces/${workspaceSlug}/team-chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode: "dm", participantEmails: participants }),
+      body: JSON.stringify({ action: "create-dm", participantIds: participants }),
     });
     const data = (await response.json()) as { error?: string; directMessage?: { id: string } };
     if (!response.ok || !data.directMessage) {
@@ -2013,9 +2056,9 @@ export function TeamChatPanel({ workspaceSlug, workspaceName, currentUserEmail }
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        mode: "message",
-        scopeType: selectedScope.type,
-        scopeId: selectedScope.id,
+        action: "post-message",
+        channelId: selectedScope.type === "channel" ? selectedScope.id : undefined,
+        directMessageId: selectedScope.type === "dm" ? selectedScope.id : undefined,
         content: input,
       }),
     });
@@ -2107,7 +2150,7 @@ export function TeamChatPanel({ workspaceSlug, workspaceName, currentUserEmail }
                     }}
                   >
                     <span style={teamChatThreadTitleStyle}>{dm.title}</span>
-                    <span style={queueSubtitleStyle}>{dm.participantEmails.join(", ")}</span>
+                    <span style={queueSubtitleStyle}>{(dm.participantEmails ?? []).join(", ")}</span>
                   </button>
                 ))}
               </div>
@@ -2131,33 +2174,29 @@ export function TeamChatPanel({ workspaceSlug, workspaceName, currentUserEmail }
 
             <div style={chatMessagesStyle}>
               {messages.length ? (
-                messages.map((message) => (
+                messages.map((message) => {
+                  const senderLabel = message.senderEmail ?? "Miembro del equipo";
+                  const isCurrentUser =
+                    Boolean(currentUserEmail) &&
+                    senderLabel.toLowerCase() === String(currentUserEmail).toLowerCase();
+                  return (
                   <div
                     key={message.id}
                     style={{
                       ...chatBubbleStyle,
-                      alignSelf:
-                        currentUserEmail && message.senderEmail.toLowerCase() === currentUserEmail.toLowerCase()
-                          ? "flex-end"
-                          : "flex-start",
-                      background:
-                        currentUserEmail && message.senderEmail.toLowerCase() === currentUserEmail.toLowerCase()
-                          ? "rgba(17, 24, 39, 0.94)"
-                          : "rgba(255, 255, 255, 0.96)",
-                      color:
-                        currentUserEmail && message.senderEmail.toLowerCase() === currentUserEmail.toLowerCase()
-                          ? "#fff"
-                          : "var(--workspace-text)",
+                      alignSelf: isCurrentUser ? "flex-end" : "flex-start",
+                      background: isCurrentUser ? "rgba(17, 24, 39, 0.94)" : "rgba(255, 255, 255, 0.96)",
+                      color: isCurrentUser ? "#fff" : "var(--workspace-text)",
                     }}
                   >
-                    <strong style={agentChatRoleStyle}>{message.senderEmail}</strong>
+                    <strong style={agentChatRoleStyle}>{senderLabel}</strong>
                     <p style={{ margin: 0, whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{message.content}</p>
                     {message.mentions.length ? (
                       <span style={queueSubtitleStyle}>Menciones: {message.mentions.join(", ")}</span>
                     ) : null}
                     <span style={chatTimestampStyle}>{new Date(message.createdAt).toLocaleString("es-MX")}</span>
                   </div>
-                ))
+                )})
               ) : (
                 <EmptyState
                   icon={MessageSquare}

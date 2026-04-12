@@ -109,6 +109,7 @@ type ChatPanelProps = {
     status: string;
     description: string | null;
   } | null;
+  askPrompt?: string | null;
 };
 
 type RecordDetailPanelProps = {
@@ -116,6 +117,7 @@ type RecordDetailPanelProps = {
   status: string;
   owner: string;
   summary: string;
+  askHref?: string | null;
   fields: Array<{
     label: string;
     value: string;
@@ -135,11 +137,19 @@ type ChatMessage = {
   timestamp: string;
 };
 
+type ChatAttachment = {
+  id: string;
+  fileName: string;
+  publicUrl: string;
+  contentType: string;
+};
+
 type ChatSession = {
   id: string;
   title: string;
   conversationId: string;
   messages: ChatMessage[];
+  attachments: ChatAttachment[];
   updatedAt: string;
 };
 
@@ -175,6 +185,7 @@ function createSession(userId: string) {
     title: "New chat",
     conversationId: `user-${userId}-${sessionId}`,
     messages: [],
+    attachments: [],
     updatedAt: new Date().toISOString(),
   } satisfies ChatSession;
 }
@@ -373,6 +384,8 @@ export function ChatPanel({ workspaceId, workspaceSlug, userId, contextSummary, 
   const [selectedSessionId, setSelectedSessionId] = useState<string>("");
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const [renameDraft, setRenameDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -412,6 +425,13 @@ export function ChatPanel({ workspaceId, workspaceSlug, userId, contextSummary, 
 
   const selectedSession = sessions.find((session) => session.id === selectedSessionId) ?? sessions[0] ?? null;
 
+  useEffect(() => {
+    if (!selectedSession) {
+      return;
+    }
+    setRenameDraft(selectedSession.title);
+  }, [selectedSession?.id]);
+
   function updateSession(sessionId: string, updater: (session: ChatSession) => ChatSession) {
     setSessions((current) =>
       current
@@ -426,6 +446,79 @@ export function ChatPanel({ workspaceId, workspaceSlug, userId, contextSummary, 
     setSelectedSessionId(session.id);
     setInput("");
     setError(null);
+  }
+
+  function renameSession(sessionId: string, nextTitle: string) {
+    const trimmed = nextTitle.trim();
+    if (!trimmed) {
+      return;
+    }
+    updateSession(sessionId, (session) => ({
+      ...session,
+      title: trimmed,
+      updatedAt: new Date().toISOString(),
+    }));
+  }
+
+  async function uploadDocument(file: File) {
+    if (!selectedSession || isUploading) {
+      return;
+    }
+
+    setIsUploading(true);
+    setError(null);
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("conversationId", selectedSession.conversationId);
+
+      const response = await fetch(`/api/workspaces/${workspaceSlug}/documents`, {
+        method: "POST",
+        body: formData,
+      });
+
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        recordId?: string;
+        documentName?: string;
+        publicUrl?: string;
+        contentType?: string;
+      };
+
+      if (!response.ok || !payload.recordId || !payload.documentName || !payload.publicUrl) {
+        throw new Error(payload.error ?? "No se pudo subir el documento.");
+      }
+
+      updateSession(selectedSession.id, (session) => ({
+        ...session,
+        attachments: [
+          {
+            id: payload.recordId,
+            fileName: payload.documentName,
+            publicUrl: payload.publicUrl,
+            contentType: payload.contentType ?? file.type ?? "application/octet-stream",
+          },
+          ...session.attachments,
+        ],
+        messages: [
+          ...session.messages,
+          {
+            id: `upload-${Date.now()}`,
+            role: "assistant",
+            content: `Documento subido: ${payload.documentName}. Se agregó al dataset Documents y el workspace se actualizará.`,
+            timestamp: currentTimeLabel(),
+          },
+        ],
+        updatedAt: new Date().toISOString(),
+      }));
+    } catch (caughtError) {
+      const message = caughtError instanceof Error ? caughtError.message : "No se pudo subir el documento.";
+      setError(message);
+    } finally {
+      setIsUploading(false);
+      window.setTimeout(() => { if (typeof window !== "undefined") { router.replace(`${window.location.pathname}${window.location.search}`); router.refresh(); } }, 400);
+    }
   }
 
   function deleteSession(sessionId: string) {
@@ -546,7 +639,7 @@ export function ChatPanel({ workspaceId, workspaceSlug, userId, contextSummary, 
       }));
     } finally {
       setIsLoading(false);
-      window.setTimeout(() => router.refresh(), 400);
+      window.setTimeout(() => { if (typeof window !== "undefined") { router.replace(`${window.location.pathname}${window.location.search}`); router.refresh(); } }, 400);
     }
   }
 
@@ -620,6 +713,36 @@ export function ChatPanel({ workspaceId, workspaceSlug, userId, contextSummary, 
                 <StatusPill tone={copilotAgent.status.toLowerCase()}>{copilotAgent.status}</StatusPill>
               </div>
 
+              <div style={chatRenameRowStyle}>
+                <input
+                  value={renameDraft}
+                  onChange={(event) => setRenameDraft(event.target.value)}
+                  onBlur={() => selectedSession && renameSession(selectedSession.id, renameDraft)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      if (selectedSession) renameSession(selectedSession.id, renameDraft);
+                    }
+                  }}
+                  style={chatRenameInputStyle}
+                  aria-label="Rename current chat"
+                />
+                <label style={chatUploadLabelStyle}>
+                  {isUploading ? "Uploading..." : "Upload document"}
+                  <input
+                    type="file"
+                    hidden
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      if (file) {
+                        void uploadDocument(file);
+                      }
+                      event.currentTarget.value = "";
+                    }}
+                  />
+                </label>
+              </div>
+
               <div style={chatMessagesStyle}>
                 {selectedSession?.messages.length ? (
                   selectedSession.messages.map((message) => (
@@ -648,6 +771,26 @@ export function ChatPanel({ workspaceId, workspaceSlug, userId, contextSummary, 
                 )}
               </div>
 
+              {selectedSession?.attachments.length ? (
+                <div style={chatAttachmentListStyle}>
+                  {selectedSession.attachments.map((attachment) => (
+                    <a
+                      key={attachment.id}
+                      href={attachment.publicUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      style={chatAttachmentCardStyle}
+                    >
+                      <div>
+                        <strong style={chatAttachmentTitleStyle}>{attachment.fileName}</strong>
+                        <p style={chatAttachmentMetaStyle}>Documents record · {attachment.id.slice(0, 8)}…</p>
+                      </div>
+                      <ArrowRight size={16} color="var(--workspace-muted)" />
+                    </a>
+                  ))}
+                </div>
+              ) : null}
+
               <div style={chatComposerStyle}>
                 <textarea
                   value={input}
@@ -658,7 +801,7 @@ export function ChatPanel({ workspaceId, workspaceSlug, userId, contextSummary, 
                 />
                 <div style={chatComposerFooterStyle}>
                   <span style={chatHintStyle}>
-                    Sessions persist locally per user/workspace and include the current tab, dataset, record, and queue context.
+                    Sessions persist locally per user/workspace and include the current tab, dataset, record, queue context, and uploaded documents.
                   </span>
                   <button type="button" onClick={sendMessage} disabled={isLoading || !input.trim()} style={chatSendButtonStyle}>
                     {isLoading ? <LoaderCircle size={16} className="workspace-spin" /> : "Send"}
@@ -1103,6 +1246,7 @@ export function RecordDetailPanel({
   status,
   owner,
   summary,
+  askHref,
   fields,
   activity,
 }: RecordDetailPanelProps) {
@@ -1119,6 +1263,11 @@ export function RecordDetailPanel({
             <div style={recordMetaStyle}>
               <StatusPill tone={status.toLowerCase()}>{status}</StatusPill>
               <StatusPill tone="neutral">{owner}</StatusPill>
+              {askHref ? (
+                <a href={askHref} style={metaActionLinkStyle}>
+                  Ask CEO about this record
+                </a>
+              ) : null}
             </div>
           </div>
         </div>
@@ -1473,6 +1622,62 @@ const chatSessionTitleStyle: React.CSSProperties = {
 };
 
 const chatSessionMetaStyle: React.CSSProperties = {
+  color: "var(--workspace-muted)",
+  fontSize: 12,
+};
+
+const chatRenameRowStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 10,
+};
+
+const chatRenameInputStyle: React.CSSProperties = {
+  flex: 1,
+  borderRadius: 12,
+  border: "1px solid var(--workspace-border)",
+  background: "var(--workspace-surface)",
+  color: "var(--workspace-text)",
+  padding: "8px 10px",
+  font: "inherit",
+};
+
+const chatUploadLabelStyle: React.CSSProperties = {
+  borderRadius: 999,
+  border: "1px solid var(--workspace-border)",
+  background: "var(--workspace-panel)",
+  color: "var(--workspace-text)",
+  padding: "8px 12px",
+  fontSize: 12,
+  fontWeight: 700,
+  cursor: "pointer",
+};
+
+const chatAttachmentListStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 10,
+};
+
+const chatAttachmentCardStyle: React.CSSProperties = {
+  border: "1px solid var(--workspace-border)",
+  borderRadius: 16,
+  background: "var(--workspace-panel-soft)",
+  padding: "12px 14px",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 12,
+  textDecoration: "none",
+};
+
+const chatAttachmentTitleStyle: React.CSSProperties = {
+  color: "var(--workspace-text)",
+  fontSize: 14,
+  lineHeight: 1.4,
+};
+
+const chatAttachmentMetaStyle: React.CSSProperties = {
+  margin: "4px 0 0",
   color: "var(--workspace-muted)",
   fontSize: 12,
 };
@@ -1927,6 +2132,19 @@ const recordMetaStyle: React.CSSProperties = {
   gap: 8,
   flexWrap: "wrap",
   marginTop: 14,
+};
+
+const metaActionLinkStyle: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  borderRadius: 999,
+  border: "1px solid rgba(51, 92, 255, 0.16)",
+  background: "rgba(51, 92, 255, 0.08)",
+  color: "#2947cc",
+  padding: "6px 10px",
+  fontSize: 12,
+  fontWeight: 700,
+  textDecoration: "none",
 };
 
 const recordGridStyle: React.CSSProperties = {

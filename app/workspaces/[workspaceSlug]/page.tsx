@@ -196,6 +196,13 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
               "Selected record"
             : null
         }
+        askPrompt={
+          selectedRecord
+            ? `Analiza el registro ${((typeof getRecordFieldValue(selectedRecord, "name") === "string" && String(getRecordFieldValue(selectedRecord, "name"))) || (typeof getRecordFieldValue(selectedRecord, "company_name") === "string" && String(getRecordFieldValue(selectedRecord, "company_name"))) || (typeof getRecordFieldValue(selectedRecord, "document_name") === "string" && String(getRecordFieldValue(selectedRecord, "document_name"))) || "seleccionado")} y dime que acciones humanas pendientes ves.`
+            : currentObject
+              ? `Resume el dataset ${currentObject.name} y sugiere las siguientes acciones.`
+              : null
+        }
         queueSummary={queueItems.slice(0, 5).map((item) => ({
           title: item.title,
           status: item.status,
@@ -233,6 +240,7 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
           currentObject?.description ??
           "The detail panel keeps key fields, history, and AI-generated context in one place."
         }
+        askHref={`/workspaces/${snapshot.workspace.subdomain}?tab=chat`}
         fields={currentFields.map((field) => ({
           label: field.name,
           value: String(getRecordFieldValue(selectedRecord, field.key) ?? "—"),

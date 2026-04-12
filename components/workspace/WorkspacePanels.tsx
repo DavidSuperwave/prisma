@@ -406,19 +406,21 @@ export function ChatPanel({ workspaceId, workspaceSlug, userId, contextSummary, 
   useEffect(() => {
     if (!selectedSession) return;
     setRenameDraft(selectedSessionTitle);
-  }, [selectedSession?.id, selectedSessionTitle]);
+  }, [selectedSession, selectedSessionTitle]);
 
   useEffect(() => {
     if (!askPrompt || !selectedSession) return;
     if (selectedSessionMessageCount === 0 && !input.trim()) {
       setInput(askPrompt);
     }
-  }, [askPrompt, input, selectedSession?.id, selectedSessionMessageCount]);
+  }, [askPrompt, input, selectedSession, selectedSessionMessageCount]);
+
+  const latestMessageContent = selectedSession?.messages[selectedSession.messages.length - 1]?.content ?? "";
 
   useEffect(() => {
     if (!messageThreadRef.current) return;
     messageThreadRef.current.scrollTop = messageThreadRef.current.scrollHeight;
-  }, [selectedSession?.messages.length, selectedSession?.messages.at(-1)?.content, isLoading]);
+  }, [selectedSession?.messages.length, latestMessageContent, isLoading]);
 
   function updateSession(sessionId: string, updater: (session: ChatSession) => ChatSession) {
     setSessions((current) =>
@@ -794,18 +796,14 @@ export function DataPanel({ objects, fields, views, records, askHref }: DataPane
   const currentView = selectedViewId === "all" ? null : objectViews.find((view) => view.id === selectedViewId) ?? null;
   const scopedRecords = records.filter((record) => record.objectId === object?.id);
 
-  const visibleRecords = useMemo(
-    () =>
-      applyViewToRecords(scopedRecords, currentView).filter((record) =>
-        query.trim()
-          ? Object.values(record.data).some((value) =>
-              String(value ?? "")
-                .toLowerCase()
-                .includes(query.trim().toLowerCase()),
-            )
-          : true,
-      ),
-    [currentView, query, scopedRecords],
+  const visibleRecords = applyViewToRecords(scopedRecords, currentView).filter((record) =>
+    query.trim()
+      ? Object.values(record.data).some((value) =>
+          String(value ?? "")
+            .toLowerCase()
+            .includes(query.trim().toLowerCase()),
+        )
+      : true,
   );
 
   return (

@@ -21,6 +21,8 @@ type Props = {
   accentColor?: string | null;
   navItems: NavItem[];
   contextRail: ContextRail;
+  roleLabel?: string;
+  userEmail?: string;
   children: React.ReactNode;
 };
 
@@ -30,6 +32,8 @@ export function WorkspaceShell({
   accentColor,
   navItems,
   contextRail,
+  roleLabel,
+  userEmail,
   children,
 }: Props) {
   const groupedItems = [
@@ -106,6 +110,18 @@ export function WorkspaceShell({
             <p className="workspace-card__eyebrow">Operating model</p>
             Database first. CEO agent for coordination. Worker agents for tightly scoped work.
           </div>
+
+          {userEmail ? (
+            <div className="workspace-hero-note">
+              <p className="workspace-card__eyebrow">Signed in</p>
+              <div style={{ display: "grid", gap: 6 }}>
+                <strong style={{ color: "#111827", fontSize: 14 }}>{userEmail}</strong>
+                <span style={{ color: "#6b7280", fontSize: 13 }}>
+                  {roleLabel ? `Workspace role: ${roleLabel}` : "Workspace member"}
+                </span>
+              </div>
+            </div>
+          ) : null}
         </aside>
 
         <main className="workspace-main">
@@ -130,6 +146,11 @@ export function WorkspaceShell({
               <Link href="/workspaces" className="workspace-link workspace-button workspace-button--primary">
                 All workspaces
               </Link>
+              <form action="/logout" method="post">
+                <button type="submit" className="workspace-button">
+                  Sign out
+                </button>
+              </form>
             </div>
           </header>
 

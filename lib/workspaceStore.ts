@@ -93,6 +93,12 @@ export type WorkspaceSnapshot = {
   activity: PrismaWorkspaceActivity[];
 };
 
+export type WorkspaceMembership = {
+  workspaceId: string;
+  role: "admin" | "operator" | "viewer";
+  workspace: PrismaWorkspace;
+};
+
 type ViewFilter = {
   field?: string;
   operator?: "eq" | "neq" | "contains";
@@ -320,6 +326,33 @@ export async function listWorkspaceSummaries() {
   return (data ?? []).map((row) => mapWorkspace(row as Record<string, unknown>));
 }
 
+export async function listWorkspaceMembershipsForUser(userId: string): Promise<WorkspaceMembership[]> {
+  const supabase = requireSupabaseAdmin();
+  const { data, error } = await supabase
+    .from("workspace_members")
+    .select(
+      "workspace_id, role, workspaces!inner(id, name, subdomain, logo_url, primary_color, metadata, created_at)",
+    )
+    .eq("user_id", userId);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return (data ?? []).map((row) => ({
+    workspaceId: String(row.workspace_id),
+    role: row.role as "admin" | "operator" | "viewer",
+    workspace: mapWorkspace(
+      ((row as Record<string, unknown>).workspaces as Record<string, unknown>) ?? ({} as Record<string, unknown>),
+    ),
+  }));
+}
+
+export async function listWorkspaceSummariesForUser(userId: string) {
+  const memberships = await listWorkspaceMembershipsForUser(userId);
+  return memberships.map((membership) => membership.workspace);
+}
+
 export async function getWorkspaceBySlug(workspaceSlug: string) {
   const supabase = requireSupabaseAdmin();
   const { data, error } = await supabase
@@ -472,4 +505,35 @@ export async function getWorkspaceSnapshot(workspaceSlug: string): Promise<Works
   ]);
 
   return { workspace, objects, fields, views, records, agents, activity };
+}
+
+export async function getWorkspaceSnapshotForUser(workspaceSlug: string, userId: string) {
+  const memberships = await listWorkspaceMembershipsForUser(userId);
+  const membership = memberships.find((entry) => entry.workspace.subdomain === workspaceSlug) ?? null;
+
+  if (!membership) {
+    return null;
+  }
+
+  const [objects, fields, views, records, agents, activity] = await Promise.all([
+    listWorkspaceObjects(membership.workspaceId),
+    listWorkspaceFields(membership.workspaceId),
+    listWorkspaceViews(membership.workspaceId),
+    listWorkspaceRecords(membership.workspaceId),
+    listWorkspaceAgents(membership.workspaceId),
+    listWorkspaceActivity(membership.workspaceId),
+  ]);
+
+  return {
+    membership,
+    snapshot: {
+      workspace: membership.workspace,
+      objects,
+      fields,
+      views,
+      records,
+      agents,
+      activity,
+    } satisfies WorkspaceSnapshot,
+  };
 }

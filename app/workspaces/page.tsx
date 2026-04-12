@@ -1,8 +1,10 @@
 import Link from "next/link";
-import { listWorkspaceSummaries } from "@/lib/workspaceStore";
+import { requireAuthenticatedUser } from "@/lib/auth";
+import { listWorkspaceSummariesForUser } from "@/lib/workspaceStore";
 
 export default async function WorkspacesIndexPage() {
-  const workspaces = await listWorkspaceSummaries();
+  const user = await requireAuthenticatedUser("/workspaces");
+  const workspaces = await listWorkspaceSummariesForUser(user.id);
 
   return (
     <main className="workspace-index-page">
@@ -13,6 +15,7 @@ export default async function WorkspacesIndexPage() {
           This is the first product surface for Prisma v2: a premium operational workspace rendered from the
           meta-model and backed by the real Supabase project.
         </p>
+        <p style={{ color: "var(--workspace-muted)" }}>{user.email ?? "Signed in"} · {workspaces.length} accessible workspace(s)</p>
       </div>
 
       <div className="workspace-index-grid">

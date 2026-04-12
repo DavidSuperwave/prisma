@@ -1,7 +1,7 @@
 import {
   applyViewToRecords,
   deriveQueueItems,
-  getWorkspaceSnapshot,
+  getWorkspaceSnapshotForUser,
   getRecordFieldValue,
 } from "@/lib/workspaceStore";
 import { WorkspaceShell } from "@/components/workspace/WorkspaceShell";
@@ -12,13 +12,26 @@ import {
   QueuePanel,
   RecordDetailPanel,
 } from "@/components/workspace/WorkspacePanels";
+import { requireAuthenticatedUser } from "@/lib/auth";
 
 type PageProps = {
   params: Promise<{ workspaceSlug: string }>;
   searchParams: Promise<{ object?: string; view?: string; record?: string; tab?: string }>;
 };
 
-function formatAgentSummary(agents: Awaited<ReturnType<typeof getWorkspaceSnapshot>>["agents"]) {
+function formatAgentSummary(agents: Array<{
+  id: string;
+  name: string;
+  type: "copilot" | "channel" | "worker";
+  status: "active" | "paused" | "deploying" | "error";
+  description: string | null;
+  skills: string[];
+  knowledgeScope: Record<string, unknown>;
+  cronJobs: unknown[];
+  memoryLimitMb: number;
+  soulMd: string | null;
+  containerName: string;
+}>) {
   return agents.map((agent) => ({
     id: agent.id,
     name: agent.name,
@@ -42,18 +55,21 @@ function formatAgentSummary(agents: Awaited<ReturnType<typeof getWorkspaceSnapsh
 export default async function WorkspaceDetailPage({ params, searchParams }: PageProps) {
   const { workspaceSlug } = await params;
   const query = await searchParams;
-  const snapshot = await getWorkspaceSnapshot(workspaceSlug);
+  const user = await requireAuthenticatedUser(`/workspaces/${workspaceSlug}`);
+  const workspaceResult = await getWorkspaceSnapshotForUser(workspaceSlug, user.id);
+  const snapshot = workspaceResult?.snapshot ?? null;
+  const membership = workspaceResult?.membership ?? null;
 
-  if (!snapshot) {
+  if (!snapshot || !membership) {
     return (
       <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: 32 }}>
         <div style={{ maxWidth: 520 }}>
           <p style={{ fontSize: 14, color: "#6B7280", textTransform: "uppercase", letterSpacing: "0.12em" }}>
             Prisma workspace
           </p>
-          <h1 style={{ marginTop: 12, fontSize: "2.4rem", lineHeight: 1.1 }}>Workspace not found</h1>
+          <h1 style={{ marginTop: 12, fontSize: "2.4rem", lineHeight: 1.1 }}>Workspace not available</h1>
           <p style={{ marginTop: 12, color: "#4B5563" }}>
-            Seed the demo workspace first, then return to this route.
+            You do not have access to this workspace in the current session.
           </p>
         </div>
       </div>
@@ -216,7 +232,10 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
     <WorkspaceShell
       workspaceName={snapshot.workspace.name}
       workspaceSlug={snapshot.workspace.subdomain}
+      workspaceLogoUrl={snapshot.workspace.logoUrl}
       accentColor={snapshot.workspace.primaryColor}
+      currentUserEmail={user.email}
+      currentRole={membership.role}
       navItems={[
         { id: "home", label: "Home", href: `/workspaces/${snapshot.workspace.subdomain}?tab=home`, active: selectedTab === "home" },
         {
@@ -243,6 +262,7 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
           label: "Agents",
           href: `/workspaces/${snapshot.workspace.subdomain}?tab=agents`,
           active: selectedTab === "agents",
+          hidden: membership.role === "viewer",
         },
       ]}
       contextRail={{

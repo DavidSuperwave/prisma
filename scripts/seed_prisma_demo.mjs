@@ -88,6 +88,7 @@ async function ensureWorkspace({ name, subdomain, primaryColor, metadata }) {
       .update({
         name,
         primary_color: primaryColor,
+        logo_url: metadata.logo_url ?? null,
         metadata,
         updated_at: new Date().toISOString(),
       })
@@ -107,6 +108,7 @@ async function ensureWorkspace({ name, subdomain, primaryColor, metadata }) {
       name,
       subdomain,
       primary_color: primaryColor,
+      logo_url: metadata.logo_url ?? null,
       metadata,
     })
     .select("id, name, subdomain")
@@ -407,6 +409,7 @@ async function main() {
       vertical: "factoring",
       seeded_by: "scripts/seed_prisma_demo.mjs",
       experience_mode: "premium-ops",
+      logo_url: "https://placehold.co/96x96/335CFF/FFFFFF?text=BBC",
     },
   });
 
@@ -417,6 +420,7 @@ async function main() {
     metadata: {
       vertical: "internal",
       seeded_by: "scripts/seed_prisma_demo.mjs",
+      logo_url: "https://placehold.co/96x96/6B7280/FFFFFF?text=OPS",
     },
   });
 

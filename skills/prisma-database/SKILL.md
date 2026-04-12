@@ -78,6 +78,32 @@ Required columns:
 6. Read the object and fields back from Supabase.
 7. Only then report success.
 
+## Required tool choice
+
+- Prefer the `terminal` tool for Supabase writes and reads.
+- Avoid `exec` / code-execution sandboxes for this skill unless the user explicitly asks for them.
+- Source runtime secrets first with `. /opt/data/.env >/dev/null 2>&1` before terminal-based Supabase commands.
+- Use `python3` with `urllib.request` and `json` inside the terminal for deterministic HTTP requests.
+- After each write, perform a terminal-based read-back verification against the same workspace.
+
+## Terminal recipe
+
+Use a single terminal command shaped like this:
+
+```bash
+. /opt/data/.env >/dev/null 2>&1 && python3 - <<'PY'
+import json, os, urllib.request
+base = os.environ["SUPABASE_URL"].rstrip("/")
+key = os.environ["SUPABASE_SERVICE_KEY"]
+workspace_id = os.environ["HERMES_WORKSPACE_ID"]
+# verify workspace exists first
+# create object with urllib.request.Request(..., method="POST")
+# parse returned object id
+# create fields
+# read object + fields back and summarize
+PY
+```
+
 ## Supabase REST Examples
 
 ### Create object

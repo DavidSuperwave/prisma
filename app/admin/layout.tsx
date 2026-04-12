@@ -1,5 +1,6 @@
 import Link from 'next/link'
 import type { ReactNode } from 'react'
+import { requireAdminUser } from '@/lib/auth'
 
 const navItems = [
   { href: '/admin', label: 'Overview' },
@@ -13,21 +14,27 @@ const navItems = [
 ]
 
 export default function AdminLayout({ children }: { children: ReactNode }) {
-  return (
-    <div style={shellStyle}>
-      <aside style={sidebarStyle}>
-        <p style={brandStyle}>Prisma Admin</p>
-        <nav style={navStyle}>
-          {navItems.map((item) => (
-            <Link key={item.href} href={item.href} style={linkStyle}>
-              {item.label}
-            </Link>
-          ))}
-        </nav>
-      </aside>
-      <main style={contentStyle}>{children}</main>
-    </div>
-  )
+  async function renderLayout() {
+    await requireAdminUser('/admin')
+
+    return (
+      <div style={shellStyle}>
+        <aside style={sidebarStyle}>
+          <p style={brandStyle}>Prisma Admin</p>
+          <nav style={navStyle}>
+            {navItems.map((item) => (
+              <Link key={item.href} href={item.href} style={linkStyle}>
+                {item.label}
+              </Link>
+            ))}
+          </nav>
+        </aside>
+        <main style={contentStyle}>{children}</main>
+      </div>
+    )
+  }
+
+  return renderLayout()
 }
 
 const shellStyle: React.CSSProperties = {

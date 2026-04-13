@@ -18,7 +18,7 @@ export function LoginForm({ nextPath }: { nextPath: string }) {
           name="email"
           type="email"
           required
-          defaultValue="demo-admin@prisma.local"
+          defaultValue="george@bbc.local"
           style={{
             borderRadius: 14,
             border: "1px solid rgba(17,24,39,0.12)",

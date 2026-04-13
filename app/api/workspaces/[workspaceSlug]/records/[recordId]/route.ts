@@ -10,6 +10,21 @@ type UpdateRecordPayload = {
   data?: Record<string, unknown>;
 };
 
+function normalizeStatus(value: unknown) {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+function extractOfferLabel(data: Record<string, unknown>) {
+  const candidateKeys = ["offer_name", "title", "company_name", "name"];
+  for (const key of candidateKeys) {
+    const value = data[key];
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value.trim();
+    }
+  }
+  return "Oferta";
+}
+
 function requireSupabaseAdmin() {
   const supabase = getSupabaseAdmin();
   if (!supabase) {
@@ -62,6 +77,20 @@ export async function PATCH(request: Request, context: Context) {
     }
 
     const supabase = requireSupabaseAdmin();
+    const { data: existingRecord, error: existingRecordError } = await supabase
+      .from("records")
+      .select("id, object_id, data")
+      .eq("id", recordId)
+      .eq("workspace_id", authorization.membership.workspaceId)
+      .maybeSingle();
+
+    if (existingRecordError) {
+      throw new Error(existingRecordError.message);
+    }
+
+    if (!existingRecord) {
+      return Response.json({ error: "Record not found." }, { status: 404 });
+    }
 
     const { data: updatedRecord, error } = await supabase
       .from("records")
@@ -77,6 +106,56 @@ export async function PATCH(request: Request, context: Context) {
 
     if (!updatedRecord) {
       return Response.json({ error: "Record not found." }, { status: 404 });
+    }
+
+    const previousData =
+      existingRecord.data && typeof existingRecord.data === "object" && !Array.isArray(existingRecord.data)
+        ? (existingRecord.data as Record<string, unknown>)
+        : {};
+    const nextData =
+      updatedRecord.data && typeof updatedRecord.data === "object" && !Array.isArray(updatedRecord.data)
+        ? (updatedRecord.data as Record<string, unknown>)
+        : {};
+    const previousStatus = normalizeStatus(previousData.status);
+    const nextStatus = normalizeStatus(nextData.status);
+
+    if (previousStatus !== "approved" && nextStatus === "approved") {
+      try {
+        const { data: objectRow } = await supabase
+          .from("workspace_objects")
+          .select("name")
+          .eq("id", String(existingRecord.object_id))
+          .eq("workspace_id", authorization.membership.workspaceId)
+          .maybeSingle();
+        const objectName = String(objectRow?.name ?? "").toLowerCase();
+        if (objectName.includes("offer")) {
+          const { data: activityAgent } = await supabase
+            .from("workspace_agents")
+            .select("id")
+            .eq("workspace_id", authorization.membership.workspaceId)
+            .in("type", ["worker", "copilot"])
+            .order("created_at", { ascending: true })
+            .limit(1)
+            .maybeSingle();
+
+          if (activityAgent?.id) {
+            await supabase.from("agent_activity").insert({
+              workspace_id: authorization.membership.workspaceId,
+              agent_id: String(activityAgent.id),
+              action: "rate_offer.approved",
+              details: {
+                record_id: recordId,
+                offer: extractOfferLabel(nextData),
+                approved_by: authorization.user.email ?? authorization.user.id,
+                previous_status: previousStatus || null,
+                status: nextStatus,
+              },
+            });
+          }
+        }
+      } catch {
+        // Keep record updates resilient even if activity logging fails.
+      }
     }
 
     return Response.json({ record: mapRecordRow(updatedRecord as Record<string, unknown>) });

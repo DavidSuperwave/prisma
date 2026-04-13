@@ -125,6 +125,7 @@ type AgentPanelProps = {
     apiKey?: string;
     containerName?: string;
     lastHealthCheckAt?: string | null;
+    lastCronRunAt?: string | null;
     channelConfig?: Record<string, unknown>;
   }>;
   activity: PrismaWorkspaceActivity[];
@@ -2183,7 +2184,7 @@ export function AgentsPanel({
   const [isCheckingHealth, setIsCheckingHealth] = useState(false);
   const [deploymentFeedback, setDeploymentFeedback] = useState<string>("");
   const [lastHealthCheckAt, setLastHealthCheckAt] = useState<string | null>(null);
-  const [lastCronRunAt] = useState<string | null>(null);
+  const [lastCronRunAt, setLastCronRunAt] = useState<string | null>(null);
   const [connectionDraft, setConnectionDraft] = useState<Array<{ key: string; value: string }>>([]);
   const [isSavingConnections, setIsSavingConnections] = useState(false);
   const [connectionsFeedback, setConnectionsFeedback] = useState<string>("");
@@ -2233,6 +2234,10 @@ export function AgentsPanel({
       containerName: current.containerName ?? "",
       connectionsText: "",
     });
+    const seededConnections = getCredentialEnvEntries(current.channelConfig);
+    setConnectionDraft(seededConnections);
+    setLastCronRunAt(current.lastCronRunAt ?? null);
+    setConnectionsFeedback("");
     setIsCreateMode(false);
   }, [localAgents, selectedAgentId]);
 
@@ -2492,6 +2497,7 @@ export function AgentsPanel({
         status?: string;
         healthy?: boolean;
         lastHealthCheckAt?: string | null;
+        lastCronRunAt?: string | null;
       };
       if (!response.ok) {
         throw new Error(payload.error ?? "No se pudo verificar conexión.");
@@ -2504,6 +2510,7 @@ export function AgentsPanel({
                 ...agent,
                 status: payload.status ?? agent.status,
                 lastHealthCheckAt: payload.lastHealthCheckAt ?? agent.lastHealthCheckAt,
+                lastCronRunAt: payload.lastCronRunAt ?? agent.lastCronRunAt,
               }
             : agent,
         ),
@@ -2511,6 +2518,9 @@ export function AgentsPanel({
 
       if (payload.lastHealthCheckAt) {
         setLastHealthCheckAt(payload.lastHealthCheckAt);
+      }
+      if (payload.lastCronRunAt) {
+        setLastCronRunAt(payload.lastCronRunAt);
       }
 
       setDeploymentFeedback(payload.healthy ? "Agente en línea." : "No se puede conectar con el agente.");
@@ -3536,6 +3546,9 @@ function formatActivityLabel(action: string) {
   if (action === "receivable.flagged") return "Cobranza marcada para revision";
   if (action === "lead.qualified") return "Lead calificado";
   if (action === "document.uploaded_via_chat") return "Documento agregado desde chat";
+  if (action === "cron.executed") return "Cron ejecutado";
+  if (action === "rate_offer.generated") return "Oferta generada";
+  if (action === "rate_offer.approved") return "Oferta aprobada";
   if (action === "workspace.seeded") return "Workspace inicializado";
   return action.replace(/[._]/g, " ").replace(/^\w/, (value) => value.toUpperCase());
 }
@@ -3543,6 +3556,9 @@ function formatActivityLabel(action: string) {
 function formatActivityDetails(details: Record<string, unknown>) {
   if (typeof details.title === "string") {
     return details.title;
+  }
+  if (typeof details.offer === "string") {
+    return details.offer;
   }
   if (typeof details.lead === "string") {
     return details.lead;

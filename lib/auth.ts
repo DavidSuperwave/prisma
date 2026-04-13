@@ -27,7 +27,7 @@ function requireSupabaseAdmin() {
 }
 
 function getConfiguredPlatformAdminEmails() {
-  const configured = process.env.PRISMA_PLATFORM_ADMIN_EMAILS ?? "demo-admin@prisma.local";
+  const configured = process.env.PRISMA_PLATFORM_ADMIN_EMAILS ?? "george@bbc.local";
   return configured
     .split(",")
     .map((value) => value.trim().toLowerCase())

@@ -182,6 +182,8 @@ function humanizeActivityAction(action: string) {
   if (normalized === "workspace.seeded") return "Workspace inicializado";
   if (normalized === "sent_email") return "Correo enviado";
   if (normalized === "cron.executed") return "Cron ejecutado";
+  if (normalized === "rate_offer.generated") return "Oferta generada";
+  if (normalized === "rate_offer.approved") return "Oferta aprobada";
   return action.replace(/[._]/g, " ").replace(/^\w/, (value) => value.toUpperCase());
 }
 

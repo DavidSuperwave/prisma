@@ -70,6 +70,10 @@ function formatAgentSummary(agents: Array<{
       typeof agent.knowledgeScope.last_health_check_at === "string"
         ? agent.knowledgeScope.last_health_check_at
         : null,
+    lastCronRunAt:
+      typeof agent.knowledgeScope.last_cron_run_at === "string"
+        ? agent.knowledgeScope.last_cron_run_at
+        : null,
   }));
 }
 
@@ -91,6 +95,9 @@ function formatActivityTitle(action: string) {
   if (action === "receivable.flagged") return "Cobranza marcada para revision";
   if (action === "lead.qualified") return "Lead calificado";
   if (action === "document.uploaded_via_chat") return "Documento agregado desde chat";
+  if (action === "cron.executed") return "Cron ejecutado";
+  if (action === "rate_offer.generated") return "Oferta generada";
+  if (action === "rate_offer.approved") return "Oferta aprobada";
   if (action === "workspace.seeded") return "Workspace inicializado";
   return action.replace(/[._]/g, " ").replace(/^\w/, (value) => value.toUpperCase());
 }
@@ -98,6 +105,9 @@ function formatActivityTitle(action: string) {
 function formatActivityDetail(details: Record<string, unknown>) {
   if (typeof details.title === "string") {
     return details.title;
+  }
+  if (typeof details.offer === "string") {
+    return details.offer;
   }
   if (typeof details.lead === "string") {
     return details.lead;

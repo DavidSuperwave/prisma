@@ -178,6 +178,10 @@ export async function GET(request: Request, context: Context) {
           typeof (agentRow.knowledge_scope as Record<string, unknown> | null)?.last_health_check_at === "string"
             ? String((agentRow.knowledge_scope as Record<string, unknown>).last_health_check_at)
             : null,
+        lastCronRunAt:
+          typeof (agentRow.knowledge_scope as Record<string, unknown> | null)?.last_cron_run_at === "string"
+            ? String((agentRow.knowledge_scope as Record<string, unknown>).last_cron_run_at)
+            : null,
         channelStatus,
       },
     });
@@ -290,6 +294,10 @@ export async function PATCH(request: Request, context: Context) {
           typeof (updatedAgent.knowledge_scope as Record<string, unknown> | null)?.last_health_check_at === "string"
             ? String((updatedAgent.knowledge_scope as Record<string, unknown>).last_health_check_at)
             : null,
+        lastCronRunAt:
+          typeof (updatedAgent.knowledge_scope as Record<string, unknown> | null)?.last_cron_run_at === "string"
+            ? String((updatedAgent.knowledge_scope as Record<string, unknown>).last_cron_run_at)
+            : null,
       },
     });
   } catch (error) {
@@ -397,9 +405,11 @@ export async function POST(_request: Request, context: Context) {
 
     const lastHealthCheckAt = new Date().toISOString();
     const previousKnowledgeScope = (agentRow.knowledge_scope as Record<string, unknown>) ?? {};
+    const nextCronRunAt = healthy && !cronError ? new Date().toISOString() : undefined;
     const nextKnowledgeScope = {
       ...previousKnowledgeScope,
       last_health_check_at: lastHealthCheckAt,
+      ...(nextCronRunAt ? { last_cron_run_at: nextCronRunAt } : {}),
     };
 
     const nextStatus: "active" | "error" = healthy && !cronError ? "active" : "error";
@@ -431,6 +441,10 @@ export async function POST(_request: Request, context: Context) {
       },
       status: nextStatus,
       lastHealthCheckAt,
+      lastCronRunAt:
+        typeof nextKnowledgeScope.last_cron_run_at === "string"
+          ? String(nextKnowledgeScope.last_cron_run_at)
+          : null,
       channelStatus,
     });
   } catch (error) {

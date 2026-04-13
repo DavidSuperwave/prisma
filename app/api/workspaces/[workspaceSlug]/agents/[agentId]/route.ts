@@ -14,6 +14,41 @@ type AgentUpdateRequest = {
   status?: "active" | "paused" | "deploying" | "error";
 };
 
+function normalizeTokenValue(value: unknown, fallback = "") {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  return fallback;
+}
+
+function replaceCronVariables(
+  input: unknown,
+  variables: Record<"{last_run}" | "{workspace_id}" | "{today}", string>,
+): unknown {
+  if (typeof input === "string") {
+    return input.replace(/\{last_run\}|\{workspace_id\}|\{today\}/g, (token) => {
+      if (token === "{last_run}") return variables["{last_run}"];
+      if (token === "{workspace_id}") return variables["{workspace_id}"];
+      return variables["{today}"];
+    });
+  }
+  if (Array.isArray(input)) {
+    return input.map((entry) => replaceCronVariables(entry, variables));
+  }
+  if (input && typeof input === "object") {
+    return Object.fromEntries(
+      Object.entries(input as Record<string, unknown>).map(([key, value]) => [
+        key,
+        replaceCronVariables(value, variables),
+      ]),
+    );
+  }
+  return input;
+}
+
 function requireSupabaseAdmin() {
   const supabase = getSupabaseAdmin();
   if (!supabase) {
@@ -324,6 +359,17 @@ export async function POST(_request: Request, context: Context) {
       : [];
     if (healthy && cronJobs.length > 0) {
       try {
+        const previousKnowledgeScope = (agentRow.knowledge_scope as Record<string, unknown>) ?? {};
+        const lastRunCandidate =
+          normalizeTokenValue(previousKnowledgeScope.last_cron_run_at) ||
+          normalizeTokenValue(previousKnowledgeScope.last_health_check_at) ||
+          new Date(Date.now() - 60 * 60 * 1000).toISOString();
+        const cronVariables = {
+          "{last_run}": lastRunCandidate,
+          "{workspace_id}": String(agentRow.workspace_id),
+          "{today}": new Date().toISOString().slice(0, 10),
+        } as const;
+
         const cronResponse = await fetch(`${endpoint}/v1/cron`, {
           method: "POST",
           headers: {
@@ -334,7 +380,7 @@ export async function POST(_request: Request, context: Context) {
           body: JSON.stringify({
             jobs: cronJobs.map((job, index) => ({
               lock: true,
-              ...job,
+              ...(replaceCronVariables(job, cronVariables) as Record<string, unknown>),
               id: typeof job.id === "string" ? job.id : `job-${index + 1}`,
             })),
           }),

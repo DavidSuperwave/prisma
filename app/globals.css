@@ -270,11 +270,34 @@ button {
   margin-top: 4px;
 }
 
+.workspace-nav__details {
+  display: grid;
+  gap: 8px;
+}
+
 .workspace-nav__toggle {
   width: 100%;
   border: 1px solid rgba(17, 24, 39, 0.08);
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   cursor: pointer;
   text-align: left;
+}
+
+.workspace-nav__toggle::-webkit-details-marker {
+  display: none;
+}
+
+.workspace-nav__details .workspace-nav__toggle-icon {
+  transform: rotate(-90deg);
+  transition: transform 160ms ease;
+}
+
+.workspace-nav__details[open] .workspace-nav__toggle-icon {
+  transform: rotate(0deg);
 }
 
 .workspace-nav__subgroup {
@@ -286,6 +309,10 @@ button {
 .workspace-nav__item--nested {
   border-radius: 10px;
   padding: 10px 12px;
+}
+
+.workspace-nav__details:not([open]) .workspace-nav__subgroup {
+  display: none;
 }
 
 .workspace-main {

@@ -3577,6 +3577,13 @@ const actionsStyle: React.CSSProperties = {
 };
 
 const primaryButtonStyle: React.CSSProperties = {
+  appearance: "none",
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  whiteSpace: "nowrap",
+  alignSelf: "end",
+  minHeight: 40,
   borderRadius: 14,
   border: "1px solid rgba(51, 92, 255, 0.16)",
   background: "rgba(51, 92, 255, 0.12)",

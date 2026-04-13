@@ -79,7 +79,6 @@ export function WorkspaceShell({
 }: Props) {
   const visibleItems = navItems.filter((item) => !item.hidden);
   const { primary, dataItems, trailing } = splitNavItems(visibleItems);
-  const isDataExpanded = true;
   const hasActiveDataItem = dataItems.some((item) => item.active);
   const topLevelPrimary = primary.slice(0, 6);
   const userInitial = (currentUserEmail ?? workspaceName).slice(0, 1).toUpperCase();
@@ -142,24 +141,14 @@ export function WorkspaceShell({
                 </Link>
               ))}
 
-              <div
-                className={`workspace-nav__item workspace-nav__toggle ${hasActiveDataItem ? "workspace-nav__item--active" : ""}`}
-                aria-expanded={isDataExpanded}
-              >
-                <div>
-                  <p className="workspace-nav__title">Datos</p>
-                  <p className="workspace-nav__meta">{dataItems.length} objetos</p>
-                </div>
-                <ChevronDown
-                  size={16}
-                  style={{
-                    transform: isDataExpanded ? "rotate(0deg)" : "rotate(-90deg)",
-                    transition: "transform 160ms ease",
-                  }}
-                />
-              </div>
-
-              {isDataExpanded ? (
+              <details className="workspace-nav__details" open>
+                <summary className={`workspace-nav__item workspace-nav__toggle ${hasActiveDataItem ? "workspace-nav__item--active" : ""}`}>
+                  <div>
+                    <p className="workspace-nav__title">Datos</p>
+                    <p className="workspace-nav__meta">{dataItems.length} objetos</p>
+                  </div>
+                  <ChevronDown size={16} className="workspace-nav__toggle-icon" />
+                </summary>
                 <div className="workspace-nav__subgroup">
                   {dataItems.map((item) => (
                     <Link
@@ -174,7 +163,7 @@ export function WorkspaceShell({
                     </Link>
                   ))}
                 </div>
-              ) : null}
+              </details>
 
               {trailing.map((item) => (
                 <Link

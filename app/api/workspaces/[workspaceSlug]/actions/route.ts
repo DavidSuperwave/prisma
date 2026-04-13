@@ -12,29 +12,31 @@ type ActionRequest = {
   message?: string;
 };
 
-function parseCopilotMessage(message: string): { action: "bootstrap-crm" | "create-dashboard"; preset?: "operations" | "sales" | "crm" | "custom" } | null {
+function parseCopilotMessage(message: string): {
+  runCrm: boolean;
+  dashboardPreset?: "operations" | "sales" | "crm" | "custom";
+} | null {
   const normalized = message.toLowerCase().trim();
   if (!normalized) {
     return null;
   }
 
-  const asksForCrm =
+  const runCrm =
     normalized.includes("crear crm") ||
     normalized.includes("create crm") ||
     normalized.includes("bootstrap crm") ||
     normalized.includes("pipeline crm") ||
     normalized.includes("configura crm");
-  if (asksForCrm) {
-    return { action: "bootstrap-crm" };
-  }
 
   const asksForDashboard =
     normalized.includes("crear dashboard") ||
     normalized.includes("create dashboard") ||
     normalized.includes("dashboard preset") ||
     normalized.includes("configura dashboard");
+
+  let dashboardPreset: "operations" | "sales" | "crm" | "custom" | undefined;
   if (asksForDashboard) {
-    const preset =
+    dashboardPreset =
       normalized.includes("ventas") || normalized.includes("sales")
         ? "sales"
         : normalized.includes("crm")
@@ -42,10 +44,13 @@ function parseCopilotMessage(message: string): { action: "bootstrap-crm" | "crea
           : normalized.includes("custom") || normalized.includes("personalizado")
             ? "custom"
             : "operations";
-    return { action: "create-dashboard", preset };
   }
 
-  return null;
+  if (!runCrm && !dashboardPreset) {
+    return null;
+  }
+
+  return { runCrm, dashboardPreset };
 }
 
 export async function POST(request: Request, context: Context) {
@@ -81,19 +86,53 @@ export async function POST(request: Request, context: Context) {
       return Response.json({ error: "No executable action detected in message." }, { status: 400 });
     }
 
-    if (intent.action === "bootstrap-crm") {
-      const result = await bootstrapWorkspaceCrm(membership.workspaceId);
-      return Response.json({ action: "bootstrap-crm", result }, { status: 201 });
+    const actions: Array<{
+      action: "bootstrap-crm" | "create-dashboard";
+      status: "executed" | "queued";
+      preset?: "operations" | "sales" | "crm" | "custom";
+      error?: string;
+    }> = [];
+
+    if (intent.runCrm) {
+      try {
+        await bootstrapWorkspaceCrm(membership.workspaceId);
+        actions.push({ action: "bootstrap-crm", status: "executed" });
+      } catch (error) {
+        actions.push({
+          action: "bootstrap-crm",
+          status: "queued",
+          error: error instanceof Error ? error.message : "CRM action could not run immediately.",
+        });
+      }
     }
 
-    const cards = await createWorkspaceDashboardPreset(membership.workspaceId, intent.preset ?? "operations");
+    if (intent.dashboardPreset) {
+      try {
+        await createWorkspaceDashboardPreset(membership.workspaceId, intent.dashboardPreset);
+        actions.push({
+          action: "create-dashboard",
+          status: "executed",
+          preset: intent.dashboardPreset,
+        });
+      } catch (error) {
+        actions.push({
+          action: "create-dashboard",
+          status: "queued",
+          preset: intent.dashboardPreset,
+          error: error instanceof Error ? error.message : "Dashboard action could not run immediately.",
+        });
+      }
+    }
+
+    const first = actions[0];
+    const hasExecutedAction = actions.some((entry) => entry.status === "executed");
     return Response.json(
       {
-        action: "create-dashboard",
-        preset: intent.preset ?? "operations",
-        cards,
+        action: first?.action,
+        preset: first?.preset,
+        actions,
       },
-      { status: 201 },
+      { status: hasExecutedAction ? 201 : 202 },
     );
   }
 

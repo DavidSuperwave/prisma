@@ -975,22 +975,35 @@ export function ChatPanel({
       error?: string;
       action?: "bootstrap-crm" | "create-dashboard";
       preset?: "operations" | "sales" | "crm" | "custom";
+      actions?: Array<{
+        action: "bootstrap-crm" | "create-dashboard";
+        status: "executed" | "queued";
+        preset?: "operations" | "sales" | "crm" | "custom";
+        error?: string;
+      }>;
     };
-    if (!response.ok || !data.action) {
+    if (!response.ok || !Array.isArray(data.actions) || data.actions.length === 0) {
       throw new Error(data.error ?? "No se pudo ejecutar la acción solicitada desde el chat.");
     }
-    if (data.action === "bootstrap-crm") {
-      return "Listo: ejecuté la creación de CRM base (objetos, vistas y tarjetas iniciales).";
-    }
-    const presetLabel =
-      data.preset === "sales"
-        ? "ventas"
-        : data.preset === "crm"
-          ? "crm"
-          : data.preset === "custom"
-            ? "custom"
-            : "operaciones";
-    return `Listo: ejecuté la creación de dashboard (${presetLabel}) desde tu solicitud escrita.`;
+    const fragments = data.actions.map((entry) => {
+      if (entry.action === "bootstrap-crm") {
+        return entry.status === "executed"
+          ? "CRM base ejecutado"
+          : `CRM en cola (${entry.error ?? "se intentará de nuevo"})`;
+      }
+      const presetLabel =
+        entry.preset === "sales"
+          ? "ventas"
+          : entry.preset === "crm"
+            ? "crm"
+            : entry.preset === "custom"
+              ? "custom"
+              : "operaciones";
+      return entry.status === "executed"
+        ? `dashboard ${presetLabel} ejecutado`
+        : `dashboard ${presetLabel} en cola (${entry.error ?? "se intentará de nuevo"})`;
+    });
+    return `Listo: ${fragments.join(" · ")}.`;
   }
 
   async function runWorkspaceAction(action: "bootstrap-crm" | "bootstrap-dashboard", preset?: "operations" | "sales" | "crm" | "custom") {

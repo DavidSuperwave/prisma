@@ -72,6 +72,8 @@ type DataPanelProps = {
   records: PrismaWorkspaceRecord[];
   workspaceSlug: string;
   currentRole: "admin" | "operator" | "viewer";
+  initialObjectId?: string;
+  initialViewId?: string;
   recordBaseHref?: string;
   askHref?: string;
 };
@@ -1189,11 +1191,13 @@ export function DataPanel({
   records,
   workspaceSlug,
   currentRole,
+  initialObjectId,
+  initialViewId,
   recordBaseHref,
   askHref,
 }: DataPanelProps) {
-  const [selectedObjectId, setSelectedObjectId] = useState<string>(objects[0]?.id ?? "");
-  const [selectedViewId, setSelectedViewId] = useState<string>("all");
+  const [selectedObjectId, setSelectedObjectId] = useState<string>(initialObjectId ?? objects[0]?.id ?? "");
+  const [selectedViewId, setSelectedViewId] = useState<string>(initialViewId ?? "all");
   const [query, setQuery] = useState("");
   const [localRecords, setLocalRecords] = useState<PrismaWorkspaceRecord[]>(records);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
@@ -1238,6 +1242,29 @@ export function DataPanel({
     }
     setSelectedObjectId(object.id);
   }, [object, selectedObjectId]);
+
+  useEffect(() => {
+    if (!initialObjectId || initialObjectId === selectedObjectId) {
+      return;
+    }
+    setSelectedObjectId(initialObjectId);
+    setSelectedViewId("all");
+    setEditingCell(null);
+    setTableError("");
+    setTableSuccess("");
+  }, [initialObjectId, selectedObjectId]);
+
+  useEffect(() => {
+    if (!initialViewId) {
+      if (selectedViewId !== "all") {
+        setSelectedViewId("all");
+      }
+      return;
+    }
+    if (initialViewId !== selectedViewId) {
+      setSelectedViewId(initialViewId);
+    }
+  }, [initialViewId, selectedViewId]);
 
   function parseSelectOptions(field: PrismaWorkspaceField) {
     const rawValues =

@@ -151,6 +151,7 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
   ]);
   const currentObject =
     snapshot.objects.find((object) => object.id === query.object) ?? snapshot.objects[0] ?? null;
+  const documentsObject = snapshot.objects.find((object) => object.name === "Documents") ?? null;
   const currentView =
     snapshot.views.find((view) => view.id === query.view && view.objectId === currentObject?.id) ??
     snapshot.views.find((view) => view.objectId === currentObject?.id) ??
@@ -194,6 +195,30 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
 
   const queueItems = deriveQueueItems(snapshot.objects, snapshot.records);
   const selectedTab = query.tab ?? "home";
+  const objectNameCounts = snapshot.objects.reduce<Map<string, number>>((counts, object) => {
+    counts.set(object.name, (counts.get(object.name) ?? 0) + 1);
+    return counts;
+  }, new Map<string, number>());
+  const objectNameSeen = new Map<string, number>();
+  const objectNavItems = snapshot.objects.map((object) => {
+    const seenCount = (objectNameSeen.get(object.name) ?? 0) + 1;
+    objectNameSeen.set(object.name, seenCount);
+    const totalWithSameName = objectNameCounts.get(object.name) ?? 1;
+    return {
+      id: `object-${object.id}`,
+      label: totalWithSameName > 1 ? `${object.name} ${seenCount}` : object.name,
+      href: `/workspaces/${snapshot.workspace.subdomain}?tab=data&object=${object.id}`,
+      meta:
+        object.description ??
+        (totalWithSameName > 1 ? `Objeto ${seenCount} de ${totalWithSameName}` : "Vista operativa"),
+      active: selectedTab === "data" && currentObject?.id === object.id,
+      hidden:
+        object.name === "Documents" ||
+        object.name === "Companies" ||
+        object.name === "Leads" ||
+        object.name === "Receivables",
+    };
+  });
   const copilot = snapshot.agents.find((agent) => agent.type === "copilot") ?? snapshot.agents[0] ?? null;
   const askPrompt =
     query.ask === "record" && selectedRecord
@@ -233,6 +258,8 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
         records={snapshot.records}
         workspaceSlug={snapshot.workspace.subdomain}
         currentRole={membership.role}
+        initialObjectId={query.object}
+        initialViewId={query.view}
         recordBaseHref={`/workspaces/${snapshot.workspace.subdomain}?tab=record`}
       />
     );
@@ -427,13 +454,10 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
         {
           id: "documents",
           label: "Documentos",
-          href: `/workspaces/${snapshot.workspace.subdomain}?tab=data&object=${snapshot.objects.find((object) => object.name === "Documents")?.id ?? ""}`,
+          href: `/workspaces/${snapshot.workspace.subdomain}?tab=data&object=${documentsObject?.id ?? ""}`,
           meta: "Biblioteca y seguimiento documental",
-          hidden: !snapshot.objects.some((object) => object.name === "Documents"),
-          active:
-            selectedTab === "data" &&
-            currentObject?.id ===
-              (snapshot.objects.find((object) => object.name === "Documents")?.id ?? ""),
+          hidden: !documentsObject,
+          active: selectedTab === "data" && currentObject?.id === (documentsObject?.id ?? ""),
         },
         {
           id: "team-chat",
@@ -442,18 +466,7 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
           meta: `${teamChatChannels.length} canales`,
           active: selectedTab === "team-chat",
         },
-        ...snapshot.objects.map((object) => ({
-          id: `object-${object.id}`,
-          label: object.name,
-          href: `/workspaces/${snapshot.workspace.subdomain}?tab=data&object=${object.id}`,
-          meta: object.description ?? "Vista operativa",
-          active: selectedTab === "data" && currentObject?.id === object.id,
-          hidden:
-            object.name === "Documents" ||
-            object.name === "Companies" ||
-            object.name === "Leads" ||
-            object.name === "Receivables",
-        })),
+        ...objectNavItems,
       ]}
       contextRail={
         selectedTab === "queue" || selectedTab === "team-chat"

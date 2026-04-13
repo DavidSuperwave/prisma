@@ -66,11 +66,11 @@ export function WorkspaceShell({
   const visibleItems = navItems.filter((item) => !item.hidden);
   const groupedItems = [
     {
-      label: "Operate",
+      label: "Operar",
       items: visibleItems.filter((item) => ["home", "chat", "queue"].includes(item.id)),
     },
     {
-      label: "Workspace",
+      label: "Espacio",
       items: visibleItems.filter((item) => !["home", "chat", "queue"].includes(item.id)),
     },
   ].filter((group) => group.items.length > 0);
@@ -147,16 +147,16 @@ export function WorkspaceShell({
               <div className="workspace-user-menu__panel">
                 <p className="workspace-user-menu__role">{formatRole(currentRole)}</p>
                 <Link href="/workspaces" className="workspace-link workspace-user-menu__link">
-                  All workspaces
+                  Todos los workspaces
                 </Link>
                 {currentRole === "admin" ? (
                   <Link href="/admin" className="workspace-link workspace-user-menu__link">
-                    Open admin
+                    Abrir admin
                   </Link>
                 ) : null}
                 <form action="/logout" method="post">
                   <button type="submit" className="workspace-user-menu__button">
-                    Sign out
+                    Cerrar sesión
                   </button>
                 </form>
               </div>
@@ -173,7 +173,7 @@ export function WorkspaceShell({
             <div className="workspace-header__actions">
               <div className="workspace-pill workspace-pill--neutral">
                 <ShieldCheck size={14} />
-                Human-supervised
+                Supervisado por humanos
               </div>
             </div>
           </header>

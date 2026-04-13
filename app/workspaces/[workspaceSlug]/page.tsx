@@ -29,6 +29,8 @@ function formatAgentSummary(agents: Array<{
   type: "copilot" | "channel" | "worker";
   status: "active" | "paused" | "deploying" | "error";
   description: string | null;
+  apiEndpoint: string;
+  apiKey: string;
   skills: string[];
   knowledgeScope: Record<string, unknown>;
   cronJobs: unknown[];
@@ -53,6 +55,13 @@ function formatAgentSummary(agents: Array<{
     memoryLabel: agent.memoryLimitMb > 0 ? "Activada" : "Desactivada",
     soulMd: agent.soulMd,
     runtimeLabel: agent.containerName,
+    apiEndpoint: agent.apiEndpoint,
+    apiKey: agent.apiKey,
+    containerName: agent.containerName,
+    lastHealthCheckAt:
+      typeof agent.knowledgeScope.last_health_check_at === "string"
+        ? agent.knowledgeScope.last_health_check_at
+        : null,
   }));
 }
 
@@ -354,6 +363,7 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
       <AgentOverviewPanel
         workspaceId={snapshot.workspace.id}
         workspaceSlug={snapshot.workspace.subdomain}
+        currentRole={membership.role}
         agentLimit={snapshot.workspace.agentLimit}
         agentTemplates={agentTemplates}
         agents={formatAgentSummary(snapshot.agents)}
@@ -393,14 +403,14 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
         },
         {
           id: "home",
-          label: "Home",
+          label: "Inicio",
           href: `/workspaces/${snapshot.workspace.subdomain}?tab=home`,
           meta: "Resumen del dia",
           active: selectedTab === "home",
         },
         {
           id: "queue",
-          label: "Queue",
+          label: "Cola",
           href: `/workspaces/${snapshot.workspace.subdomain}?tab=queue`,
           badge: queueItems.length,
           meta: "Tareas que requieren accion",
@@ -415,7 +425,7 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
         })),
         {
           id: "agents",
-          label: "Agents",
+          label: "Agentes",
           href: `/workspaces/${snapshot.workspace.subdomain}?tab=agents`,
           meta: `${snapshot.agents.length} configurados`,
           active: selectedTab === "agents",
@@ -423,7 +433,7 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
         },
         {
           id: "team-chat",
-          label: "Team chat",
+          label: "Equipo",
           href: `/workspaces/${snapshot.workspace.subdomain}?tab=team-chat`,
           meta: `${teamChatChannels.length} canales`,
           active: selectedTab === "team-chat",

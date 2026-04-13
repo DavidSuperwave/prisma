@@ -79,6 +79,7 @@ type DataPanelProps = {
 type AgentPanelProps = {
   workspaceId: string;
   workspaceSlug: string;
+  currentRole: "admin" | "operator" | "viewer";
   agentLimit: number;
   agentTemplates: Array<{
     id: string;
@@ -106,6 +107,10 @@ type AgentPanelProps = {
     memoryLabel: string;
     soulMd?: string | null;
     runtimeLabel?: string;
+    apiEndpoint?: string;
+    apiKey?: string;
+    containerName?: string;
+    lastHealthCheckAt?: string | null;
   }>;
   activity: PrismaWorkspaceActivity[];
 };
@@ -1780,6 +1785,7 @@ export function DataPanel({
 
 export function AgentsPanel({
   workspaceId,
+  currentRole,
   workspaceSlug,
   agentLimit,
   agentTemplates,
@@ -1817,6 +1823,15 @@ export function AgentsPanel({
   const [builderError, setBuilderError] = useState<string>("");
   const [builderSuccess, setBuilderSuccess] = useState<string>("");
   const [isSaving, setIsSaving] = useState(false);
+  const [deploymentDraft, setDeploymentDraft] = useState({
+    apiEndpoint: "",
+    apiKey: "",
+    containerName: "",
+  });
+  const [isSavingDeployment, setIsSavingDeployment] = useState(false);
+  const [isCheckingHealth, setIsCheckingHealth] = useState(false);
+  const [deploymentFeedback, setDeploymentFeedback] = useState<string>("");
+  const [lastHealthCheckAt, setLastHealthCheckAt] = useState<string | null>(null);
   const [chatInput, setChatInput] = useState("");
   const [chatError, setChatError] = useState<string | null>(null);
   const [isSending, setIsSending] = useState(false);
@@ -1829,6 +1844,7 @@ export function AgentsPanel({
   const selectedAgent = localAgents.find((agent) => agent.id === selectedAgentId) ?? localAgents[0] ?? null;
   const selectedActivity = activity.filter((entry) => entry.agentId === selectedAgent?.id).slice(0, 10);
   const activeAgentCount = localAgents.length;
+  const canManageDeployment = currentRole === "admin";
 
   useEffect(() => {
     setLocalAgents(agents);
@@ -1855,6 +1871,11 @@ export function AgentsPanel({
       channels: current.channels.join(", "),
       cronJobs: JSON.stringify(current.cronJobs ?? [], null, 2),
       isActive: current.status !== "paused",
+    });
+    setDeploymentDraft({
+      apiEndpoint: current.apiEndpoint ?? "",
+      apiKey: current.apiKey ?? "",
+      containerName: current.containerName ?? "",
     });
     setIsCreateMode(false);
   }, [localAgents, selectedAgentId]);
@@ -1902,6 +1923,123 @@ export function AgentsPanel({
     setBuilderError("");
     setBuilderSuccess("");
     setIsCreateMode(true);
+  }
+
+  async function saveDeploymentSettings() {
+    if (!selectedAgent || !canManageDeployment || isSavingDeployment) {
+      return;
+    }
+
+    if (!deploymentDraft.apiEndpoint.trim()) {
+      setDeploymentFeedback("El endpoint del agente es obligatorio.");
+      return;
+    }
+
+    if (!deploymentDraft.apiKey.trim()) {
+      setDeploymentFeedback("La API key del agente es obligatoria.");
+      return;
+    }
+
+    if (!deploymentDraft.containerName.trim()) {
+      setDeploymentFeedback("El nombre del contenedor es obligatorio.");
+      return;
+    }
+
+    setIsSavingDeployment(true);
+    setDeploymentFeedback("");
+    try {
+      const response = await fetch(`/api/workspaces/${workspaceSlug}/agents/${selectedAgent.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          apiEndpoint: deploymentDraft.apiEndpoint.trim(),
+          apiKey: deploymentDraft.apiKey.trim(),
+          containerName: deploymentDraft.containerName.trim(),
+        }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        agent?: {
+          id: string;
+          apiEndpoint?: string;
+          containerName?: string;
+          status?: string;
+          lastHealthCheckAt?: string | null;
+        };
+      };
+      if (!response.ok || !payload.agent) {
+        throw new Error(payload.error ?? "No se pudo guardar el despliegue.");
+      }
+
+      setLocalAgents((current) =>
+        current.map((agent) =>
+          agent.id === payload.agent!.id
+            ? {
+                ...agent,
+                apiEndpoint: payload.agent!.apiEndpoint ?? agent.apiEndpoint,
+                containerName: payload.agent!.containerName ?? agent.containerName,
+                status: payload.agent!.status ?? agent.status,
+                lastHealthCheckAt: payload.agent!.lastHealthCheckAt ?? agent.lastHealthCheckAt,
+              }
+            : agent,
+        ),
+      );
+
+      if (payload.agent.lastHealthCheckAt) {
+        setLastHealthCheckAt(payload.agent.lastHealthCheckAt);
+      }
+
+      setDeploymentFeedback("Configuración de despliegue guardada.");
+    } catch (error) {
+      setDeploymentFeedback(error instanceof Error ? error.message : "No se pudo guardar el despliegue.");
+    } finally {
+      setIsSavingDeployment(false);
+    }
+  }
+
+  async function checkAgentHealth() {
+    if (!selectedAgent || !canManageDeployment || isCheckingHealth) {
+      return;
+    }
+
+    setIsCheckingHealth(true);
+    setDeploymentFeedback("");
+    try {
+      const response = await fetch(`/api/workspaces/${workspaceSlug}/agents/${selectedAgent.id}`, {
+        method: "POST",
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        status?: string;
+        healthy?: boolean;
+        lastHealthCheckAt?: string | null;
+      };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "No se pudo verificar conexión.");
+      }
+
+      setLocalAgents((current) =>
+        current.map((agent) =>
+          agent.id === selectedAgent.id
+            ? {
+                ...agent,
+                status: payload.status ?? agent.status,
+                lastHealthCheckAt: payload.lastHealthCheckAt ?? agent.lastHealthCheckAt,
+              }
+            : agent,
+        ),
+      );
+
+      if (payload.lastHealthCheckAt) {
+        setLastHealthCheckAt(payload.lastHealthCheckAt);
+      }
+
+      setDeploymentFeedback(payload.healthy ? "Agente en línea." : "No se puede conectar con el agente.");
+    } catch (error) {
+      setDeploymentFeedback(error instanceof Error ? error.message : "No se pudo verificar conexión.");
+    } finally {
+      setIsCheckingHealth(false);
+    }
   }
 
   async function saveAgent() {
@@ -2306,12 +2444,76 @@ export function AgentsPanel({
 
                   <div style={detailRailStyle}>
                     <h4 style={detailRailTitleStyle}>Despliegue</h4>
+                    <label style={fieldStyle}>
+                      Endpoint del agente
+                      <input
+                        value={deploymentDraft.apiEndpoint}
+                        onChange={(event) =>
+                          setDeploymentDraft((current) => ({ ...current, apiEndpoint: event.target.value }))
+                        }
+                        placeholder="https://hermes-bbc.prisma.com.mx/copilot"
+                        style={inputStyle}
+                        disabled={!canManageDeployment || isSavingDeployment}
+                      />
+                    </label>
+                    <label style={fieldStyle}>
+                      API key
+                      <input
+                        type="password"
+                        value={deploymentDraft.apiKey}
+                        onChange={(event) =>
+                          setDeploymentDraft((current) => ({ ...current, apiKey: event.target.value }))
+                        }
+                        placeholder="sk_live_xxx"
+                        style={inputStyle}
+                        disabled={!canManageDeployment || isSavingDeployment}
+                      />
+                    </label>
+                    <label style={fieldStyle}>
+                      Nombre de contenedor
+                      <input
+                        value={deploymentDraft.containerName}
+                        onChange={(event) =>
+                          setDeploymentDraft((current) => ({ ...current, containerName: event.target.value }))
+                        }
+                        placeholder={`hermes-${workspaceSlug}-copilot`}
+                        style={inputStyle}
+                        disabled={!canManageDeployment || isSavingDeployment}
+                      />
+                    </label>
+                    <div style={actionsStyle}>
+                      <button
+                        type="button"
+                        style={primaryButtonStyle}
+                        onClick={() => void saveDeploymentSettings()}
+                        disabled={!canManageDeployment || isSavingDeployment}
+                      >
+                        {isSavingDeployment ? "Guardando..." : "Guardar despliegue"}
+                      </button>
+                      <button
+                        type="button"
+                        style={chatActionButtonStyle}
+                        onClick={() => void checkAgentHealth()}
+                        disabled={!canManageDeployment || isCheckingHealth}
+                      >
+                        {isCheckingHealth ? "Verificando..." : "Verificar conexión"}
+                      </button>
+                    </div>
                     <p style={detailRailCopyStyle}>
                       Runtime: {selectedAgent.runtimeLabel ?? `hermes-${workspaceSlug}`}
                     </p>
                     <p style={detailRailCopyStyle}>
                       Estado: {formatStatusLabel(selectedAgent.status)}
                     </p>
+                    {lastHealthCheckAt ? (
+                      <p style={detailRailMetaStyle}>
+                        Última verificación: {new Date(lastHealthCheckAt).toLocaleString("es-MX")}
+                      </p>
+                    ) : null}
+                    {!canManageDeployment ? (
+                      <p style={detailRailMetaStyle}>Solo administradores pueden editar el despliegue.</p>
+                    ) : null}
+                    {deploymentFeedback ? <p style={inlineSuccessStyle}>{deploymentFeedback}</p> : null}
                   </div>
                 </div>
 

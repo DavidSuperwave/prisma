@@ -223,6 +223,8 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
         views={snapshot.views}
         records={snapshot.records}
         recordBaseHref={`/workspaces/${snapshot.workspace.subdomain}?tab=record`}
+        askHref={`/workspaces/${snapshot.workspace.subdomain}?tab=chat&ask=dataset${currentObject ? `&object=${currentObject.id}` : ""}`}
+        crmBoardHref={`/workspaces/${snapshot.workspace.subdomain}?tab=record&board=deals`}
       />
     );
   }
@@ -326,6 +328,7 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
           "Este registro concentra contexto, responsables y trazabilidad operativa."
         }
         askHref={`/workspaces/${snapshot.workspace.subdomain}?tab=chat&ask=record${currentObject ? `&object=${currentObject.id}` : ""}${selectedRecord ? `&record=${selectedRecord.id}` : ""}`}
+        boardHref={`/workspaces/${snapshot.workspace.subdomain}?tab=data${currentObject ? `&object=${currentObject.id}` : ""}`}
         fields={currentFields.map((field) => ({
           label: field.name,
           value: String(getRecordFieldValue(selectedRecord, field.key) ?? "—"),

@@ -18,6 +18,13 @@ import {
   Sparkles,
   WalletCards,
 } from "lucide-react";
+import {
+  describeWorkspaceActionPlan,
+  isWorkspaceActionCancellation,
+  isWorkspaceActionConfirmation,
+  summarizeWorkspaceActionResults,
+  type WorkspaceStructuredAction,
+} from "@/lib/copilotActionPlanner";
 import type {
   PrismaWorkspaceActivity,
   PrismaWorkspaceAgent,
@@ -72,6 +79,7 @@ type DataPanelProps = {
   records: PrismaWorkspaceRecord[];
   recordBaseHref?: string;
   askHref?: string;
+  crmBoardHref?: string;
 };
 
 type AgentPanelProps = {
@@ -157,6 +165,7 @@ type RecordDetailPanelProps = {
   owner: string;
   summary: string;
   askHref?: string | null;
+  boardHref?: string | null;
   fields: Array<{
     label: string;
     value: string;
@@ -272,41 +281,10 @@ function currentTimeLabel() {
   }).format(new Date());
 }
 
-function parseCopilotActionFromPrompt(message: string): { action: "bootstrap-crm" | "bootstrap-dashboard"; preset?: "operations" | "sales" | "crm" | "custom" } | null {
-  const normalized = message.toLowerCase().trim();
-  if (!normalized) {
-    return null;
-  }
-
-  const wantsCrm =
-    normalized.includes("crear crm") ||
-    normalized.includes("create crm") ||
-    normalized.includes("configura crm") ||
-    normalized.includes("bootstrap crm") ||
-    normalized.includes("pipeline crm");
-  if (wantsCrm) {
-    return { action: "bootstrap-crm" };
-  }
-
-  const wantsDashboard =
-    normalized.includes("crear dashboard") ||
-    normalized.includes("create dashboard") ||
-    normalized.includes("configura dashboard") ||
-    normalized.includes("dashboard preset");
-  if (!wantsDashboard) {
-    return null;
-  }
-
-  const preset =
-    normalized.includes("ventas") || normalized.includes("sales")
-      ? "sales"
-      : normalized.includes("crm")
-        ? "crm"
-        : normalized.includes("custom") || normalized.includes("personalizado")
-          ? "custom"
-          : "operations";
-  return { action: "bootstrap-dashboard", preset };
-}
+type PendingWorkspaceActionPlan = {
+  sourceMessage: string;
+  actions: WorkspaceStructuredAction[];
+};
 
 export function OverviewPanel({ dashboardCards, metrics, queueItems, activity, suggestions, agents }: OverviewProps) {
   const stats = [
@@ -676,6 +654,7 @@ export function ChatPanel({
   const [renameDraft, setRenameDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
+  const [pendingActionPlan, setPendingActionPlan] = useState<PendingWorkspaceActionPlan | null>(null);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -874,9 +853,9 @@ export function ChatPanel({
     setInput("");
 
     try {
-      const detectedAction = parseCopilotActionFromPrompt(trimmed);
-      if (detectedAction) {
-        const confirmation = await runDetectedIntentAction(trimmed);
+      if (pendingActionPlan && isWorkspaceActionConfirmation(trimmed)) {
+        const confirmation = await runDetectedIntentAction(pendingActionPlan.sourceMessage, true);
+        setPendingActionPlan(null);
         updateSession(selectedSession.id, (session) => ({
           ...session,
           messages: session.messages.map((message) =>
@@ -886,6 +865,31 @@ export function ChatPanel({
         }));
         setActionFeedback(confirmation);
         router.refresh();
+        return;
+      }
+
+      if (pendingActionPlan && isWorkspaceActionCancellation(trimmed)) {
+        setPendingActionPlan(null);
+        const cancellation = "Entendido. Cancelé el plan de acciones del workspace.";
+        updateSession(selectedSession.id, (session) => ({
+          ...session,
+          messages: session.messages.map((message) =>
+            message.id === assistantId ? { ...message, content: cancellation } : message,
+          ),
+          updatedAt: new Date().toISOString(),
+        }));
+        return;
+      }
+
+      const plannedReply = await runDetectedIntentAction(trimmed, false);
+      if (plannedReply) {
+        updateSession(selectedSession.id, (session) => ({
+          ...session,
+          messages: session.messages.map((message) =>
+            message.id === assistantId ? { ...message, content: plannedReply } : message,
+          ),
+          updatedAt: new Date().toISOString(),
+        }));
         return;
       }
 
@@ -962,19 +966,21 @@ export function ChatPanel({
     }
   }
 
-  async function runDetectedIntentAction(message: string) {
+  async function runDetectedIntentAction(message: string, confirmPlan: boolean) {
     const response = await fetch(`/api/workspaces/${workspaceSlug}/actions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         action: "copilot-execute",
         message,
+        confirmPlan,
       }),
     });
     const data = (await response.json().catch(() => ({}))) as {
       error?: string;
-      action?: "bootstrap-crm" | "create-dashboard";
-      preset?: "operations" | "sales" | "crm" | "custom";
+      requiresConfirmation?: boolean;
+      summary?: string;
+      plan?: PendingWorkspaceActionPlan;
       actions?: Array<{
         action: "bootstrap-crm" | "create-dashboard";
         status: "executed" | "queued";
@@ -982,28 +988,18 @@ export function ChatPanel({
         error?: string;
       }>;
     };
-    if (!response.ok || !Array.isArray(data.actions) || data.actions.length === 0) {
+    if (!response.ok) {
       throw new Error(data.error ?? "No se pudo ejecutar la acción solicitada desde el chat.");
     }
-    const fragments = data.actions.map((entry) => {
-      if (entry.action === "bootstrap-crm") {
-        return entry.status === "executed"
-          ? "CRM base ejecutado"
-          : `CRM en cola (${entry.error ?? "se intentará de nuevo"})`;
-      }
-      const presetLabel =
-        entry.preset === "sales"
-          ? "ventas"
-          : entry.preset === "crm"
-            ? "crm"
-            : entry.preset === "custom"
-              ? "custom"
-              : "operaciones";
-      return entry.status === "executed"
-        ? `dashboard ${presetLabel} ejecutado`
-        : `dashboard ${presetLabel} en cola (${entry.error ?? "se intentará de nuevo"})`;
-    });
-    return `Listo: ${fragments.join(" · ")}.`;
+    if (data.requiresConfirmation && data.plan) {
+      setPendingActionPlan(data.plan);
+      return `${data.summary ?? "Plan detectado."} Detecté: ${describeWorkspaceActionPlan(data.plan.actions)}.`;
+    }
+    if (!Array.isArray(data.actions) || data.actions.length === 0) {
+      return "";
+    }
+
+    return summarizeWorkspaceActionResults(data.actions);
   }
 
   async function runWorkspaceAction(action: "bootstrap-crm" | "bootstrap-dashboard", preset?: "operations" | "sales" | "crm" | "custom") {
@@ -1270,7 +1266,7 @@ export function ChatPanel({
   );
 }
 
-export function DataPanel({ objects, fields, views, records, recordBaseHref, askHref }: DataPanelProps) {
+export function DataPanel({ objects, fields, views, records, recordBaseHref, askHref, crmBoardHref }: DataPanelProps) {
   const [selectedObjectId, setSelectedObjectId] = useState<string>(objects[0]?.id ?? "");
   const [selectedViewId, setSelectedViewId] = useState<string>("all");
   const [query, setQuery] = useState("");
@@ -1295,6 +1291,13 @@ export function DataPanel({ objects, fields, views, records, recordBaseHref, ask
   const summary = object
     ? `${visibleRecords.length} registros visibles · ${objectFields.length} campos activos · ${objectViews.length} vistas guardadas`
     : "Selecciona un objeto para empezar.";
+  const objectName = object?.name.toLowerCase() ?? "";
+  const showPipelineBoard =
+    Boolean(crmBoardHref) &&
+    (objectName.includes("deal") ||
+      objectName.includes("oportun") ||
+      objectName.includes("pipeline"));
+  const boardColumns = buildDealBoardColumns(visibleRecords);
 
   return (
     <div style={stackStyle}>
@@ -1364,6 +1367,11 @@ export function DataPanel({ objects, fields, views, records, recordBaseHref, ask
                 Consultar con CEO
               </a>
             ) : null}
+            {showPipelineBoard ? (
+              <a href={crmBoardHref} style={metaActionLinkStyle}>
+                Ver pipeline board
+              </a>
+            ) : null}
           </div>
           <p style={metaCopyStyle}>{summary.replace("campos activos", "columnas").replace("1 vistas guardadas", "1 vista guardada")}</p>
         </div>
@@ -1421,6 +1429,51 @@ export function DataPanel({ objects, fields, views, records, recordBaseHref, ask
             }
           />
         )}
+        {showPipelineBoard ? (
+          <div style={pipelineBoardContainerStyle}>
+            <div style={pipelineBoardHeaderStyle}>
+              <p style={panelLabelStyle}>Pipeline board</p>
+              {crmBoardHref ? (
+                <a href={crmBoardHref} style={metaActionLinkStyle}>
+                  Abrir detalle CRM
+                </a>
+              ) : null}
+            </div>
+            <div style={pipelineBoardGridStyle}>
+              {boardColumns.map((column) => (
+                <article key={column.id} style={pipelineBoardColumnStyle}>
+                  <div style={pipelineBoardColumnHeaderStyle}>
+                    <strong style={queueTitleStyle}>{column.label}</strong>
+                    <StatusPill tone="neutral">{column.records.length}</StatusPill>
+                  </div>
+                  <div style={pipelineBoardCardListStyle}>
+                    {column.records.length === 0 ? (
+                      <p style={queueSubtitleStyle}>Sin deals en esta etapa.</p>
+                    ) : (
+                      column.records.map((record) => (
+                        <a
+                          key={record.id}
+                          href={
+                            recordBaseHref && object?.id
+                              ? `${recordBaseHref}&object=${object.id}&record=${record.id}&board=deals`
+                              : undefined
+                          }
+                          style={pipelineBoardCardStyle}
+                        >
+                          <strong style={pipelineBoardCardTitleStyle}>{record.title}</strong>
+                          <p style={pipelineBoardCardMetaStyle}>
+                            {record.company} · {record.amount}
+                          </p>
+                          <p style={pipelineBoardCardMetaStyle}>Owner: {record.owner}</p>
+                        </a>
+                      ))
+                    )}
+                  </div>
+                </article>
+              ))}
+            </div>
+          </div>
+        ) : null}
       </Panel>
     </div>
   );
@@ -2002,42 +2055,42 @@ export function AgentsPanel({
                     <p style={detailRailCopyStyle}>
                       Estado: {formatStatusLabel(selectedAgent.status)}
                     </p>
-                  <div style={runtimeControlsStyle}>
-                    <button
-                      type="button"
-                      style={chatButtonStyle}
-                      onClick={() => void runRuntimeAction("deploy")}
-                      disabled={runtimeActionLoading !== ""}
-                    >
-                      {runtimeActionLoading === "deploy" ? "Desplegando..." : "Deploy"}
-                    </button>
-                    <button
-                      type="button"
-                      style={chatActionButtonStyle}
-                      onClick={() => void runRuntimeAction("restart")}
-                      disabled={runtimeActionLoading !== ""}
-                    >
-                      {runtimeActionLoading === "restart" ? "Reiniciando..." : "Restart"}
-                    </button>
-                    <button
-                      type="button"
-                      style={chatActionButtonStyle}
-                      onClick={() => void runRuntimeAction("pause")}
-                      disabled={runtimeActionLoading !== ""}
-                    >
-                      {runtimeActionLoading === "pause" ? "Pausando..." : "Pause"}
-                    </button>
-                    <button
-                      type="button"
-                      style={dangerButtonStyle}
-                      onClick={() => void runRuntimeAction("stop")}
-                      disabled={runtimeActionLoading !== ""}
-                    >
-                      {runtimeActionLoading === "stop" ? "Deteniendo..." : "Emergency stop"}
-                    </button>
-                  </div>
-                  {runtimeError ? <p style={inlineErrorStyle}>{runtimeError}</p> : null}
-                  {runtimeMessage ? <p style={inlineSuccessStyle}>{runtimeMessage}</p> : null}
+                    <div style={runtimeControlsStyle}>
+                      <button
+                        type="button"
+                        style={chatButtonStyle}
+                        onClick={() => void runRuntimeAction("deploy")}
+                        disabled={runtimeActionLoading !== ""}
+                      >
+                        {runtimeActionLoading === "deploy" ? "Desplegando..." : "Deploy"}
+                      </button>
+                      <button
+                        type="button"
+                        style={chatActionButtonStyle}
+                        onClick={() => void runRuntimeAction("restart")}
+                        disabled={runtimeActionLoading !== ""}
+                      >
+                        {runtimeActionLoading === "restart" ? "Reiniciando..." : "Restart"}
+                      </button>
+                      <button
+                        type="button"
+                        style={chatActionButtonStyle}
+                        onClick={() => void runRuntimeAction("pause")}
+                        disabled={runtimeActionLoading !== ""}
+                      >
+                        {runtimeActionLoading === "pause" ? "Pausando..." : "Pause"}
+                      </button>
+                      <button
+                        type="button"
+                        style={dangerButtonStyle}
+                        onClick={() => void runRuntimeAction("stop")}
+                        disabled={runtimeActionLoading !== ""}
+                      >
+                        {runtimeActionLoading === "stop" ? "Deteniendo..." : "Emergency stop"}
+                      </button>
+                    </div>
+                    {runtimeError ? <p style={runtimeNoticeErrorStyle}>{runtimeError}</p> : null}
+                    {runtimeMessage ? <p style={runtimeNoticeSuccessStyle}>{runtimeMessage}</p> : null}
                   </div>
                 </div>
 
@@ -2408,6 +2461,7 @@ export function RecordDetailPanel({
   owner,
   summary,
   askHref,
+  boardHref,
   fields,
   activity,
 }: RecordDetailPanelProps) {
@@ -2443,6 +2497,11 @@ export function RecordDetailPanel({
               {askHref ? (
                 <a href={askHref} style={metaActionLinkStyle}>
                   Consultar con CEO
+                </a>
+              ) : null}
+              {boardHref ? (
+                <a href={boardHref} style={metaActionLinkStyle}>
+                  Ver board CRM
                 </a>
               ) : null}
             </div>
@@ -2674,6 +2733,78 @@ function buildPipelineColumns(fields: Array<{ label: string; value: string; tone
       secondary: "Relación principal del deal",
     },
   ];
+}
+
+function recordStageValue(record: PrismaWorkspaceRecord) {
+  const byExplicitStage = record.data.stage;
+  if (typeof byExplicitStage === "string" && byExplicitStage.trim()) {
+    return byExplicitStage.trim();
+  }
+  const byStatus = record.data.status;
+  if (typeof byStatus === "string" && byStatus.trim()) {
+    return byStatus.trim();
+  }
+  return "prospecting";
+}
+
+function buildCrmBoardColumns(records: PrismaWorkspaceRecord[]) {
+  const lanes = [
+    { id: "prospecting", title: "Prospección" },
+    { id: "qualified", title: "Calificación" },
+    { id: "proposal", title: "Propuesta" },
+    { id: "closed", title: "Cerrado" },
+  ] as const;
+
+  return lanes.map((lane) => ({
+    ...lane,
+    records: records.filter((record) => {
+      const stage = recordStageValue(record).toLowerCase();
+      if (lane.id === "prospecting") {
+        return stage.includes("prospect");
+      }
+      if (lane.id === "qualified") {
+        return stage.includes("qualif") || stage.includes("calific");
+      }
+      if (lane.id === "proposal") {
+        return stage.includes("proposal") || stage.includes("propuesta");
+      }
+      return stage.includes("closed") || stage.includes("cerrad");
+    }),
+  }));
+}
+
+function buildDealBoardColumns(records: PrismaWorkspaceRecord[]) {
+  const columns = buildCrmBoardColumns(records);
+  return columns.map((column) => ({
+    id: column.id,
+    label: column.title,
+    records: column.records.map((record) => {
+      const title =
+        (typeof record.data.title === "string" && record.data.title) ||
+        (typeof record.data.name === "string" && record.data.name) ||
+        "Deal";
+      const company =
+        (typeof record.data.company === "string" && record.data.company) ||
+        (typeof record.data.company_name === "string" && record.data.company_name) ||
+        "Cuenta sin empresa";
+      const owner =
+        (typeof record.data.owner === "string" && record.data.owner) ||
+        (typeof record.data.responsable === "string" && record.data.responsable) ||
+        "Sin owner";
+      const amountRaw =
+        (typeof record.data.amount === "string" && record.data.amount) ||
+        (typeof record.data.amount === "number" && String(record.data.amount)) ||
+        "0";
+
+      return {
+        id: record.id,
+        title,
+        company,
+        owner,
+        amount: formatCurrencyAmount(amountRaw),
+      };
+    }),
+  }));
 }
 
 function DetailBlock({
@@ -3183,6 +3314,16 @@ const inlineSuccessStyle: React.CSSProperties = {
   margin: 0,
   color: "#0f8a52",
   fontSize: 13,
+};
+
+const runtimeNoticeErrorStyle: React.CSSProperties = {
+  ...inlineErrorStyle,
+  marginTop: 2,
+};
+
+const runtimeNoticeSuccessStyle: React.CSSProperties = {
+  ...inlineSuccessStyle,
+  marginTop: 2,
 };
 
 const queueItemStyle: React.CSSProperties = {
@@ -3894,6 +4035,82 @@ const metaActionLinkStyle: React.CSSProperties = {
   textDecoration: "none",
 };
 
+const panelLabelStyle: React.CSSProperties = {
+  margin: 0,
+  color: "var(--workspace-faint)",
+  fontSize: 12,
+  fontWeight: 700,
+  letterSpacing: "0.08em",
+  textTransform: "uppercase",
+};
+
+const pipelineBoardContainerStyle: React.CSSProperties = {
+  marginTop: 8,
+  display: "grid",
+  gap: 12,
+};
+
+const pipelineBoardHeaderStyle: React.CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  gap: 12,
+  flexWrap: "wrap",
+};
+
+const pipelineBoardGridStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+  gap: 10,
+};
+
+const pipelineBoardColumnStyle: React.CSSProperties = {
+  borderRadius: 14,
+  border: "1px solid var(--workspace-border)",
+  background: "var(--workspace-panel-soft)",
+  padding: 10,
+  display: "grid",
+  gap: 10,
+};
+
+const pipelineBoardColumnHeaderStyle: React.CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  gap: 6,
+};
+
+const pipelineBoardCardListStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 8,
+  maxHeight: 240,
+  overflowY: "auto",
+  paddingRight: 4,
+};
+
+const pipelineBoardCardStyle: React.CSSProperties = {
+  borderRadius: 10,
+  border: "1px solid var(--workspace-border)",
+  background: "var(--workspace-panel)",
+  padding: "10px 12px",
+  textDecoration: "none",
+  display: "grid",
+  gap: 4,
+};
+
+const pipelineBoardCardTitleStyle: React.CSSProperties = {
+  color: "var(--workspace-text)",
+  fontSize: 14,
+  lineHeight: 1.4,
+};
+
+const pipelineBoardCardMetaStyle: React.CSSProperties = {
+  margin: 0,
+  color: "var(--workspace-muted)",
+  fontSize: 12,
+  lineHeight: 1.4,
+};
+
 const recordGridStyle: React.CSSProperties = {
   display: "grid",
   gridTemplateColumns: "minmax(0, 1fr) 320px",
@@ -3974,11 +4191,16 @@ const chatButtonStyle: React.CSSProperties = {
   padding: "10px 14px",
   fontWeight: 700,
   font: "inherit",
+  minHeight: 40,
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  whiteSpace: "nowrap",
 };
 
 const runtimeControlsStyle: React.CSSProperties = {
-  display: "flex",
-  flexWrap: "wrap",
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(132px, 1fr))",
   gap: 8,
 };
 
@@ -3990,6 +4212,12 @@ const dangerButtonStyle: React.CSSProperties = {
   padding: "10px 14px",
   fontWeight: 700,
   font: "inherit",
+  minHeight: 40,
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  whiteSpace: "nowrap",
+  minWidth: 132,
 };
 
 const crmThreeColumnStyle: React.CSSProperties = {

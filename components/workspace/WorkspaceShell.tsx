@@ -59,7 +59,7 @@ function formatRole(role?: string | null) {
 }
 
 function splitNavItems(items: NavItem[]): NavItemGroup {
-  const primaryIds = new Set(["home", "chat", "agents", "queue", "documents", "team-chat"]);
+  const primaryIds = new Set(["home", "chat", "agents", "queue", "documents", "import", "fields", "channels", "activity", "team-chat"]);
   const dataItems = items.filter((item) => item.id.startsWith("object-"));
   const primary = items.filter((item) => primaryIds.has(item.id) && !item.id.startsWith("object-"));
   const trailing = items.filter((item) => !primaryIds.has(item.id) && !item.id.startsWith("object-"));
@@ -141,7 +141,7 @@ export function WorkspaceShell({
                 </Link>
               ))}
 
-              <details className="workspace-nav__details" open>
+              <details className="workspace-nav__details" open={hasActiveDataItem}>
                 <summary className={`workspace-nav__item workspace-nav__toggle ${hasActiveDataItem ? "workspace-nav__item--active" : ""}`}>
                   <div>
                     <p className="workspace-nav__title">Datos</p>

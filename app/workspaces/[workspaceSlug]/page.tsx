@@ -373,7 +373,7 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
                   String(getRecordFieldValue(selectedRecord, "company_name"))) ||
                 (typeof getRecordFieldValue(selectedRecord, "document_name") === "string" &&
                   String(getRecordFieldValue(selectedRecord, "document_name"))) ||
-                "Selected record"
+                "Registro seleccionado"
               : null,
           queueTitles: queueItems.slice(0, 5).map((item) => `${item.title} (${item.status})`),
         }}
@@ -402,10 +402,10 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
             String(getRecordFieldValue(selectedRecord, "company_name"))) ||
           (typeof getRecordFieldValue(selectedRecord, "document_name") === "string" &&
             String(getRecordFieldValue(selectedRecord, "document_name"))) ||
-          "Record detail"
+          "Detalle del registro"
         }
         status={String(getRecordFieldValue(selectedRecord, "status") ?? "active")}
-        owner={String(getRecordFieldValue(selectedRecord, "owner") ?? "Unassigned")}
+        owner={String(getRecordFieldValue(selectedRecord, "owner") ?? "Sin asignar")}
         summary={
           currentObject?.description ??
           "Este registro concentra contexto, responsables y trazabilidad operativa."

@@ -53,6 +53,32 @@ type ImportSummary = {
   rowsSkipped: number;
 };
 
+const IMPORT_BATCH_SIZE = 500;
+const IMPORT_PREVIEW_ROWS = 8;
+
+type GatewayStatus = {
+  status?: string;
+  paired?: boolean;
+  qr?: string | null;
+  lastSeen?: string | null;
+};
+
+type ImportTypeWarning = {
+  column: string;
+  expectedType: string;
+  sample: string;
+};
+
+type ChannelConfigState = {
+  provider?: string;
+  mode?: string;
+  phoneLabel?: string;
+  qr?: string | null;
+  paired?: boolean;
+  status?: string;
+  lastSeen?: string | null;
+};
+
 function Panel({
   eyebrow,
   title,
@@ -148,6 +174,24 @@ function normalizeColumnKey(value: string) {
     .replace(/^_+|_+$/g, "");
 }
 
+function humanizeActivityAction(action: string) {
+  const normalized = action.trim().toLowerCase();
+  if (normalized === "receivable.flagged") return "Cobranza marcada para revisión";
+  if (normalized === "lead.qualified") return "Lead calificado";
+  if (normalized === "document.uploaded_via_chat") return "Documento subido por chat";
+  if (normalized === "workspace.seeded") return "Workspace inicializado";
+  if (normalized === "sent_email") return "Correo enviado";
+  if (normalized === "cron.executed") return "Cron ejecutado";
+  return action.replace(/[._]/g, " ").replace(/^\w/, (value) => value.toUpperCase());
+}
+
+function toStringValue(value: unknown) {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return JSON.stringify(value);
+}
+
 function parseCsv(raw: string) {
   const lines = raw
     .split(/\r?\n/)
@@ -175,6 +219,8 @@ export function ImportPanel({ workspaceSlug, objects, fields }: ImportPanelProps
   const [previewRows, setPreviewRows] = useState<Array<Record<string, unknown>>>([]);
   const [isImporting, setIsImporting] = useState(false);
   const [importSummary, setImportSummary] = useState<ImportSummary | null>(null);
+  const [typeWarnings, setTypeWarnings] = useState<string[]>([]);
+  const [totalSourceRows, setTotalSourceRows] = useState(0);
   const [error, setError] = useState("");
   const [history, setHistory] = useState<Array<{ id: string; fileName: string; rowsTotal: number; rowsImported: number; rowsSkipped: number; createdAt: string }>>([]);
 
@@ -187,6 +233,8 @@ export function ImportPanel({ workspaceSlug, objects, fields }: ImportPanelProps
     setPreviewColumns([]);
     setPreviewRows([]);
     setImportSummary(null);
+    setTypeWarnings([]);
+    setTotalSourceRows(0);
     setError("");
   }, [selectedObjectId]);
 
@@ -257,8 +305,28 @@ export function ImportPanel({ workspaceSlug, objects, fields }: ImportPanelProps
         } satisfies ImportPreviewColumn;
       });
 
+      const warnings = rows.reduce<string[]>((accumulator, row, rowIndex) => {
+        if (rowIndex >= 5) return accumulator;
+        selectedFields.forEach((field) => {
+          const value = row[field.key];
+          if (value === null || value === undefined || value === "") return;
+          if ((field.type === "number" || field.type === "currency") && Number.isNaN(Number(value))) {
+            accumulator.push(`Fila ${rowIndex + 1}: "${field.name}" debe ser numérico.`);
+          }
+          if (field.type === "boolean" && !["true", "false", "1", "0", "sí", "si", "no"].includes(String(value).toLowerCase())) {
+            accumulator.push(`Fila ${rowIndex + 1}: "${field.name}" debe ser booleano.`);
+          }
+          if (field.type === "date" && Number.isNaN(new Date(String(value)).getTime())) {
+            accumulator.push(`Fila ${rowIndex + 1}: "${field.name}" debe ser una fecha válida.`);
+          }
+        });
+        return accumulator;
+      }, []);
+
       setPreviewColumns(nextColumns);
-      setPreviewRows(rows.slice(0, 500));
+      setPreviewRows(rows);
+      setTotalSourceRows(rows.length);
+      setTypeWarnings(warnings.slice(0, 6));
       setImportSummary(null);
       setError("");
       setFileName(file.name);
@@ -266,6 +334,8 @@ export function ImportPanel({ workspaceSlug, objects, fields }: ImportPanelProps
       setError(caughtError instanceof Error ? caughtError.message : "No se pudo leer el archivo.");
       setPreviewColumns([]);
       setPreviewRows([]);
+      setTypeWarnings([]);
+      setTotalSourceRows(0);
     }
   }
 
@@ -293,26 +363,36 @@ export function ImportPanel({ workspaceSlug, objects, fields }: ImportPanelProps
     setIsImporting(true);
     setError("");
     try {
-      const response = await fetch(`/api/workspaces/${workspaceSlug}/imports`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          objectId: selectedObject.id,
-          rows: mappedRows.slice(0, 500),
-          dedupeFieldKey: dedupeFieldKey === "none" ? undefined : dedupeFieldKey,
-          fileName,
-        }),
-      });
-
-      const payload = (await response.json().catch(() => ({}))) as {
-        error?: string;
-        import?: ImportSummary;
-      };
-      if (!response.ok || !payload.import) {
-        throw new Error(payload.error ?? "No se pudo ejecutar la importación.");
+      let imported = 0;
+      let skipped = 0;
+      for (let index = 0; index < mappedRows.length; index += IMPORT_BATCH_SIZE) {
+        const batch = mappedRows.slice(index, index + IMPORT_BATCH_SIZE);
+        const response = await fetch(`/api/workspaces/${workspaceSlug}/imports`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            objectId: selectedObject.id,
+            rows: batch,
+            dedupeFieldKey: dedupeFieldKey === "none" ? undefined : dedupeFieldKey,
+            fileName,
+          }),
+        });
+        const payload = (await response.json().catch(() => ({}))) as {
+          error?: string;
+          import?: ImportSummary;
+        };
+        if (!response.ok || !payload.import) {
+          throw new Error(payload.error ?? "No se pudo ejecutar la importación.");
+        }
+        imported += payload.import.rowsImported;
+        skipped += payload.import.rowsSkipped;
       }
 
-      setImportSummary(payload.import);
+      setImportSummary({
+        rowsTotal: mappedRows.length,
+        rowsImported: imported,
+        rowsSkipped: skipped,
+      });
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "No se pudo ejecutar la importación.");
     } finally {
@@ -375,11 +455,22 @@ export function ImportPanel({ workspaceSlug, objects, fields }: ImportPanelProps
             <StatusPill tone="neutral">Total: {importSummary.rowsTotal}</StatusPill>
           </div>
         ) : null}
+        {typeWarnings.length > 0 ? (
+          <div style={warningListStyle}>
+            {typeWarnings.map((warning) => (
+              <p key={warning} style={warningTextStyle}>
+                {warning}
+              </p>
+            ))}
+          </div>
+        ) : null}
 
         {previewColumns.length > 0 ? (
           <div style={stackStyle}>
             <div style={panelHeaderInlineStyle}>
-              <p style={panelDescriptionStyle}>Archivo: {fileName || "sin nombre"}</p>
+              <p style={panelDescriptionStyle}>
+                Archivo: {fileName || "sin nombre"} · {totalSourceRows} filas detectadas
+              </p>
               <button type="button" style={primaryButtonStyle} onClick={() => void runImport()} disabled={isImporting}>
                 {isImporting ? "Importando..." : "Ejecutar importación"}
               </button>
@@ -435,7 +526,7 @@ export function ImportPanel({ workspaceSlug, objects, fields }: ImportPanelProps
                   </tr>
                 </thead>
                 <tbody>
-                  {previewRows.slice(0, 8).map((row, rowIndex) => (
+                  {previewRows.slice(0, IMPORT_PREVIEW_ROWS).map((row, rowIndex) => (
                     <tr key={`preview-${rowIndex}`}>
                       {previewColumns.map((column) => (
                         <td key={`${rowIndex}-${column.sourceKey}`} style={tableCellStyle}>
@@ -819,18 +910,75 @@ export function ChannelsPanel({ workspaceSlug, currentRole, agents }: ChannelsPa
   const selectedAgent = channelAgents.find((agent) => agent.id === selectedAgentId) ?? channelAgents[0] ?? null;
   const canManage = currentRole === "admin";
 
-  useEffect(() => {
-    if (!selectedAgent) return;
-    const defaults = {
+  function defaultChannelConfig(agentName: string) {
+    return {
       provider: "whatsapp",
       mode: "gateway",
-      phoneLabel: selectedAgent.name,
+      phoneLabel: agentName,
     };
-    setChannelConfigDraft(JSON.stringify(defaults, null, 2));
-    setGatewayStatus(null);
+  }
+
+  async function loadAgentChannelStatus(agentId: string) {
+    const fallbackName = selectedAgent?.name ?? "Canal";
+    try {
+      const response = await fetch(
+        `/api/workspaces/${workspaceSlug}/agents/${agentId}?channelStatus=true`,
+      );
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        agent?: {
+          channelConfig?: Record<string, unknown>;
+          status?: string;
+          lastHealthCheckAt?: string | null;
+          channelStatus?: {
+            status?: string;
+            paired?: boolean;
+            qr?: string | null;
+            lastSeen?: string | null;
+          } | null;
+        };
+      };
+      if (!response.ok || !payload.agent) {
+        throw new Error(payload.error ?? "No se pudo cargar la configuración del canal.");
+      }
+
+      const config =
+        payload.agent.channelConfig && typeof payload.agent.channelConfig === "object"
+          ? payload.agent.channelConfig
+          : defaultChannelConfig(fallbackName);
+      setChannelConfigDraft(JSON.stringify(config, null, 2));
+      if (payload.agent.channelStatus) {
+        setGatewayStatus({
+          status: payload.agent.channelStatus.status ?? payload.agent.status ?? "sin verificar",
+          paired:
+            payload.agent.channelStatus.paired === true ||
+            payload.agent.status === "active",
+          qr: payload.agent.channelStatus.qr ?? null,
+          lastSeen:
+            payload.agent.channelStatus.lastSeen ??
+            payload.agent.lastHealthCheckAt ??
+            null,
+        });
+      } else {
+        setGatewayStatus({
+          status: payload.agent.status ?? "sin verificar",
+          paired: payload.agent.status === "active",
+          qr: null,
+          lastSeen: payload.agent.lastHealthCheckAt ?? null,
+        });
+      }
+    } catch {
+      setChannelConfigDraft(JSON.stringify(defaultChannelConfig(fallbackName), null, 2));
+      setGatewayStatus(null);
+    }
+  }
+
+  useEffect(() => {
+    if (!selectedAgent) return;
     setStatusMessage("");
     setError("");
-  }, [selectedAgent?.id]);
+    void loadAgentChannelStatus(selectedAgent.id);
+  }, [workspaceSlug, selectedAgent?.id]);
 
   async function saveChannelConfig() {
     if (!selectedAgent || !canManage || isSaving) return;
@@ -854,6 +1002,7 @@ export function ChannelsPanel({ workspaceSlug, currentRole, agents }: ChannelsPa
       const payload = (await response.json().catch(() => ({}))) as { error?: string };
       if (!response.ok) throw new Error(payload.error ?? "No se pudo guardar la configuración de canal.");
       setStatusMessage("Configuración de canal guardada.");
+      await loadAgentChannelStatus(selectedAgent.id);
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "No se pudo guardar.");
     } finally {
@@ -1066,7 +1215,7 @@ export function ActivityPanel({ workspaceSlug, agents, initialActivity }: Activi
               <option value="all">Todas</option>
               {actionOptions.map((action) => (
                 <option key={action} value={action}>
-                  {action}
+                  {humanizeActivityAction(action)}
                 </option>
               ))}
             </select>
@@ -1089,15 +1238,22 @@ export function ActivityPanel({ workspaceSlug, agents, initialActivity }: Activi
 
         {activity.length > 0 ? (
           <div style={activityListStyle}>
-            {activity.map((entry) => (
-              <div key={entry.id} style={activityItemStyle}>
-                <div>
-                  <p style={activityTitleStyle}>{entry.action}</p>
-                  <p style={activityMetaStyle}>{Object.entries(entry.details).slice(0, 3).map(([key, value]) => `${key}: ${String(value)}`).join(" · ") || "Sin detalle"}</p>
+            {activity.map((entry) => {
+              const activityMetaEntries = Object.entries(entry.details)
+                .slice(0, 3)
+                .map(([key, value]) => `${key.replace(/_/g, " ")}: ${String(value)}`);
+              return (
+                <div key={entry.id} style={activityItemStyle}>
+                  <div>
+                    <p style={activityTitleStyle}>{humanizeActivityAction(entry.action)}</p>
+                    <p style={activityMetaStyle}>
+                      {activityMetaEntries.join(" · ") || "Sin detalle"}
+                    </p>
+                  </div>
+                  <p style={activityMetaStyle}>{new Date(entry.createdAt).toLocaleString("es-MX")}</p>
                 </div>
-                <p style={activityMetaStyle}>{new Date(entry.createdAt).toLocaleString("es-MX")}</p>
-              </div>
-            ))}
+              );
+            })}
           </div>
         ) : (
           <EmptyState
@@ -1294,6 +1450,22 @@ const inlineSuccessStyle: React.CSSProperties = {
   margin: 0,
   color: "#0f8a52",
   fontSize: 13,
+};
+
+const warningListStyle: React.CSSProperties = {
+  border: "1px solid rgba(245, 158, 11, 0.26)",
+  borderRadius: 12,
+  background: "rgba(245, 158, 11, 0.09)",
+  padding: "10px 12px",
+  display: "grid",
+  gap: 6,
+};
+
+const warningTextStyle: React.CSSProperties = {
+  margin: 0,
+  color: "#92400e",
+  fontSize: 13,
+  lineHeight: 1.5,
 };
 
 const statusRowStyle: React.CSSProperties = {

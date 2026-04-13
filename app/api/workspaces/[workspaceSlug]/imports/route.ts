@@ -15,6 +15,9 @@ type ImportRequest = {
   fileName?: string;
 };
 
+const MAX_IMPORT_ROWS = 5000;
+const INSERT_BATCH_SIZE = 500;
+
 function requireSupabaseAdmin() {
   const supabase = getSupabaseAdmin();
   if (!supabase) {
@@ -59,8 +62,8 @@ export async function POST(request: Request, context: Context) {
     if (rows.length === 0) {
       return Response.json({ error: "rows must include at least one record." }, { status: 400 });
     }
-    if (rows.length > 500) {
-      return Response.json({ error: "A single import batch is limited to 500 rows." }, { status: 400 });
+    if (rows.length > MAX_IMPORT_ROWS) {
+      return Response.json({ error: `A single import is limited to ${MAX_IMPORT_ROWS} rows.` }, { status: 400 });
     }
 
     const supabase = requireSupabaseAdmin();
@@ -127,9 +130,12 @@ export async function POST(request: Request, context: Context) {
     }
 
     if (toInsert.length > 0) {
-      const { error: insertError } = await supabase.from("records").insert(toInsert);
-      if (insertError) {
-        throw new Error(insertError.message);
+      for (let index = 0; index < toInsert.length; index += INSERT_BATCH_SIZE) {
+        const batch = toInsert.slice(index, index + INSERT_BATCH_SIZE);
+        const { error: insertError } = await supabase.from("records").insert(batch);
+        if (insertError) {
+          throw new Error(insertError.message);
+        }
       }
     }
 

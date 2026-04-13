@@ -1538,9 +1538,16 @@ function BaseDataPanel({
             </label>
 
             {canWrite ? (
-              <button type="button" style={primaryButtonStyle} onClick={openCreatePanel}>
-                Nuevo registro
-              </button>
+              <div style={{ display: "inline-flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <button type="button" style={primaryButtonStyle} onClick={openCreatePanel}>
+                  Nuevo registro
+                </button>
+                {currentRole === "admin" ? (
+                  <a href={`/workspaces/${workspaceSlug}?tab=fields&object=${selectedObjectId}`} style={metaActionLinkStyle}>
+                    ⚙ Gestionar campos
+                  </a>
+                ) : null}
+              </div>
             ) : null}
           </div>
 
@@ -4079,7 +4086,6 @@ const tableWrapStyle: React.CSSProperties = {
 const tableStyle: React.CSSProperties = {
   width: "100%",
   borderCollapse: "collapse",
-  minWidth: 760,
 };
 
 const tableHeadStyle: React.CSSProperties = {

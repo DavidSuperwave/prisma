@@ -237,7 +237,11 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
         object.name === "Receivables",
     };
   });
-  const copilot = snapshot.agents.find((agent) => agent.type === "copilot") ?? snapshot.agents[0] ?? null;
+  const copilot =
+    snapshot.agents.find((agent) => agent.type === "copilot" && agent.status === "active") ??
+    snapshot.agents.find((agent) => agent.type === "copilot") ??
+    snapshot.agents[0] ??
+    null;
   const askPrompt =
     query.ask === "record" && selectedRecord
       ? `Analiza el registro ${((typeof getRecordFieldValue(selectedRecord, "name") === "string" && String(getRecordFieldValue(selectedRecord, "name"))) || (typeof getRecordFieldValue(selectedRecord, "company_name") === "string" && String(getRecordFieldValue(selectedRecord, "company_name"))) || (typeof getRecordFieldValue(selectedRecord, "document_name") === "string" && String(getRecordFieldValue(selectedRecord, "document_name"))) || "seleccionado")} y dime que acciones humanas pendientes ves.`

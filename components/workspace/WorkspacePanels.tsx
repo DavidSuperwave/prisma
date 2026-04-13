@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   AlertTriangle,
@@ -70,6 +70,8 @@ type DataPanelProps = {
   fields: PrismaWorkspaceField[];
   views: PrismaWorkspaceView[];
   records: PrismaWorkspaceRecord[];
+  workspaceSlug: string;
+  currentRole: "admin" | "operator" | "viewer";
   recordBaseHref?: string;
   askHref?: string;
 };
@@ -1175,18 +1177,39 @@ export function ChatPanel({
   );
 }
 
-export function DataPanel({ objects, fields, views, records, recordBaseHref, askHref }: DataPanelProps) {
+export function DataPanel({
+  objects,
+  fields,
+  views,
+  records,
+  workspaceSlug,
+  currentRole,
+  recordBaseHref,
+  askHref,
+}: DataPanelProps) {
   const [selectedObjectId, setSelectedObjectId] = useState<string>(objects[0]?.id ?? "");
   const [selectedViewId, setSelectedViewId] = useState<string>("all");
   const [query, setQuery] = useState("");
+  const [localRecords, setLocalRecords] = useState<PrismaWorkspaceRecord[]>(records);
+  const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const [isCreatingRecord, setIsCreatingRecord] = useState(false);
+  const [recordDraft, setRecordDraft] = useState<Record<string, unknown>>({});
+  const [editingCell, setEditingCell] = useState<{ recordId: string; fieldKey: string } | null>(null);
+  const [editingValue, setEditingValue] = useState<unknown>("");
+  const [isSavingCell, setIsSavingCell] = useState(false);
+  const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
+  const [isDeletingRecord, setIsDeletingRecord] = useState(false);
+  const [tableError, setTableError] = useState("");
+  const [tableSuccess, setTableSuccess] = useState("");
 
+  const canWrite = currentRole === "admin" || currentRole === "operator";
   const object = objects.find((entry) => entry.id === selectedObjectId) ?? objects[0] ?? null;
   const objectFields = fields
     .filter((field) => field.objectId === object?.id)
     .sort((left, right) => left.sortOrder - right.sortOrder);
   const objectViews = views.filter((view) => view.objectId === object?.id);
   const currentView = selectedViewId === "all" ? null : objectViews.find((view) => view.id === selectedViewId) ?? null;
-  const scopedRecords = records.filter((record) => record.objectId === object?.id);
+  const scopedRecords = localRecords.filter((record) => record.objectId === object?.id);
   const visibleRecords = applyViewToRecords(scopedRecords, currentView).filter((record) =>
     query.trim()
       ? Object.values(record.data).some((value) =>
@@ -1196,6 +1219,247 @@ export function DataPanel({ objects, fields, views, records, recordBaseHref, ask
         )
       : true,
   );
+
+  useEffect(() => {
+    setLocalRecords(records);
+  }, [records]);
+
+  useEffect(() => {
+    if (!object) {
+      return;
+    }
+    if (selectedObjectId) {
+      return;
+    }
+    setSelectedObjectId(object.id);
+  }, [object, selectedObjectId]);
+
+  function parseSelectOptions(field: PrismaWorkspaceField) {
+    const rawValues =
+      Array.isArray(field.options.values) ? field.options.values : Array.isArray(field.options.options) ? field.options.options : [];
+    return rawValues
+      .map((entry) => String(entry ?? "").trim())
+      .filter(Boolean);
+  }
+
+  function initialValueForField(field: PrismaWorkspaceField) {
+    if (field.defaultValue !== null && field.defaultValue !== undefined) {
+      if (field.type === "boolean") {
+        return field.defaultValue === "true";
+      }
+      return field.defaultValue;
+    }
+    if (field.type === "boolean") {
+      return false;
+    }
+    return "";
+  }
+
+  function normalizeFieldValue(field: PrismaWorkspaceField, value: unknown) {
+    if (field.type === "boolean") {
+      if (typeof value === "boolean") return value;
+      if (typeof value === "string") return value.toLowerCase() === "true";
+      return Boolean(value);
+    }
+
+    if (value === null || value === undefined) {
+      return field.required ? "" : null;
+    }
+
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (trimmed.length === 0) {
+        return field.required ? "" : null;
+      }
+      if (field.type === "number") {
+        const parsed = Number(trimmed);
+        return Number.isFinite(parsed) ? parsed : trimmed;
+      }
+      return trimmed;
+    }
+
+    if (field.type === "number" && typeof value === "number") {
+      return Number.isFinite(value) ? value : field.required ? "" : null;
+    }
+
+    return value;
+  }
+
+  function buildRecordDataFromDraft(draft: Record<string, unknown>) {
+    return objectFields.reduce<Record<string, unknown>>((accumulator, field) => {
+      accumulator[field.key] = normalizeFieldValue(field, draft[field.key]);
+      return accumulator;
+    }, {});
+  }
+
+  function isMissingRequiredValue(value: unknown) {
+    return value === null || value === undefined || value === "";
+  }
+
+  function resetDraftForCurrentObject() {
+    const nextDraft = objectFields.reduce<Record<string, unknown>>((accumulator, field) => {
+      accumulator[field.key] = initialValueForField(field);
+      return accumulator;
+    }, {});
+    setRecordDraft(nextDraft);
+  }
+
+  function openCreatePanel() {
+    if (!canWrite || !object) {
+      return;
+    }
+    resetDraftForCurrentObject();
+    setTableError("");
+    setTableSuccess("");
+    setIsCreateOpen(true);
+  }
+
+  async function createRecord() {
+    if (!object || !canWrite || isCreatingRecord) {
+      return;
+    }
+
+    const data = buildRecordDataFromDraft(recordDraft);
+    const missingRequiredFields = objectFields.filter(
+      (field) => field.required && isMissingRequiredValue(data[field.key]),
+    );
+    if (missingRequiredFields.length > 0) {
+      setTableError(`Completa los campos obligatorios: ${missingRequiredFields.map((field) => field.name).join(", ")}.`);
+      return;
+    }
+
+    setIsCreatingRecord(true);
+    setTableError("");
+    try {
+      const response = await fetch(`/api/workspaces/${workspaceSlug}/records`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          objectId: object.id,
+          data,
+        }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        record?: PrismaWorkspaceRecord;
+      };
+
+      if (!response.ok || !payload.record) {
+        throw new Error(payload.error ?? "No se pudo crear el registro.");
+      }
+
+      setLocalRecords((current) => [payload.record!, ...current.filter((entry) => entry.id !== payload.record!.id)]);
+      setTableSuccess("Registro creado.");
+      setIsCreateOpen(false);
+      setRecordDraft({});
+    } catch (error) {
+      setTableError(error instanceof Error ? error.message : "No se pudo crear el registro.");
+    } finally {
+      setIsCreatingRecord(false);
+    }
+  }
+
+  function startInlineEdit(record: PrismaWorkspaceRecord, field: PrismaWorkspaceField) {
+    if (!canWrite) {
+      return;
+    }
+    const rawValue = getRecordFieldValue(record, field.key);
+    setEditingCell({ recordId: record.id, fieldKey: field.key });
+    if (field.type === "boolean") {
+      setEditingValue(Boolean(rawValue));
+      return;
+    }
+    setEditingValue(rawValue === null || rawValue === undefined ? "" : String(rawValue));
+  }
+
+  function cancelInlineEdit() {
+    setEditingCell(null);
+    setEditingValue("");
+  }
+
+  async function saveInlineEdit(record: PrismaWorkspaceRecord, field: PrismaWorkspaceField) {
+    if (!canWrite || isSavingCell) {
+      return;
+    }
+
+    const nextValue = normalizeFieldValue(field, editingValue);
+    const existingValue = record.data[field.key];
+    if (JSON.stringify(existingValue) === JSON.stringify(nextValue)) {
+      cancelInlineEdit();
+      return;
+    }
+
+    const nextData = { ...record.data, [field.key]: nextValue };
+    const previousSnapshot = localRecords;
+
+    setIsSavingCell(true);
+    setTableError("");
+    setLocalRecords((current) =>
+      current.map((entry) =>
+        entry.id === record.id
+          ? {
+              ...entry,
+              data: nextData,
+            }
+          : entry,
+      ),
+    );
+
+    try {
+      const response = await fetch(`/api/workspaces/${workspaceSlug}/records/${record.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ data: nextData }),
+      });
+
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        record?: PrismaWorkspaceRecord;
+      };
+
+      if (!response.ok || !payload.record) {
+        throw new Error(payload.error ?? "No se pudo actualizar el registro.");
+      }
+
+      setLocalRecords((current) =>
+        current.map((entry) => (entry.id === payload.record!.id ? payload.record! : entry)),
+      );
+      setTableSuccess("Registro actualizado.");
+    } catch (error) {
+      setLocalRecords(previousSnapshot);
+      setTableError(error instanceof Error ? error.message : "No se pudo actualizar el registro.");
+    } finally {
+      setIsSavingCell(false);
+      cancelInlineEdit();
+    }
+  }
+
+  async function deleteRecord(recordId: string) {
+    if (!canWrite || isDeletingRecord) {
+      return;
+    }
+    const previousSnapshot = localRecords;
+
+    setIsDeletingRecord(true);
+    setTableError("");
+    setLocalRecords((current) => current.filter((entry) => entry.id !== recordId));
+    try {
+      const response = await fetch(`/api/workspaces/${workspaceSlug}/records/${recordId}`, {
+        method: "DELETE",
+      });
+      const payload = (await response.json().catch(() => ({}))) as { error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "No se pudo eliminar el registro.");
+      }
+      setDeleteTargetId(null);
+      setTableSuccess("Registro eliminado.");
+    } catch (error) {
+      setLocalRecords(previousSnapshot);
+      setTableError(error instanceof Error ? error.message : "No se pudo eliminar el registro.");
+    } finally {
+      setIsDeletingRecord(false);
+    }
+  }
 
   const summary = object
     ? `${visibleRecords.length} registros visibles · ${objectFields.length} campos activos · ${objectViews.length} vistas guardadas`
@@ -1217,6 +1481,7 @@ export function DataPanel({ objects, fields, views, records, recordBaseHref, ask
                 onChange={(event) => {
                   setSelectedObjectId(event.target.value);
                   setSelectedViewId("all");
+                  setEditingCell(null);
                 }}
                 style={inputStyle}
               >
@@ -1239,6 +1504,12 @@ export function DataPanel({ objects, fields, views, records, recordBaseHref, ask
                 ))}
               </select>
             </label>
+
+            {canWrite ? (
+              <button type="button" style={primaryButtonStyle} onClick={openCreatePanel}>
+                Nuevo registro
+              </button>
+            ) : null}
           </div>
 
           <label style={{ ...inputLabelStyle, minWidth: 280 }}>
@@ -1269,9 +1540,13 @@ export function DataPanel({ objects, fields, views, records, recordBaseHref, ask
                 Consultar con CEO
               </a>
             ) : null}
+            {!canWrite ? <StatusPill tone="neutral">Solo lectura</StatusPill> : null}
           </div>
           <p style={metaCopyStyle}>{summary.replace("campos activos", "columnas").replace("1 vistas guardadas", "1 vista guardada")}</p>
         </div>
+
+        {tableError ? <p style={inlineErrorStyle}>{tableError}</p> : null}
+        {tableSuccess ? <p style={inlineSuccessStyle}>{tableSuccess}</p> : null}
 
         {object && visibleRecords.length > 0 ? (
           <div style={tableWrapStyle}>
@@ -1283,6 +1558,7 @@ export function DataPanel({ objects, fields, views, records, recordBaseHref, ask
                       <span>{field.name}</span>
                     </th>
                   ))}
+                  {canWrite ? <th style={tableHeadStyle}>Acciones</th> : null}
                 </tr>
               </thead>
               <tbody>
@@ -1291,25 +1567,100 @@ export function DataPanel({ objects, fields, views, records, recordBaseHref, ask
                     key={record.id}
                     style={recordBaseHref ? clickableRowStyle : undefined}
                     onClick={() => {
+                      if (editingCell) {
+                        return;
+                      }
                       if (!recordBaseHref || !object?.id) {
                         return;
                       }
-
                       window.location.href = `${recordBaseHref}&object=${object.id}&record=${record.id}`;
                     }}
                   >
                     {objectFields.map((field) => {
                       const value = getRecordFieldValue(record, field.key);
+                      const isEditing =
+                        editingCell?.recordId === record.id && editingCell.fieldKey === field.key;
+                      const options = parseSelectOptions(field);
+
                       return (
-                        <td key={`${record.id}-${field.id}`} style={tableCellStyle}>
-                          {field.key === "status" ? (
-                            <StatusPill tone={String(value ?? "").toLowerCase()}>{formatStatusLabel(String(value ?? "—"))}</StatusPill>
+                        <td
+                          key={`${record.id}-${field.id}`}
+                          style={tableCellStyle}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            if (!canWrite) return;
+                            startInlineEdit(record, field);
+                          }}
+                        >
+                          {isEditing ? (
+                            field.type === "status" || field.type === "select" ? (
+                              <select
+                                autoFocus
+                                value={String(editingValue ?? "")}
+                                onChange={(event) => setEditingValue(event.target.value)}
+                                onBlur={() => void saveInlineEdit(record, field)}
+                                style={inlineInputStyle}
+                              >
+                                <option value="">Selecciona</option>
+                                {options.map((option) => (
+                                  <option key={option} value={option}>
+                                    {formatStatusLabel(option)}
+                                  </option>
+                                ))}
+                              </select>
+                            ) : field.type === "boolean" ? (
+                              <select
+                                autoFocus
+                                value={String(Boolean(editingValue))}
+                                onChange={(event) => setEditingValue(event.target.value === "true")}
+                                onBlur={() => void saveInlineEdit(record, field)}
+                                style={inlineInputStyle}
+                              >
+                                <option value="true">Sí</option>
+                                <option value="false">No</option>
+                              </select>
+                            ) : (
+                              <input
+                                autoFocus
+                                type={field.type === "number" ? "number" : field.type === "date" ? "date" : "text"}
+                                value={String(editingValue ?? "")}
+                                onChange={(event) => setEditingValue(event.target.value)}
+                                onBlur={() => void saveInlineEdit(record, field)}
+                                onKeyDown={(event) => {
+                                  if (event.key === "Escape") {
+                                    cancelInlineEdit();
+                                  }
+                                  if (event.key === "Enter") {
+                                    event.currentTarget.blur();
+                                  }
+                                }}
+                                style={inlineInputStyle}
+                              />
+                            )
+                          ) : field.key === "status" ? (
+                            <StatusPill tone={String(value ?? "").toLowerCase()}>
+                              {formatStatusLabel(String(value ?? "—"))}
+                            </StatusPill>
+                          ) : field.type === "boolean" ? (
+                            <span>{Boolean(value) ? "Sí" : "No"}</span>
                           ) : (
-                            <span>{value ? String(value) : "—"}</span>
+                            <span>{value !== null && value !== undefined && String(value).length > 0 ? String(value) : "—"}</span>
                           )}
                         </td>
                       );
                     })}
+                    {canWrite ? (
+                      <td style={tableCellStyle} onClick={(event) => event.stopPropagation()}>
+                        <button
+                          type="button"
+                          style={dangerButtonStyle}
+                          onClick={() => setDeleteTargetId(record.id)}
+                          disabled={isDeletingRecord}
+                        >
+                          Eliminar
+                        </button>
+                      </td>
+                    ) : null}
                   </tr>
                 ))}
               </tbody>
@@ -1327,6 +1678,102 @@ export function DataPanel({ objects, fields, views, records, recordBaseHref, ask
           />
         )}
       </Panel>
+
+      {isCreateOpen && object ? (
+        <div style={modalOverlayStyle} role="presentation" onClick={() => setIsCreateOpen(false)}>
+          <div style={modalCardStyle} role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+            <div style={modalHeaderStyle}>
+              <div>
+                <p style={eyebrowStyle}>Nuevo registro</p>
+                <h3 style={agentDetailTitleStyle}>{object.name}</h3>
+              </div>
+              <button type="button" style={chatActionButtonStyle} onClick={() => setIsCreateOpen(false)}>
+                Cerrar
+              </button>
+            </div>
+
+            <div style={modalFieldsGridStyle}>
+              {objectFields.map((field) => {
+                const options = parseSelectOptions(field);
+                const value = recordDraft[field.key] ?? "";
+                return (
+                  <label key={field.id} style={fieldStyle}>
+                    {field.name}
+                    {field.required ? " *" : ""}
+                    {field.type === "status" || field.type === "select" ? (
+                      <select
+                        value={String(value ?? "")}
+                        onChange={(event) =>
+                          setRecordDraft((current) => ({ ...current, [field.key]: event.target.value }))
+                        }
+                        style={inputStyle}
+                      >
+                        <option value="">{field.required ? "Selecciona una opción" : "Sin valor"}</option>
+                        {options.map((option) => (
+                          <option key={option} value={option}>
+                            {formatStatusLabel(option)}
+                          </option>
+                        ))}
+                      </select>
+                    ) : field.type === "boolean" ? (
+                      <label style={toggleStyle}>
+                        <input
+                          type="checkbox"
+                          checked={Boolean(value)}
+                          onChange={(event) =>
+                            setRecordDraft((current) => ({ ...current, [field.key]: event.target.checked }))
+                          }
+                        />
+                        Activo
+                      </label>
+                    ) : (
+                      <input
+                        type={field.type === "number" ? "number" : field.type === "date" ? "date" : "text"}
+                        value={String(value ?? "")}
+                        onChange={(event) =>
+                          setRecordDraft((current) => ({ ...current, [field.key]: event.target.value }))
+                        }
+                        style={inputStyle}
+                      />
+                    )}
+                  </label>
+                );
+              })}
+            </div>
+
+            <div style={actionsStyle}>
+              <button type="button" style={primaryButtonStyle} onClick={() => void createRecord()} disabled={isCreatingRecord}>
+                {isCreatingRecord ? "Guardando..." : "Guardar"}
+              </button>
+              <button type="button" style={chatActionButtonStyle} onClick={() => setIsCreateOpen(false)} disabled={isCreatingRecord}>
+                Cancelar
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {deleteTargetId ? (
+        <div style={modalOverlayStyle} role="presentation" onClick={() => setDeleteTargetId(null)}>
+          <div style={confirmCardStyle} role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+            <p style={agentNameStyle}>¿Eliminar este registro?</p>
+            <p style={queueSubtitleStyle}>Esta acción no se puede deshacer.</p>
+            <div style={actionsStyle}>
+              <button
+                type="button"
+                style={dangerButtonStyle}
+                onClick={() => void deleteRecord(deleteTargetId)}
+                disabled={isDeletingRecord}
+              >
+                {isDeletingRecord ? "Eliminando..." : "Eliminar"}
+              </button>
+              <button type="button" style={chatActionButtonStyle} onClick={() => setDeleteTargetId(null)} disabled={isDeletingRecord}>
+                Cancelar
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -3405,19 +3852,78 @@ const tableHeadStyle: React.CSSProperties = {
   background: "var(--workspace-panel-soft)",
 };
 
-const tableHeadMetaStyle: React.CSSProperties = {
-  display: "block",
-  fontWeight: 500,
-  marginTop: 2,
-  color: "var(--workspace-faint)",
-};
-
 const tableCellStyle: React.CSSProperties = {
   padding: "14px 16px",
   borderBottom: "1px solid var(--workspace-border)",
   color: "var(--workspace-text)",
   fontSize: 14,
   verticalAlign: "top",
+};
+
+const inlineInputStyle: React.CSSProperties = {
+  width: "100%",
+  borderRadius: 10,
+  border: "1px solid var(--workspace-border)",
+  background: "var(--workspace-surface)",
+  color: "var(--workspace-text)",
+  padding: "8px 10px",
+  font: "inherit",
+};
+
+const dangerButtonStyle: React.CSSProperties = {
+  borderRadius: 10,
+  border: "1px solid rgba(220, 38, 38, 0.22)",
+  background: "rgba(220, 38, 38, 0.12)",
+  color: "#b42318",
+  padding: "8px 10px",
+  font: "inherit",
+  fontWeight: 700,
+  cursor: "pointer",
+};
+
+const modalOverlayStyle: React.CSSProperties = {
+  position: "fixed",
+  inset: 0,
+  background: "rgba(15, 23, 42, 0.4)",
+  display: "grid",
+  placeItems: "center",
+  zIndex: 90,
+  padding: 16,
+};
+
+const modalCardStyle: React.CSSProperties = {
+  width: "min(880px, 100%)",
+  maxHeight: "85vh",
+  overflowY: "auto",
+  borderRadius: 18,
+  border: "1px solid var(--workspace-border)",
+  background: "var(--workspace-panel)",
+  padding: 18,
+  display: "grid",
+  gap: 16,
+};
+
+const modalHeaderStyle: React.CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "flex-start",
+  gap: 12,
+};
+
+const modalFieldsGridStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+  gap: 12,
+};
+
+const confirmCardStyle: React.CSSProperties = {
+  width: "min(420px, 100%)",
+  borderRadius: 16,
+  border: "1px solid var(--workspace-border)",
+  background: "var(--workspace-panel)",
+  padding: 18,
+  display: "grid",
+  gap: 12,
 };
 
 const agentGridStyle: React.CSSProperties = {

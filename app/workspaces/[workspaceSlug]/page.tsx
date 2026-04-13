@@ -222,6 +222,8 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
         fields={snapshot.fields}
         views={snapshot.views}
         records={snapshot.records}
+        workspaceSlug={snapshot.workspace.subdomain}
+        currentRole={membership.role}
         recordBaseHref={`/workspaces/${snapshot.workspace.subdomain}?tab=record`}
       />
     );

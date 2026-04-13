@@ -40,6 +40,7 @@ function formatAgentSummary(agents: Array<{
   skills: string[];
   knowledgeScope: Record<string, unknown>;
   cronJobs: unknown[];
+  channelConfig: Record<string, unknown>;
   memoryLimitMb: number;
   soulMd: string | null;
   containerName: string;
@@ -58,6 +59,7 @@ function formatAgentSummary(agents: Array<{
     channels:
       Array.isArray(agent.knowledgeScope.channels) ? (agent.knowledgeScope.channels as string[]) : [],
     cronJobs: agent.cronJobs,
+    channelConfig: agent.channelConfig,
     memoryLabel: agent.memoryLimitMb > 0 ? "Activada" : "Desactivada",
     soulMd: agent.soulMd,
     runtimeLabel: agent.containerName,

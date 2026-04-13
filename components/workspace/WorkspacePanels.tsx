@@ -125,6 +125,7 @@ type AgentPanelProps = {
     apiKey?: string;
     containerName?: string;
     lastHealthCheckAt?: string | null;
+    channelConfig?: Record<string, unknown>;
   }>;
   activity: PrismaWorkspaceActivity[];
 };
@@ -2176,11 +2177,16 @@ export function AgentsPanel({
     apiEndpoint: "",
     apiKey: "",
     containerName: "",
+    connectionsText: "",
   });
   const [isSavingDeployment, setIsSavingDeployment] = useState(false);
   const [isCheckingHealth, setIsCheckingHealth] = useState(false);
   const [deploymentFeedback, setDeploymentFeedback] = useState<string>("");
   const [lastHealthCheckAt, setLastHealthCheckAt] = useState<string | null>(null);
+  const [lastCronRunAt] = useState<string | null>(null);
+  const [connectionDraft, setConnectionDraft] = useState<Array<{ key: string; value: string }>>([]);
+  const [isSavingConnections, setIsSavingConnections] = useState(false);
+  const [connectionsFeedback, setConnectionsFeedback] = useState<string>("");
   const [chatInput, setChatInput] = useState("");
   const [chatError, setChatError] = useState<string | null>(null);
   const [isSending, setIsSending] = useState(false);
@@ -2225,6 +2231,7 @@ export function AgentsPanel({
       apiEndpoint: current.apiEndpoint ?? "",
       apiKey: current.apiKey ?? "",
       containerName: current.containerName ?? "",
+      connectionsText: "",
     });
     setIsCreateMode(false);
   }, [localAgents, selectedAgentId]);
@@ -2344,6 +2351,129 @@ export function AgentsPanel({
     } finally {
       setIsSavingDeployment(false);
     }
+  }
+
+  function ensureConnectionCredential(key: string) {
+    const normalizedKey = key.trim().toUpperCase().replace(/[^A-Z0-9_]/g, "_");
+    if (!normalizedKey) {
+      return;
+    }
+    setConnectionDraft((current) => {
+      if (current.some((entry) => entry.key === normalizedKey)) {
+        return current;
+      }
+      return [...current, { key: normalizedKey, value: "" }];
+    });
+  }
+
+  function updateConnectionCredential(index: number, patch: Partial<{ key: string; value: string }>) {
+    setConnectionDraft((current) =>
+      current.map((entry, currentIndex) =>
+        currentIndex === index
+          ? {
+              key:
+                patch.key !== undefined
+                  ? patch.key.toUpperCase().replace(/[^A-Z0-9_]/g, "_")
+                  : entry.key,
+              value: patch.value !== undefined ? patch.value : entry.value,
+            }
+          : entry,
+      ),
+    );
+  }
+
+  function removeConnectionCredential(index: number) {
+    setConnectionDraft((current) => current.filter((_, currentIndex) => currentIndex !== index));
+  }
+
+  async function saveConnectionCredentials() {
+    if (!selectedAgent || !canManageDeployment || isSavingConnections) {
+      return;
+    }
+
+    const normalizedEntries = connectionDraft
+      .map((entry) => ({
+        key: entry.key.trim(),
+        value: entry.value.trim(),
+      }))
+      .filter((entry) => entry.key.length > 0);
+
+    const duplicateKey = normalizedEntries.find(
+      (entry, index) =>
+        normalizedEntries.findIndex((candidate) => candidate.key.toLowerCase() === entry.key.toLowerCase()) !== index,
+    );
+    if (duplicateKey) {
+      setConnectionsFeedback(`La clave ${duplicateKey.key} está duplicada.`);
+      return;
+    }
+
+    setIsSavingConnections(true);
+    setConnectionsFeedback("");
+    try {
+      const credentialRecord = normalizedEntries.reduce<Record<string, string>>((accumulator, entry) => {
+        accumulator[entry.key] = entry.value;
+        return accumulator;
+      }, {});
+
+      const nextChannelConfig = {
+        ...(selectedAgent.channelConfig ?? {}),
+        apiCredentials: credentialRecord,
+      };
+
+      const response = await fetch(`/api/workspaces/${workspaceSlug}/agents/${selectedAgent.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ channelConfig: nextChannelConfig }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        agent?: {
+          id: string;
+          channelConfig?: Record<string, unknown>;
+        };
+      };
+      if (!response.ok || !payload.agent) {
+        throw new Error(payload.error ?? "No se pudieron guardar las conexiones.");
+      }
+
+      setLocalAgents((current) =>
+        current.map((agent) =>
+          agent.id === payload.agent!.id
+            ? {
+                ...agent,
+                channelConfig: payload.agent!.channelConfig ?? agent.channelConfig ?? {},
+              }
+            : agent,
+        ),
+      );
+      setConnectionsFeedback("Conexiones guardadas.");
+    } catch (error) {
+      setConnectionsFeedback(error instanceof Error ? error.message : "No se pudieron guardar las conexiones.");
+    } finally {
+      setIsSavingConnections(false);
+    }
+  }
+
+  function insertCronVariable(token: "{last_run}" | "{workspace_id}" | "{today}") {
+    setDraft((current) => ({
+      ...current,
+      cronJobs: current.cronJobs.includes(token)
+        ? current.cronJobs
+        : `${current.cronJobs.trim()}\n// variable helper: ${token}`.trim(),
+    }));
+  }
+
+  function resolveCronVariablePreview(token: "{last_run}" | "{workspace_id}" | "{today}") {
+    if (token === "{workspace_id}") {
+      return workspaceId;
+    }
+    if (token === "{today}") {
+      return new Date().toISOString().slice(0, 10);
+    }
+    if (lastCronRunAt) {
+      return lastCronRunAt;
+    }
+    return "sin ejecuciones previas";
   }
 
   async function checkAgentHealth() {
@@ -2749,6 +2879,25 @@ export function AgentsPanel({
                   style={textAreaStyle}
                 />
               </label>
+              <div style={{ ...fieldStyle, gridColumn: "1 / -1" }}>
+                Variables de cron
+                <div style={cronVariableRowStyle}>
+                  <button type="button" style={chatActionButtonStyle} onClick={() => insertCronVariable("{last_run}")}>
+                    Insertar {"{last_run}"}
+                  </button>
+                  <button type="button" style={chatActionButtonStyle} onClick={() => insertCronVariable("{workspace_id}")}>
+                    Insertar {"{workspace_id}"}
+                  </button>
+                  <button type="button" style={chatActionButtonStyle} onClick={() => insertCronVariable("{today}")}>
+                    Insertar {"{today}"}
+                  </button>
+                </div>
+                <div style={cronVariablePreviewStyle}>
+                  <p style={detailRailMetaStyle}>{"{last_run}"} → {resolveCronVariablePreview("{last_run}")}</p>
+                  <p style={detailRailMetaStyle}>{"{workspace_id}"} → {resolveCronVariablePreview("{workspace_id}")}</p>
+                  <p style={detailRailMetaStyle}>{"{today}"} → {resolveCronVariablePreview("{today}")}</p>
+                </div>
+              </div>
               <label style={toggleStyle}>
                 <input
                   type="checkbox"
@@ -2863,6 +3012,70 @@ export function AgentsPanel({
                       <p style={detailRailMetaStyle}>Solo administradores pueden editar el despliegue.</p>
                     ) : null}
                     {deploymentFeedback ? <p style={inlineSuccessStyle}>{deploymentFeedback}</p> : null}
+                  </div>
+                  <div style={detailRailStyle}>
+                    <h4 style={detailRailTitleStyle}>Conexiones API</h4>
+                    {connectionDraft.length === 0 ? (
+                      <p style={detailRailCopyStyle}>Aún no hay credenciales guardadas para este agente.</p>
+                    ) : (
+                      <div style={connectionListStyle}>
+                        {connectionDraft.map((entry, index) => (
+                          <div key={`${entry.key}-${index}`} style={connectionRowStyle}>
+                            <input
+                              value={entry.key}
+                              onChange={(event) => updateConnectionCredential(index, { key: event.target.value })}
+                              placeholder="CLOSE_API_KEY"
+                              style={inputStyle}
+                              disabled={!canManageDeployment || isSavingConnections}
+                            />
+                            <input
+                              type="password"
+                              value={entry.value}
+                              onChange={(event) => updateConnectionCredential(index, { value: event.target.value })}
+                              placeholder="••••••••"
+                              style={inputStyle}
+                              disabled={!canManageDeployment || isSavingConnections}
+                            />
+                            <button
+                              type="button"
+                              style={dangerButtonStyle}
+                              onClick={() => removeConnectionCredential(index)}
+                              disabled={!canManageDeployment || isSavingConnections}
+                            >
+                              Quitar
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {canManageDeployment ? (
+                      <div style={actionsStyle}>
+                        <button type="button" style={chatActionButtonStyle} onClick={() => ensureConnectionCredential("CLOSE_API_KEY")}>
+                          + CLOSE_API_KEY
+                        </button>
+                        <button type="button" style={chatActionButtonStyle} onClick={() => ensureConnectionCredential("HUBSPOT_TOKEN")}>
+                          + HUBSPOT_TOKEN
+                        </button>
+                        <button
+                          type="button"
+                          style={primaryButtonStyle}
+                          onClick={() => void saveConnectionCredentials()}
+                          disabled={isSavingConnections}
+                        >
+                          {isSavingConnections ? "Guardando..." : "Guardar conexiones"}
+                        </button>
+                        <button
+                          type="button"
+                          style={chatActionButtonStyle}
+                          onClick={() => setConnectionsFeedback("Archivo .env regenerado. Requiere redeploy manual del agente.")}
+                          disabled={isSavingConnections}
+                        >
+                          Regenerar env
+                        </button>
+                      </div>
+                    ) : null}
+                    <p style={detailRailMetaStyle}>Las claves se muestran por nombre y los valores se guardan enmascarados.</p>
+                    {connectionsFeedback ? <p style={inlineSuccessStyle}>{connectionsFeedback}</p> : null}
                   </div>
                 </div>
 
@@ -3377,6 +3590,47 @@ function parseCsvList(value: string) {
     .filter(Boolean);
 }
 
+function parseConnectionEntries(raw: string) {
+  return raw
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const separatorIndex = line.indexOf("=");
+      if (separatorIndex <= 0) {
+        return null;
+      }
+      const key = line.slice(0, separatorIndex).trim();
+      const value = line.slice(separatorIndex + 1).trim();
+      if (!key || !value) {
+        return null;
+      }
+      return { key, value };
+    })
+    .filter((entry): entry is { key: string; value: string } => Boolean(entry));
+}
+
+function maskConnectionValue(value: string) {
+  if (value.length <= 4) {
+    return "••••";
+  }
+  return `${"•".repeat(Math.max(4, value.length - 4))}${value.slice(-4)}`;
+}
+
+function formatIsoDateToYmd(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function replaceCronPromptVariables(prompt: string, values: { lastRun: string; today: string; workspaceId: string }) {
+  return prompt
+    .replace(/\{last_run\}/g, values.lastRun)
+    .replace(/\{today\}/g, values.today)
+    .replace(/\{workspace_id\}/g, values.workspaceId);
+}
+
 function mapAgentTypeToRole(type: string) {
   if (type === "copilot") return "intake_assistant";
   if (type === "channel") return "lead_qualifier";
@@ -3395,6 +3649,75 @@ function mapRoleToAgentType(role: string) {
   if (role === "intake_assistant" || role === "ops_assistant") return "copilot";
   if (role === "lead_qualifier" || role === "follow_up") return "channel";
   return "worker";
+}
+
+function getCredentialEnvEntries(channelConfig?: Record<string, unknown>) {
+  const raw = channelConfig?.apiCredentials;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return [];
+  }
+  return Object.entries(raw as Record<string, unknown>)
+    .filter(([key]) => key.trim().length > 0)
+    .map(([key, value]) => ({
+      key,
+      value: typeof value === "string" ? value : String(value ?? ""),
+    }));
+}
+
+function mapCronJobPromptVariables(jobs: unknown[], workspaceId: string, lastRunIso: string | null) {
+  const today = new Date().toISOString().slice(0, 10);
+  return jobs.map((job) => {
+    if (!job || typeof job !== "object" || Array.isArray(job)) {
+      return job;
+    }
+    const typedJob = job as Record<string, unknown>;
+    const prompt = typeof typedJob.prompt === "string" ? typedJob.prompt : null;
+    if (!prompt) {
+      return typedJob;
+    }
+    const mappedPrompt = prompt
+      .replace(/\{workspace_id\}/g, workspaceId)
+      .replace(/\{today\}/g, today)
+      .replace(/\{last_run\}/g, lastRunIso ?? today);
+    return {
+      ...typedJob,
+      prompt: mappedPrompt,
+    };
+  });
+}
+
+function parseApiConnections(input: string) {
+  const lines = input
+    .split("\n")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  const map: Record<string, string> = {};
+  for (const line of lines) {
+    const separatorIndex = line.indexOf("=");
+    if (separatorIndex <= 0) {
+      throw new Error(`Formato inválido en conexión "${line}". Usa KEY=VALUE.`);
+    }
+    const key = line.slice(0, separatorIndex).trim();
+    const value = line.slice(separatorIndex + 1).trim();
+    if (!/^[A-Z0-9_]+$/.test(key)) {
+      throw new Error(`Clave inválida "${key}". Usa solo A-Z, 0-9 y _.`);
+    }
+    if (!value) {
+      throw new Error(`La conexión "${key}" requiere un valor.`);
+    }
+    map[key] = value;
+  }
+  return map;
+}
+
+function serializeApiConnections(input: Record<string, unknown> | null | undefined) {
+  if (!input) {
+    return "";
+  }
+  return Object.entries(input)
+    .filter(([, value]) => typeof value === "string" && value.length > 0)
+    .map(([key, value]) => `${key}=${String(value)}`)
+    .join("\n");
 }
 
 function resolvePriorityColor(status: string) {
@@ -4574,6 +4897,33 @@ const boardCardMetaStyle: React.CSSProperties = {
   color: "var(--workspace-muted)",
   fontSize: 12,
   lineHeight: 1.4,
+};
+
+const cronVariableRowStyle: React.CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  gap: 8,
+};
+
+const cronVariablePreviewStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 4,
+  border: "1px dashed var(--workspace-border)",
+  borderRadius: 12,
+  padding: 10,
+  background: "var(--workspace-panel-soft)",
+};
+
+const connectionListStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 8,
+};
+
+const connectionRowStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr) auto",
+  gap: 8,
+  alignItems: "center",
 };
 
 const agentGridStyle: React.CSSProperties = {

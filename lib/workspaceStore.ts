@@ -664,6 +664,51 @@ export async function listWorkspaceActivity(workspaceId: string, limit = 30) {
   return (data ?? []).map((row) => mapActivity(row as Record<string, unknown>));
 }
 
+export async function createWorkspaceActivityForUser(input: {
+  workspaceId: string;
+  userId: string;
+  action: string;
+  details?: Record<string, unknown>;
+}) {
+  const supabase = requireSupabaseAdmin();
+  const details = input.details ?? {};
+
+  const { data: activityAgent } = await supabase
+    .from("workspace_agents")
+    .select("id")
+    .eq("workspace_id", input.workspaceId)
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+
+  const agentId = activityAgent?.id ? String(activityAgent.id) : input.userId;
+  const fallbackAgentId =
+    typeof input.details?.agent_id === "string" && input.details.agent_id.length > 0
+      ? input.details.agent_id
+      : null;
+  const targetAgentId = fallbackAgentId ?? agentId;
+
+  const { data, error } = await supabase
+    .from("agent_activity")
+    .insert({
+      workspace_id: input.workspaceId,
+      agent_id: targetAgentId,
+      action: input.action,
+      details: {
+        ...details,
+        actor_user_id: input.userId,
+      },
+    })
+    .select("id, workspace_id, agent_id, action, details, created_at")
+    .single();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return mapActivity(data as Record<string, unknown>);
+}
+
 export async function getWorkspaceSnapshot(workspaceSlug: string): Promise<WorkspaceSnapshot | null> {
   const workspace = await getWorkspaceBySlug(workspaceSlug);
   if (!workspace) {

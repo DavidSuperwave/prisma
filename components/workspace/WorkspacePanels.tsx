@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   AlertTriangle,
@@ -18,6 +18,13 @@ import {
   Sparkles,
   WalletCards,
 } from "lucide-react";
+import {
+  describeWorkspaceActionPlan,
+  isWorkspaceActionCancellation,
+  isWorkspaceActionConfirmation,
+  summarizeWorkspaceActionResults,
+  type WorkspaceStructuredAction,
+} from "@/lib/copilotActionPlanner";
 import type {
   PrismaWorkspaceActivity,
   PrismaWorkspaceAgent,
@@ -72,6 +79,7 @@ type DataPanelProps = {
   records: PrismaWorkspaceRecord[];
   recordBaseHref?: string;
   askHref?: string;
+  crmBoardHref?: string;
 };
 
 type AgentPanelProps = {
@@ -157,6 +165,7 @@ type RecordDetailPanelProps = {
   owner: string;
   summary: string;
   askHref?: string | null;
+  boardHref?: string | null;
   fields: Array<{
     label: string;
     value: string;
@@ -271,6 +280,11 @@ function currentTimeLabel() {
     minute: "2-digit",
   }).format(new Date());
 }
+
+type PendingWorkspaceActionPlan = {
+  sourceMessage: string;
+  actions: WorkspaceStructuredAction[];
+};
 
 export function OverviewPanel({ dashboardCards, metrics, queueItems, activity, suggestions, agents }: OverviewProps) {
   const stats = [
@@ -640,6 +654,7 @@ export function ChatPanel({
   const [renameDraft, setRenameDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
+  const [pendingActionPlan, setPendingActionPlan] = useState<PendingWorkspaceActionPlan | null>(null);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -838,6 +853,46 @@ export function ChatPanel({
     setInput("");
 
     try {
+      if (pendingActionPlan && isWorkspaceActionConfirmation(trimmed)) {
+        const confirmation = await runDetectedIntentAction(pendingActionPlan.sourceMessage, true);
+        setPendingActionPlan(null);
+        updateSession(selectedSession.id, (session) => ({
+          ...session,
+          messages: session.messages.map((message) =>
+            message.id === assistantId ? { ...message, content: confirmation } : message,
+          ),
+          updatedAt: new Date().toISOString(),
+        }));
+        setActionFeedback(confirmation);
+        router.refresh();
+        return;
+      }
+
+      if (pendingActionPlan && isWorkspaceActionCancellation(trimmed)) {
+        setPendingActionPlan(null);
+        const cancellation = "Entendido. Cancelé el plan de acciones del workspace.";
+        updateSession(selectedSession.id, (session) => ({
+          ...session,
+          messages: session.messages.map((message) =>
+            message.id === assistantId ? { ...message, content: cancellation } : message,
+          ),
+          updatedAt: new Date().toISOString(),
+        }));
+        return;
+      }
+
+      const plannedReply = await runDetectedIntentAction(trimmed, false);
+      if (plannedReply) {
+        updateSession(selectedSession.id, (session) => ({
+          ...session,
+          messages: session.messages.map((message) =>
+            message.id === assistantId ? { ...message, content: plannedReply } : message,
+          ),
+          updatedAt: new Date().toISOString(),
+        }));
+        return;
+      }
+
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -909,6 +964,42 @@ export function ChatPanel({
       setIsLoading(false);
       window.setTimeout(() => { if (typeof window !== "undefined") { router.replace(`${window.location.pathname}${window.location.search}`); router.refresh(); } }, 400);
     }
+  }
+
+  async function runDetectedIntentAction(message: string, confirmPlan: boolean) {
+    const response = await fetch(`/api/workspaces/${workspaceSlug}/actions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "copilot-execute",
+        message,
+        confirmPlan,
+      }),
+    });
+    const data = (await response.json().catch(() => ({}))) as {
+      error?: string;
+      requiresConfirmation?: boolean;
+      summary?: string;
+      plan?: PendingWorkspaceActionPlan;
+      actions?: Array<{
+        action: "bootstrap-crm" | "create-dashboard";
+        status: "executed" | "queued";
+        preset?: "operations" | "sales" | "crm" | "custom";
+        error?: string;
+      }>;
+    };
+    if (!response.ok) {
+      throw new Error(data.error ?? "No se pudo ejecutar la acción solicitada desde el chat.");
+    }
+    if (data.requiresConfirmation && data.plan) {
+      setPendingActionPlan(data.plan);
+      return `${data.summary ?? "Plan detectado."} Detecté: ${describeWorkspaceActionPlan(data.plan.actions)}.`;
+    }
+    if (!Array.isArray(data.actions) || data.actions.length === 0) {
+      return "";
+    }
+
+    return summarizeWorkspaceActionResults(data.actions);
   }
 
   async function runWorkspaceAction(action: "bootstrap-crm" | "bootstrap-dashboard", preset?: "operations" | "sales" | "crm" | "custom") {
@@ -1175,7 +1266,7 @@ export function ChatPanel({
   );
 }
 
-export function DataPanel({ objects, fields, views, records, recordBaseHref, askHref }: DataPanelProps) {
+export function DataPanel({ objects, fields, views, records, recordBaseHref, askHref, crmBoardHref }: DataPanelProps) {
   const [selectedObjectId, setSelectedObjectId] = useState<string>(objects[0]?.id ?? "");
   const [selectedViewId, setSelectedViewId] = useState<string>("all");
   const [query, setQuery] = useState("");
@@ -1200,6 +1291,13 @@ export function DataPanel({ objects, fields, views, records, recordBaseHref, ask
   const summary = object
     ? `${visibleRecords.length} registros visibles · ${objectFields.length} campos activos · ${objectViews.length} vistas guardadas`
     : "Selecciona un objeto para empezar.";
+  const objectName = object?.name.toLowerCase() ?? "";
+  const showPipelineBoard =
+    Boolean(crmBoardHref) &&
+    (objectName.includes("deal") ||
+      objectName.includes("oportun") ||
+      objectName.includes("pipeline"));
+  const boardColumns = buildDealBoardColumns(visibleRecords);
 
   return (
     <div style={stackStyle}>
@@ -1269,6 +1367,11 @@ export function DataPanel({ objects, fields, views, records, recordBaseHref, ask
                 Consultar con CEO
               </a>
             ) : null}
+            {showPipelineBoard ? (
+              <a href={crmBoardHref} style={metaActionLinkStyle}>
+                Ver pipeline board
+              </a>
+            ) : null}
           </div>
           <p style={metaCopyStyle}>{summary.replace("campos activos", "columnas").replace("1 vistas guardadas", "1 vista guardada")}</p>
         </div>
@@ -1326,6 +1429,51 @@ export function DataPanel({ objects, fields, views, records, recordBaseHref, ask
             }
           />
         )}
+        {showPipelineBoard ? (
+          <div style={pipelineBoardContainerStyle}>
+            <div style={pipelineBoardHeaderStyle}>
+              <p style={panelLabelStyle}>Pipeline board</p>
+              {crmBoardHref ? (
+                <a href={crmBoardHref} style={metaActionLinkStyle}>
+                  Abrir detalle CRM
+                </a>
+              ) : null}
+            </div>
+            <div style={pipelineBoardGridStyle}>
+              {boardColumns.map((column) => (
+                <article key={column.id} style={pipelineBoardColumnStyle}>
+                  <div style={pipelineBoardColumnHeaderStyle}>
+                    <strong style={queueTitleStyle}>{column.label}</strong>
+                    <StatusPill tone="neutral">{column.records.length}</StatusPill>
+                  </div>
+                  <div style={pipelineBoardCardListStyle}>
+                    {column.records.length === 0 ? (
+                      <p style={queueSubtitleStyle}>Sin deals en esta etapa.</p>
+                    ) : (
+                      column.records.map((record) => (
+                        <a
+                          key={record.id}
+                          href={
+                            recordBaseHref && object?.id
+                              ? `${recordBaseHref}&object=${object.id}&record=${record.id}&board=deals`
+                              : undefined
+                          }
+                          style={pipelineBoardCardStyle}
+                        >
+                          <strong style={pipelineBoardCardTitleStyle}>{record.title}</strong>
+                          <p style={pipelineBoardCardMetaStyle}>
+                            {record.company} · {record.amount}
+                          </p>
+                          <p style={pipelineBoardCardMetaStyle}>Owner: {record.owner}</p>
+                        </a>
+                      ))
+                    )}
+                  </div>
+                </article>
+              ))}
+            </div>
+          </div>
+        ) : null}
       </Panel>
     </div>
   );
@@ -1370,6 +1518,9 @@ export function AgentsPanel({
   const [builderError, setBuilderError] = useState<string>("");
   const [builderSuccess, setBuilderSuccess] = useState<string>("");
   const [isSaving, setIsSaving] = useState(false);
+  const [runtimeMessage, setRuntimeMessage] = useState<string>("");
+  const [runtimeError, setRuntimeError] = useState<string>("");
+  const [runtimeActionLoading, setRuntimeActionLoading] = useState<"" | "deploy" | "restart" | "pause" | "stop">("");
   const [chatInput, setChatInput] = useState("");
   const [chatError, setChatError] = useState<string | null>(null);
   const [isSending, setIsSending] = useState(false);
@@ -1649,6 +1800,45 @@ export function AgentsPanel({
     }
   }
 
+  async function runRuntimeAction(action: "deploy" | "restart" | "pause" | "stop") {
+    if (!selectedAgent) {
+      return;
+    }
+    setRuntimeError("");
+    setRuntimeMessage("");
+    setRuntimeActionLoading(action);
+    try {
+      const response = await fetch("/api/admin/agents/runtime", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId,
+          agentId: selectedAgent.id,
+          action,
+        }),
+      });
+      const data = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        status?: "active" | "paused" | "deploying" | "error";
+        message?: string;
+      };
+      if (!response.ok) {
+        throw new Error(data.error ?? "No se pudo ejecutar el control runtime.");
+      }
+      const status = data.status ?? (action === "pause" || action === "stop" ? "paused" : "deploying");
+      setLocalAgents((current) =>
+        current.map((agent) => (agent.id === selectedAgent.id ? { ...agent, status } : agent)),
+      );
+      setRuntimeMessage(data.message ?? "Control runtime aplicado.");
+    } catch (caughtError) {
+      setRuntimeError(
+        caughtError instanceof Error ? caughtError.message : "No se pudo ejecutar el control runtime.",
+      );
+    } finally {
+      setRuntimeActionLoading("");
+    }
+  }
+
   return (
     <div style={stackStyle}>
       <Panel
@@ -1865,6 +2055,42 @@ export function AgentsPanel({
                     <p style={detailRailCopyStyle}>
                       Estado: {formatStatusLabel(selectedAgent.status)}
                     </p>
+                    <div style={runtimeControlsStyle}>
+                      <button
+                        type="button"
+                        style={chatButtonStyle}
+                        onClick={() => void runRuntimeAction("deploy")}
+                        disabled={runtimeActionLoading !== ""}
+                      >
+                        {runtimeActionLoading === "deploy" ? "Desplegando..." : "Deploy"}
+                      </button>
+                      <button
+                        type="button"
+                        style={chatActionButtonStyle}
+                        onClick={() => void runRuntimeAction("restart")}
+                        disabled={runtimeActionLoading !== ""}
+                      >
+                        {runtimeActionLoading === "restart" ? "Reiniciando..." : "Restart"}
+                      </button>
+                      <button
+                        type="button"
+                        style={chatActionButtonStyle}
+                        onClick={() => void runRuntimeAction("pause")}
+                        disabled={runtimeActionLoading !== ""}
+                      >
+                        {runtimeActionLoading === "pause" ? "Pausando..." : "Pause"}
+                      </button>
+                      <button
+                        type="button"
+                        style={dangerButtonStyle}
+                        onClick={() => void runRuntimeAction("stop")}
+                        disabled={runtimeActionLoading !== ""}
+                      >
+                        {runtimeActionLoading === "stop" ? "Deteniendo..." : "Emergency stop"}
+                      </button>
+                    </div>
+                    {runtimeError ? <p style={runtimeNoticeErrorStyle}>{runtimeError}</p> : null}
+                    {runtimeMessage ? <p style={runtimeNoticeSuccessStyle}>{runtimeMessage}</p> : null}
                   </div>
                 </div>
 
@@ -2235,9 +2461,26 @@ export function RecordDetailPanel({
   owner,
   summary,
   askHref,
+  boardHref,
   fields,
   activity,
 }: RecordDetailPanelProps) {
+  const resolvedStatus = formatStatusLabel(status);
+  const pipelineColumns = buildPipelineColumns(fields);
+  const stage = resolvePipelineStage(fields, status);
+  const amountField = fields.find((field) =>
+    field.label.toLowerCase().includes("amount") ||
+    field.label.toLowerCase().includes("monto") ||
+    field.label.toLowerCase().includes("valor"),
+  );
+  const amount = amountField ? formatCurrencyAmount(amountField.value) : "No definido";
+  const nextStepField = fields.find((field) =>
+    field.label.toLowerCase().includes("next") ||
+    field.label.toLowerCase().includes("siguiente") ||
+    field.label.toLowerCase().includes("follow"),
+  );
+  const nextStep = nextStepField?.value ?? "Definir siguiente paso";
+
   return (
     <div style={stackStyle}>
       <Panel
@@ -2256,24 +2499,53 @@ export function RecordDetailPanel({
                   Consultar con CEO
                 </a>
               ) : null}
+              {boardHref ? (
+                <a href={boardHref} style={metaActionLinkStyle}>
+                  Ver board CRM
+                </a>
+              ) : null}
             </div>
           </div>
         </div>
 
-        <div style={recordGridStyle}>
-          <div style={recordFieldListStyle}>
-            {fields.map((field) => (
-              <div key={field.label} style={recordFieldStyle}>
-                <p style={eyebrowStyle}>{field.label}</p>
-                {field.tone ? (
-                  <StatusPill tone={field.tone === "positive" ? "active" : "neutral"}>
-                    {field.label.toLowerCase() === "status" ? formatStatusLabel(field.value) : field.value}
-                  </StatusPill>
-                ) : (
-                  <strong style={recordFieldValueStyle}>{field.value}</strong>
-                )}
-              </div>
-            ))}
+        <div style={crmThreeColumnStyle}>
+          <div style={crmRecordColumnStyle}>
+            <h4 style={detailRailTitleStyle}>Resumen CRM</h4>
+            <div style={recordFieldListStyle}>
+              {fields.map((field) => (
+                <div key={field.label} style={recordFieldStyle}>
+                  <p style={eyebrowStyle}>{field.label}</p>
+                  {field.tone ? (
+                    <StatusPill tone={field.tone === "positive" ? "active" : "neutral"}>
+                      {field.label.toLowerCase() === "status" ? formatStatusLabel(field.value) : field.value}
+                    </StatusPill>
+                  ) : (
+                    <strong style={recordFieldValueStyle}>{field.value}</strong>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div style={detailRailStyle}>
+            <h4 style={detailRailTitleStyle}>Pipeline</h4>
+            <div style={pipelineColumnsStyle}>
+              {pipelineColumns.map((column) => (
+                <div key={column.title} style={pipelineColumnStyle}>
+                  <p style={eyebrowStyle}>{column.title}</p>
+                  <div style={pipelineCardStyle}>
+                    <p style={activityActionStyle}>{column.primary}</p>
+                    <p style={activityDetailStyle}>{column.secondary}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div style={workflowStatusStyle}>
+              <StatusPill tone={status.toLowerCase()}>{resolvedStatus}</StatusPill>
+              <StatusPill tone="neutral">Etapa: {stage}</StatusPill>
+              <StatusPill tone="info">Monto: {amount}</StatusPill>
+            </div>
+            <p style={detailRailCopyStyle}>Siguiente paso: {nextStep}</p>
           </div>
 
           <div style={detailRailStyle}>
@@ -2416,6 +2688,123 @@ function formatQueueAction(status: string) {
   if (normalized === "pending") return "Confirma el siguiente paso";
   if (normalized === "blocked") return "Desbloquea este proceso";
   return "Abrir para revisar";
+}
+
+function formatCurrencyAmount(raw: string) {
+  const numeric = Number(raw.toString().replace(/[^0-9.-]/g, ""));
+  if (!Number.isFinite(numeric)) {
+    return raw;
+  }
+  return new Intl.NumberFormat("es-MX", {
+    style: "currency",
+    currency: "MXN",
+    maximumFractionDigits: 0,
+  }).format(numeric);
+}
+
+function resolvePipelineStage(fields: Array<{ label: string; value: string; tone?: "positive" | "neutral" }>, status: string) {
+  const explicitStage = fields.find((field) =>
+    field.label.toLowerCase().includes("stage") || field.label.toLowerCase().includes("etapa"),
+  )?.value;
+  if (explicitStage && explicitStage !== "—") {
+    return explicitStage;
+  }
+  const normalized = status.toLowerCase();
+  if (normalized.includes("qualified")) return "Calificación";
+  if (normalized.includes("follow")) return "Seguimiento";
+  if (normalized.includes("review")) return "Revisión";
+  if (normalized.includes("closed")) return "Cerrado";
+  return "Prospección";
+}
+
+function buildPipelineColumns(fields: Array<{ label: string; value: string; tone?: "positive" | "neutral" }>) {
+  const stage = resolvePipelineStage(fields, fields.find((field) => field.label.toLowerCase() === "status")?.value ?? "active");
+  const owner = fields.find((field) => field.label.toLowerCase().includes("owner") || field.label.toLowerCase().includes("responsable"))?.value ?? "Sin asignar";
+  const company = fields.find((field) => field.label.toLowerCase().includes("company") || field.label.toLowerCase().includes("empresa"))?.value ?? "Cuenta sin empresa";
+  return [
+    {
+      title: "Etapa actual",
+      primary: stage,
+      secondary: `Responsable: ${owner}`,
+    },
+    {
+      title: "Cuenta",
+      primary: company,
+      secondary: "Relación principal del deal",
+    },
+  ];
+}
+
+function recordStageValue(record: PrismaWorkspaceRecord) {
+  const byExplicitStage = record.data.stage;
+  if (typeof byExplicitStage === "string" && byExplicitStage.trim()) {
+    return byExplicitStage.trim();
+  }
+  const byStatus = record.data.status;
+  if (typeof byStatus === "string" && byStatus.trim()) {
+    return byStatus.trim();
+  }
+  return "prospecting";
+}
+
+function buildCrmBoardColumns(records: PrismaWorkspaceRecord[]) {
+  const lanes = [
+    { id: "prospecting", title: "Prospección" },
+    { id: "qualified", title: "Calificación" },
+    { id: "proposal", title: "Propuesta" },
+    { id: "closed", title: "Cerrado" },
+  ] as const;
+
+  return lanes.map((lane) => ({
+    ...lane,
+    records: records.filter((record) => {
+      const stage = recordStageValue(record).toLowerCase();
+      if (lane.id === "prospecting") {
+        return stage.includes("prospect");
+      }
+      if (lane.id === "qualified") {
+        return stage.includes("qualif") || stage.includes("calific");
+      }
+      if (lane.id === "proposal") {
+        return stage.includes("proposal") || stage.includes("propuesta");
+      }
+      return stage.includes("closed") || stage.includes("cerrad");
+    }),
+  }));
+}
+
+function buildDealBoardColumns(records: PrismaWorkspaceRecord[]) {
+  const columns = buildCrmBoardColumns(records);
+  return columns.map((column) => ({
+    id: column.id,
+    label: column.title,
+    records: column.records.map((record) => {
+      const title =
+        (typeof record.data.title === "string" && record.data.title) ||
+        (typeof record.data.name === "string" && record.data.name) ||
+        "Deal";
+      const company =
+        (typeof record.data.company === "string" && record.data.company) ||
+        (typeof record.data.company_name === "string" && record.data.company_name) ||
+        "Cuenta sin empresa";
+      const owner =
+        (typeof record.data.owner === "string" && record.data.owner) ||
+        (typeof record.data.responsable === "string" && record.data.responsable) ||
+        "Sin owner";
+      const amountRaw =
+        (typeof record.data.amount === "string" && record.data.amount) ||
+        (typeof record.data.amount === "number" && String(record.data.amount)) ||
+        "0";
+
+      return {
+        id: record.id,
+        title,
+        company,
+        owner,
+        amount: formatCurrencyAmount(amountRaw),
+      };
+    }),
+  }));
 }
 
 function DetailBlock({
@@ -2717,12 +3106,16 @@ const teamChatLayoutStyle: React.CSSProperties = {
   display: "grid",
   gridTemplateColumns: "320px minmax(0, 1fr)",
   gap: 20,
+  minHeight: 0,
 };
 
 const teamChatSidebarStyle: React.CSSProperties = {
   display: "grid",
   gap: 16,
   alignContent: "start",
+  minHeight: 0,
+  overflowY: "auto",
+  paddingRight: 4,
 };
 
 const teamChatCreateRowStyle: React.CSSProperties = {
@@ -2761,7 +3154,7 @@ const teamChatMainStyle: React.CSSProperties = {
   padding: 18,
   display: "grid",
   gap: 16,
-  minHeight: 620,
+  minHeight: 0,
 };
 
 const teamChatHeaderMetaStyle: React.CSSProperties = {
@@ -2923,6 +3316,16 @@ const inlineSuccessStyle: React.CSSProperties = {
   fontSize: 13,
 };
 
+const runtimeNoticeErrorStyle: React.CSSProperties = {
+  ...inlineErrorStyle,
+  marginTop: 2,
+};
+
+const runtimeNoticeSuccessStyle: React.CSSProperties = {
+  ...inlineSuccessStyle,
+  marginTop: 2,
+};
+
 const queueItemStyle: React.CSSProperties = {
   border: "1px solid var(--workspace-border)",
   borderRadius: 18,
@@ -2990,6 +3393,7 @@ const chatLayoutStyle: React.CSSProperties = {
   display: "grid",
   gridTemplateColumns: "300px minmax(0, 1fr)",
   gap: 20,
+  minHeight: 0,
 };
 
 const chatSidebarStyle: React.CSSProperties = {
@@ -3000,6 +3404,9 @@ const chatSidebarStyle: React.CSSProperties = {
   display: "grid",
   gap: 14,
   alignContent: "start",
+  minHeight: 0,
+  overflowY: "auto",
+  paddingRight: 10,
 };
 
 const chatSidebarHeaderStyle: React.CSSProperties = {
@@ -3169,7 +3576,7 @@ const chatMainStyle: React.CSSProperties = {
   padding: 18,
   display: "grid",
   gap: 16,
-  minHeight: 640,
+  minHeight: 0,
 };
 
 const chatHeaderStyle: React.CSSProperties = {
@@ -3424,12 +3831,17 @@ const agentGridStyle: React.CSSProperties = {
   display: "grid",
   gridTemplateColumns: "320px minmax(0, 1fr)",
   gap: 20,
+  minHeight: 0,
 };
 
 const agentListStyle: React.CSSProperties = {
   display: "grid",
   gap: 12,
   alignContent: "start",
+  minHeight: 0,
+  overflowY: "auto",
+  maxHeight: "70vh",
+  paddingRight: 4,
 };
 
 const agentCardStyle: React.CSSProperties = {
@@ -3487,6 +3899,7 @@ const agentDetailCardStyle: React.CSSProperties = {
   padding: 20,
   display: "grid",
   gap: 18,
+  minHeight: 0,
 };
 
 const agentDetailHeaderStyle: React.CSSProperties = {
@@ -3622,6 +4035,82 @@ const metaActionLinkStyle: React.CSSProperties = {
   textDecoration: "none",
 };
 
+const panelLabelStyle: React.CSSProperties = {
+  margin: 0,
+  color: "var(--workspace-faint)",
+  fontSize: 12,
+  fontWeight: 700,
+  letterSpacing: "0.08em",
+  textTransform: "uppercase",
+};
+
+const pipelineBoardContainerStyle: React.CSSProperties = {
+  marginTop: 8,
+  display: "grid",
+  gap: 12,
+};
+
+const pipelineBoardHeaderStyle: React.CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  gap: 12,
+  flexWrap: "wrap",
+};
+
+const pipelineBoardGridStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+  gap: 10,
+};
+
+const pipelineBoardColumnStyle: React.CSSProperties = {
+  borderRadius: 14,
+  border: "1px solid var(--workspace-border)",
+  background: "var(--workspace-panel-soft)",
+  padding: 10,
+  display: "grid",
+  gap: 10,
+};
+
+const pipelineBoardColumnHeaderStyle: React.CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  gap: 6,
+};
+
+const pipelineBoardCardListStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 8,
+  maxHeight: 240,
+  overflowY: "auto",
+  paddingRight: 4,
+};
+
+const pipelineBoardCardStyle: React.CSSProperties = {
+  borderRadius: 10,
+  border: "1px solid var(--workspace-border)",
+  background: "var(--workspace-panel)",
+  padding: "10px 12px",
+  textDecoration: "none",
+  display: "grid",
+  gap: 4,
+};
+
+const pipelineBoardCardTitleStyle: React.CSSProperties = {
+  color: "var(--workspace-text)",
+  fontSize: 14,
+  lineHeight: 1.4,
+};
+
+const pipelineBoardCardMetaStyle: React.CSSProperties = {
+  margin: 0,
+  color: "var(--workspace-muted)",
+  fontSize: 12,
+  lineHeight: 1.4,
+};
+
 const recordGridStyle: React.CSSProperties = {
   display: "grid",
   gridTemplateColumns: "minmax(0, 1fr) 320px",
@@ -3702,6 +4191,73 @@ const chatButtonStyle: React.CSSProperties = {
   padding: "10px 14px",
   fontWeight: 700,
   font: "inherit",
+  minHeight: 40,
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  whiteSpace: "nowrap",
+};
+
+const runtimeControlsStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(132px, 1fr))",
+  gap: 8,
+};
+
+const dangerButtonStyle: React.CSSProperties = {
+  borderRadius: 14,
+  border: "1px solid rgba(180, 35, 24, 0.22)",
+  background: "rgba(180, 35, 24, 0.1)",
+  color: "#b42318",
+  padding: "10px 14px",
+  fontWeight: 700,
+  font: "inherit",
+  minHeight: 40,
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  whiteSpace: "nowrap",
+  minWidth: 132,
+};
+
+const crmThreeColumnStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "minmax(0, 1.2fr) minmax(0, 0.8fr) minmax(0, 0.9fr)",
+  gap: 16,
+};
+
+const crmRecordColumnStyle: React.CSSProperties = {
+  borderRadius: 18,
+  border: "1px solid var(--workspace-border)",
+  background: "var(--workspace-panel)",
+  padding: 16,
+  display: "grid",
+  gap: 12,
+};
+
+const pipelineColumnsStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 10,
+};
+
+const pipelineColumnStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 6,
+};
+
+const pipelineCardStyle: React.CSSProperties = {
+  borderRadius: 14,
+  border: "1px solid var(--workspace-border)",
+  background: "var(--workspace-panel-soft)",
+  padding: "12px 14px",
+  display: "grid",
+  gap: 4,
+};
+
+const workflowStatusStyle: React.CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  gap: 8,
 };
 
 const pillStyle: React.CSSProperties = {

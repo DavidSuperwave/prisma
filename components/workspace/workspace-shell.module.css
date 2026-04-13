@@ -1,6 +1,16 @@
 .appShell {
   min-height: 100vh;
   background: var(--color-page-bg);
+  color: var(--color-text-primary);
+  --workspace-bg: var(--color-page-bg);
+  --workspace-surface: var(--color-surface);
+  --workspace-panel: var(--color-surface);
+  --workspace-panel-soft: var(--color-surface-hover);
+  --workspace-border: var(--color-border);
+  --workspace-text: var(--color-text-primary);
+  --workspace-muted: #334155;
+  --workspace-faint: #475569;
+  --workspace-shadow: var(--shadow-sm);
 }
 
 .shellGrid {
@@ -17,6 +27,8 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-6);
+  min-height: 0;
+  overflow: hidden;
 }
 
 .brand {
@@ -32,7 +44,7 @@
   line-height: 1rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--color-text-tertiary);
+  color: var(--workspace-faint);
   font-weight: var(--font-semibold);
 }
 
@@ -72,18 +84,21 @@
 .brandSubtitle {
   font-size: 0.875rem;
   line-height: 1.25rem;
-  color: var(--color-text-secondary);
+  color: var(--workspace-muted);
 }
 
 .brandPlan {
   font-size: 0.75rem;
   line-height: 1rem;
-  color: var(--color-text-tertiary);
+  color: var(--workspace-faint);
 }
 
 .nav {
   display: grid;
   gap: var(--space-6);
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
 }
 
 .navGroup {
@@ -97,7 +112,7 @@
   align-items: center;
   justify-content: space-between;
   text-decoration: none;
-  color: var(--color-text-secondary);
+  color: var(--workspace-muted);
   border: 1px solid transparent;
   border-radius: var(--radius-md);
   padding: var(--space-2) var(--space-3);
@@ -142,6 +157,13 @@
   font-weight: var(--font-medium);
 }
 
+.navMeta {
+  margin-top: 2px;
+  color: var(--workspace-faint);
+  font-size: 0.75rem;
+  line-height: 1rem;
+}
+
 .navBadge {
   display: inline-flex;
   min-width: 24px;
@@ -177,7 +199,7 @@
 .sessionCard span {
   font-size: 0.75rem;
   line-height: 1rem;
-  color: var(--color-text-tertiary);
+  color: var(--workspace-faint);
 }
 
 .content {
@@ -209,7 +231,7 @@
 }
 
 .headerDescription {
-  color: var(--color-text-secondary);
+  color: var(--workspace-muted);
   font-size: 0.875rem;
   line-height: 1.5;
   max-width: 720px;
@@ -236,7 +258,7 @@
 }
 
 .pillStatus {
-  color: var(--color-text-secondary);
+  color: var(--workspace-muted);
   background: var(--color-surface);
 }
 
@@ -248,7 +270,7 @@
   border-radius: var(--radius-sm);
   border: 1px solid var(--color-border);
   background: var(--color-surface);
-  color: var(--color-text-secondary);
+  color: var(--workspace-muted);
   padding: 8px var(--space-3);
   font-size: 0.875rem;
   line-height: 1.25rem;
@@ -296,7 +318,7 @@
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   padding: var(--space-3);
-  color: var(--color-text-secondary);
+  color: var(--workspace-muted);
   font-size: 0.875rem;
   line-height: 1.5;
 }
@@ -321,7 +343,7 @@
 
 .railPanelDescription {
   margin-top: 4px;
-  color: var(--color-text-secondary);
+  color: var(--workspace-muted);
   font-size: 0.875rem;
   line-height: 1.4;
 }
@@ -352,7 +374,7 @@
 .kvLabel {
   font-size: 0.75rem;
   line-height: 1rem;
-  color: var(--color-text-tertiary);
+  color: var(--workspace-faint);
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }

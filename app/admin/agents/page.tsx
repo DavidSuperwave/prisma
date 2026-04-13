@@ -5,14 +5,14 @@ export default async function AdminAgentsPage() {
 
   return (
     <section>
-      <h1 style={{ marginTop: 0 }}>Agents</h1>
+      <h1 style={{ marginTop: 0 }}>Agent monitor</h1>
       <p style={{ color: 'var(--giga-muted)' }}>
-        Agent definitions describe role, model, tools, and integrations before deployment to isolated hErmes runtimes.
+        Read-only inventory of agents across workspaces. Normal configuration now happens inside each workspace.
       </p>
 
       <div style={panelStyle}>
         {agents.length === 0 ? (
-          <p style={{ color: 'var(--giga-muted)' }}>No agents defined yet.</p>
+          <p style={{ color: 'var(--giga-muted)' }}>No agents registered yet.</p>
         ) : (
           <ul style={listStyle}>
             {agents.map((agent) => {
@@ -20,8 +20,8 @@ export default async function AdminAgentsPage() {
               return (
                 <li key={agent.id} style={rowStyle}>
                   <p style={{ margin: 0, fontWeight: 600 }}>{agent.name}</p>
-                  <p style={{ margin: 0, color: 'var(--giga-muted)' }}>{agent.role}</p>
-                  <p style={{ margin: 0, color: 'var(--giga-muted)' }}>{agent.model}</p>
+                  <p style={{ margin: 0, color: 'var(--giga-muted)' }}>{agent.role.replace(/_/g, ' ')}</p>
+                  <p style={{ margin: 0, color: 'var(--giga-muted)' }}>{agent.isActive ? 'active' : 'paused'}</p>
                   <p style={{ margin: 0, color: 'var(--giga-muted)' }}>{workspace?.name ?? agent.workspaceId}</p>
                 </li>
               )

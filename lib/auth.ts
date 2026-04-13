@@ -10,9 +10,11 @@ const REFRESH_TOKEN_COOKIE = "prisma-refresh-token";
 export type AuthenticatedAppUser = {
   id: string;
   email: string | null;
+  isPlatformAdmin: boolean;
   memberships: Array<{
     workspaceId: string;
     role: "admin" | "operator" | "viewer";
+    isPlatformAdmin: boolean;
   }>;
 };
 
@@ -22,6 +24,55 @@ function requireSupabaseAdmin() {
     throw new Error("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required.");
   }
   return supabase;
+}
+
+function getConfiguredPlatformAdminEmails() {
+  const configured = process.env.PRISMA_PLATFORM_ADMIN_EMAILS ?? "demo-admin@prisma.local";
+  return configured
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function isConfiguredPlatformAdminEmail(email: string | null | undefined) {
+  if (!email) {
+    return false;
+  }
+
+  return getConfiguredPlatformAdminEmails().includes(email.trim().toLowerCase());
+}
+
+async function listMembershipRows(
+  userId: string,
+): Promise<Array<{ workspace_id: string; role: "admin" | "operator" | "viewer"; is_platform_admin: boolean }>> {
+  const supabase = requireSupabaseAdmin();
+  const withPlatformFlag = await supabase
+    .from("workspace_members")
+    .select("workspace_id, role, is_platform_admin")
+    .eq("user_id", userId);
+
+  if (!withPlatformFlag.error) {
+    return (withPlatformFlag.data ?? []).map((entry) => ({
+      workspace_id: String(entry.workspace_id),
+      role: entry.role as "admin" | "operator" | "viewer",
+      is_platform_admin: Boolean(entry.is_platform_admin),
+    }));
+  }
+
+  const withoutPlatformFlag = await supabase
+    .from("workspace_members")
+    .select("workspace_id, role")
+    .eq("user_id", userId);
+
+  if (withoutPlatformFlag.error) {
+    throw new Error(withoutPlatformFlag.error.message);
+  }
+
+  return (withoutPlatformFlag.data ?? []).map((entry) => ({
+    workspace_id: String(entry.workspace_id),
+    role: entry.role as "admin" | "operator" | "viewer",
+    is_platform_admin: false,
+  }));
 }
 
 export async function createAuthSession(email: string, password: string) {
@@ -76,21 +127,18 @@ export async function getCurrentAppUser(): Promise<AuthenticatedAppUser | null> 
     return null;
   }
 
-  const { data: memberships, error: membershipError } = await supabase
-    .from("workspace_members")
-    .select("workspace_id, role")
-    .eq("user_id", data.user.id);
-
-  if (membershipError) {
-    throw new Error(membershipError.message);
-  }
+  const membershipRows = await listMembershipRows(data.user.id);
+  const isPlatformAdmin =
+    membershipRows.some((entry) => entry.is_platform_admin) || isConfiguredPlatformAdminEmail(data.user.email);
 
   return {
     id: data.user.id,
     email: data.user.email ?? null,
-    memberships: (memberships ?? []).map((entry) => ({
+    isPlatformAdmin,
+    memberships: membershipRows.map((entry) => ({
       workspaceId: String(entry.workspace_id),
-      role: entry.role as "admin" | "operator" | "viewer",
+      role: entry.role,
+      isPlatformAdmin: entry.is_platform_admin || isPlatformAdmin,
     })),
   };
 }
@@ -106,7 +154,7 @@ export async function requireAuthenticatedUser(nextPath?: string) {
 
 export async function requireAdminUser(nextPath?: string) {
   const user = await requireAuthenticatedUser(nextPath);
-  if (!user.memberships.some((membership) => membership.role === "admin")) {
+  if (!user.isPlatformAdmin) {
     redirect("/workspaces");
   }
   return user;

@@ -10,6 +10,8 @@ export type AgentRoleType = 'intake_assistant' | 'lead_qualifier' | 'crm_updater
 export type AgentDeploymentStatus = 'pending' | 'building' | 'running' | 'degraded' | 'stopped' | 'failed'
 export type AgentRuntimeType = 'copilot' | 'channel' | 'worker'
 
+export type WorkspaceDashboardCardType = 'metric' | 'table' | 'queue' | 'activity' | 'status' | 'chart'
+
 export type Workspace = {
   id: string
   slug: string
@@ -41,6 +43,40 @@ export type LandingTemplate = {
   sectionSchema: unknown[]
   defaultContent: Record<string, unknown>
   isActive: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+export type AgentTemplate = {
+  id: string
+  name: string
+  description?: string
+  type: 'copilot' | 'channel' | 'worker' | 'chatbot'
+  category?: string
+  defaultSoulMd?: string
+  defaultSkills: string[]
+  defaultKnowledgeScope: Record<string, unknown>
+  defaultCronJobs: unknown[]
+  defaultChannelConfig: Record<string, unknown>
+  defaultMemoryConfig: Record<string, unknown>
+  icon?: string
+  isActive: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+export type WorkspaceDashboardCard = {
+  id: string
+  workspaceId: string
+  dashboardId?: string
+  cardType: WorkspaceDashboardCardType
+  title: string
+  subtitle?: string
+  config: Record<string, unknown>
+  position: number
+  gridWidth: number
+  isVisible: boolean
+  createdBy?: string
   createdAt: string
   updatedAt: string
 }
@@ -118,6 +154,8 @@ type PlatformState = {
   workspaces: Workspace[]
   projects: Project[]
   templates: LandingTemplate[]
+  agentTemplates: AgentTemplate[]
+  dashboardCards: WorkspaceDashboardCard[]
   sites: LandingSite[]
   agents: AgentDefinition[]
   deployments: AgentDeployment[]
@@ -149,6 +187,23 @@ type CreateTemplateInput = {
   defaultContent?: Record<string, unknown>
 }
 
+type CreateAgentTemplateInput = {
+  name: string
+  description?: string
+  type: AgentTemplate['type']
+  category?: string
+  defaultSoulMd?: string
+  defaultSkills?: string[]
+  defaultKnowledgeScope?: Record<string, unknown>
+  defaultCronJobs?: unknown[]
+  defaultChannelConfig?: Record<string, unknown>
+  defaultMemoryConfig?: Record<string, unknown>
+  icon?: string
+  isActive?: boolean
+}
+
+type UpdateAgentTemplateInput = Partial<CreateAgentTemplateInput>
+
 type CreateAgentInput = {
   workspaceId: string
   projectId?: string
@@ -158,6 +213,17 @@ type CreateAgentInput = {
   promptPack?: Record<string, unknown>
   toolsConfig?: Record<string, unknown>
   integrationConfig?: Record<string, unknown>
+}
+
+type UpdateAgentInput = {
+  workspaceId: string
+  name?: string
+  role?: AgentRoleType
+  model?: string
+  promptPack?: Record<string, unknown>
+  toolsConfig?: Record<string, unknown>
+  integrationConfig?: Record<string, unknown>
+  isActive?: boolean
 }
 
 type CreateDeploymentInput = {
@@ -237,6 +303,47 @@ const defaultTemplates: LandingTemplate[] = [
   }),
 ]
 
+const defaultAgentTemplates: AgentTemplate[] = [
+  withDate<AgentTemplate>({
+    id: 'agt_tmpl_whatsapp_qualifier',
+    name: 'WhatsApp Qualifier',
+    description: 'Califica leads entrantes y actualiza el workspace.',
+    type: 'channel',
+    category: 'lead_qualification',
+    defaultSoulMd: 'Eres un agente especializado en calificar leads entrantes por WhatsApp.',
+    defaultSkills: ['prisma-records', 'prisma-qualify'],
+    defaultKnowledgeScope: {
+      read: ['Contacts', 'Deals'],
+      write: ['Contacts', 'Deals'],
+      channels: ['whatsapp'],
+    },
+    defaultCronJobs: [],
+    defaultChannelConfig: { provider: 'whatsapp' },
+    defaultMemoryConfig: { recent: true, preferences: true, intelligence: false },
+    icon: 'message-square',
+    isActive: true,
+  }),
+  withDate<AgentTemplate>({
+    id: 'agt_tmpl_crm_monitor',
+    name: 'CRM Monitor',
+    description: 'Da seguimiento a pipeline, leads estancados y actividad pendiente.',
+    type: 'worker',
+    category: 'crm_monitor',
+    defaultSoulMd: 'Supervisa el CRM y prioriza seguimientos de alto impacto.',
+    defaultSkills: ['prisma-records'],
+    defaultKnowledgeScope: {
+      read: ['Contacts', 'Companies', 'Deals'],
+      write: ['Deals'],
+      channels: [],
+    },
+    defaultCronJobs: [{ schedule: '0 */2 * * *', job: 'check_stale_pipeline' }],
+    defaultChannelConfig: {},
+    defaultMemoryConfig: { recent: true, preferences: false, intelligence: true },
+    icon: 'bot',
+    isActive: true,
+  }),
+]
+
 async function readState(): Promise<PlatformState> {
   try {
     const raw = await readFile(dataPath, 'utf8')
@@ -245,6 +352,8 @@ async function readState(): Promise<PlatformState> {
       workspaces: parsed.workspaces ?? [],
       projects: parsed.projects ?? [],
       templates: parsed.templates?.length ? parsed.templates : defaultTemplates,
+      agentTemplates: parsed.agentTemplates?.length ? parsed.agentTemplates : defaultAgentTemplates,
+      dashboardCards: parsed.dashboardCards ?? [],
       sites: parsed.sites ?? [],
       agents: parsed.agents ?? [],
       deployments: parsed.deployments ?? [],
@@ -256,6 +365,8 @@ async function readState(): Promise<PlatformState> {
       workspaces: [],
       projects: [],
       templates: defaultTemplates,
+      agentTemplates: defaultAgentTemplates,
+      dashboardCards: [],
       sites: [],
       agents: [],
       deployments: [],
@@ -610,6 +721,46 @@ function toUsageRow(event: UsageEvent) {
   }
 }
 
+function fromAgentTemplateRow(row: Record<string, unknown>): AgentTemplate {
+  return {
+    id: String(row.id),
+    name: String(row.name),
+    description: row.description ? String(row.description) : undefined,
+    type: (row.type as AgentTemplate['type']) ?? 'worker',
+    category: row.category ? String(row.category) : undefined,
+    defaultSoulMd: row.default_soul_md ? String(row.default_soul_md) : undefined,
+    defaultSkills: Array.isArray(row.default_skills) ? (row.default_skills as string[]) : [],
+    defaultKnowledgeScope: (row.default_knowledge_scope as Record<string, unknown>) ?? {},
+    defaultCronJobs: Array.isArray(row.default_cron_jobs) ? (row.default_cron_jobs as unknown[]) : [],
+    defaultChannelConfig: (row.default_channel_config as Record<string, unknown>) ?? {},
+    defaultMemoryConfig: (row.default_memory_config as Record<string, unknown>) ?? {},
+    icon: row.icon ? String(row.icon) : undefined,
+    isActive: row.is_active === undefined ? true : Boolean(row.is_active),
+    createdAt: String(row.created_at ?? nowIso()),
+    updatedAt: String(row.updated_at ?? nowIso()),
+  }
+}
+
+function toAgentTemplateRow(template: AgentTemplate) {
+  return {
+    id: template.id,
+    name: template.name,
+    description: template.description ?? null,
+    type: template.type,
+    category: template.category ?? null,
+    default_soul_md: template.defaultSoulMd ?? null,
+    default_skills: template.defaultSkills,
+    default_knowledge_scope: template.defaultKnowledgeScope,
+    default_cron_jobs: template.defaultCronJobs,
+    default_channel_config: template.defaultChannelConfig,
+    default_memory_config: template.defaultMemoryConfig,
+    icon: template.icon ?? null,
+    is_active: template.isActive,
+    created_at: template.createdAt,
+    updated_at: template.updatedAt,
+  }
+}
+
 export async function listWorkspaces() {
   const supabase = getSupabaseAdmin()
   if (supabase) {
@@ -690,6 +841,160 @@ export async function createTemplate(input: CreateTemplateInput) {
   state.templates.push(record)
   await writeState(state)
   return record
+}
+
+export async function listAgentTemplates() {
+  const supabase = getSupabaseAdmin()
+  if (supabase) {
+    const { data, error } = await supabase.from('agent_templates').select('*').order('created_at', { ascending: false })
+    if (!error && data) {
+      return (data as Record<string, unknown>[]).map((row) => fromAgentTemplateRow(row))
+    }
+  }
+
+  const state = await readState()
+  return [...state.agentTemplates].sort((a, b) => (a.createdAt > b.createdAt ? -1 : 1))
+}
+
+export async function createAgentTemplate(input: CreateAgentTemplateInput) {
+  const record: AgentTemplate = withDate({
+    id: buildId('agt_tmpl'),
+    name: input.name.trim(),
+    description: input.description?.trim() || undefined,
+    type: input.type,
+    category: input.category?.trim() || undefined,
+    defaultSoulMd: input.defaultSoulMd?.trim() || undefined,
+    defaultSkills: input.defaultSkills ?? [],
+    defaultKnowledgeScope: input.defaultKnowledgeScope ?? {},
+    defaultCronJobs: input.defaultCronJobs ?? [],
+    defaultChannelConfig: input.defaultChannelConfig ?? {},
+    defaultMemoryConfig: input.defaultMemoryConfig ?? {},
+    icon: input.icon?.trim() || undefined,
+    isActive: input.isActive ?? true,
+  })
+
+  const supabase = getSupabaseAdmin()
+  if (supabase) {
+    const { data, error } = await supabase.from('agent_templates').insert(toAgentTemplateRow(record)).select().single()
+    if (!error && data) {
+      return fromAgentTemplateRow(data as Record<string, unknown>)
+    }
+    console.warn('Supabase createAgentTemplate failed, falling back to local state:', error?.message)
+  }
+
+  const state = await readState()
+  state.agentTemplates.push(record)
+  await writeState(state)
+  return record
+}
+
+export async function updateAgentTemplate(templateId: string, input: UpdateAgentTemplateInput) {
+  const supabase = getSupabaseAdmin()
+  const nextUpdatedAt = nowIso()
+
+  if (supabase) {
+    const payload: Record<string, unknown> = {
+      updated_at: nextUpdatedAt,
+    }
+    if (input.name !== undefined) payload.name = input.name.trim()
+    if (input.description !== undefined) payload.description = input.description?.trim() || null
+    if (input.type !== undefined) payload.type = input.type
+    if (input.category !== undefined) payload.category = input.category?.trim() || null
+    if (input.defaultSoulMd !== undefined) payload.default_soul_md = input.defaultSoulMd?.trim() || null
+    if (input.defaultSkills !== undefined) payload.default_skills = input.defaultSkills
+    if (input.defaultKnowledgeScope !== undefined) payload.default_knowledge_scope = input.defaultKnowledgeScope
+    if (input.defaultCronJobs !== undefined) payload.default_cron_jobs = input.defaultCronJobs
+    if (input.defaultChannelConfig !== undefined) payload.default_channel_config = input.defaultChannelConfig
+    if (input.defaultMemoryConfig !== undefined) payload.default_memory_config = input.defaultMemoryConfig
+    if (input.icon !== undefined) payload.icon = input.icon?.trim() || null
+    if (input.isActive !== undefined) payload.is_active = input.isActive
+
+    const { data, error } = await supabase.from('agent_templates').update(payload).eq('id', templateId).select().maybeSingle()
+    if (!error && data) {
+      return fromAgentTemplateRow(data as Record<string, unknown>)
+    }
+    console.warn('Supabase updateAgentTemplate failed, falling back to local state:', error?.message)
+  }
+
+  const state = await readState()
+  const index = state.agentTemplates.findIndex((template) => template.id === templateId)
+  if (index < 0) {
+    return null
+  }
+
+  state.agentTemplates[index] = {
+    ...state.agentTemplates[index],
+    name: input.name?.trim() || state.agentTemplates[index].name,
+    description: input.description !== undefined ? input.description?.trim() || undefined : state.agentTemplates[index].description,
+    type: input.type ?? state.agentTemplates[index].type,
+    category: input.category !== undefined ? input.category?.trim() || undefined : state.agentTemplates[index].category,
+    defaultSoulMd: input.defaultSoulMd !== undefined ? input.defaultSoulMd?.trim() || undefined : state.agentTemplates[index].defaultSoulMd,
+    defaultSkills: input.defaultSkills ?? state.agentTemplates[index].defaultSkills,
+    defaultKnowledgeScope: input.defaultKnowledgeScope ?? state.agentTemplates[index].defaultKnowledgeScope,
+    defaultCronJobs: input.defaultCronJobs ?? state.agentTemplates[index].defaultCronJobs,
+    defaultChannelConfig: input.defaultChannelConfig ?? state.agentTemplates[index].defaultChannelConfig,
+    defaultMemoryConfig: input.defaultMemoryConfig ?? state.agentTemplates[index].defaultMemoryConfig,
+    icon: input.icon !== undefined ? input.icon?.trim() || undefined : state.agentTemplates[index].icon,
+    isActive: input.isActive ?? state.agentTemplates[index].isActive,
+    updatedAt: nextUpdatedAt,
+  }
+  await writeState(state)
+  return state.agentTemplates[index]
+}
+
+export async function deleteAgentTemplate(templateId: string) {
+  const supabase = getSupabaseAdmin()
+  if (supabase) {
+    const { error } = await supabase.from('agent_templates').delete().eq('id', templateId)
+    if (!error) {
+      return true
+    }
+    console.warn('Supabase deleteAgentTemplate failed, falling back to local state:', error?.message)
+  }
+
+  const state = await readState()
+  const next = state.agentTemplates.filter((template) => template.id !== templateId)
+  if (next.length === state.agentTemplates.length) {
+    return false
+  }
+  state.agentTemplates = next
+  await writeState(state)
+  return true
+}
+
+export async function listDashboardCardsForWorkspace(workspaceId: string) {
+  const supabase = getSupabaseAdmin()
+  if (supabase) {
+    const { data, error } = await supabase
+      .from('workspace_dashboard_cards')
+      .select('*')
+      .eq('workspace_id', workspaceId)
+      .eq('is_visible', true)
+      .order('position', { ascending: true })
+
+    if (!error && data) {
+      return (data as Record<string, unknown>[]).map((row) => ({
+        id: String(row.id),
+        workspaceId: String(row.workspace_id),
+        dashboardId: row.dashboard_id ? String(row.dashboard_id) : undefined,
+        cardType: (row.card_type as WorkspaceDashboardCardType) ?? 'metric',
+        title: String(row.title),
+        subtitle: row.subtitle ? String(row.subtitle) : undefined,
+        config: (row.config as Record<string, unknown>) ?? {},
+        position: Number(row.position ?? 0),
+        gridWidth: Number(row.grid_width ?? 1),
+        isVisible: row.is_visible === undefined ? true : Boolean(row.is_visible),
+        createdBy: row.created_by ? String(row.created_by) : undefined,
+        createdAt: String(row.created_at ?? nowIso()),
+        updatedAt: String(row.updated_at ?? nowIso()),
+      }))
+    }
+  }
+
+  const state = await readState()
+  return state.dashboardCards
+    .filter((card) => card.workspaceId === workspaceId && card.isVisible)
+    .sort((a, b) => a.position - b.position)
 }
 
 export async function listProjects(workspaceId?: string) {
@@ -888,6 +1193,71 @@ export async function createAgentDefinition(input: CreateAgentInput) {
   state.agents.push(record)
   await writeState(state)
   return record
+}
+
+export async function updateAgentDefinition(agentId: string, input: UpdateAgentInput) {
+  const supabase = getSupabaseAdmin()
+  const updatedAt = nowIso()
+
+  if (supabase) {
+    const runtimeType = input.role ? roleToRuntimeType(input.role) : undefined
+    const configuredSkills = Array.isArray(input.toolsConfig?.skills)
+      ? (input.toolsConfig?.skills as string[])
+      : undefined
+    const objective =
+      typeof input.promptPack?.objective === 'string'
+        ? input.promptPack.objective
+        : typeof input.promptPack?.description === 'string'
+          ? input.promptPack.description
+          : undefined
+    const knowledgeScope =
+      (input.integrationConfig?.knowledgeScope as Record<string, unknown> | undefined) ??
+      (input.toolsConfig?.knowledgeScope as Record<string, unknown> | undefined)
+
+    const { data, error } = await supabase
+      .from('workspace_agents')
+      .update({
+        ...(input.name ? { name: input.name } : {}),
+        ...(runtimeType ? { type: runtimeType } : {}),
+        ...(objective !== undefined ? { description: objective } : {}),
+        ...(typeof input.promptPack?.soulMd === 'string' ? { soul_md: input.promptPack.soulMd } : {}),
+        ...(configuredSkills ? { skills: configuredSkills } : {}),
+        ...(knowledgeScope ? { knowledge_scope: knowledgeScope } : {}),
+        ...(Array.isArray(input.integrationConfig?.cronJobs) ? { cron_jobs: input.integrationConfig?.cronJobs } : {}),
+        ...(input.isActive !== undefined ? { status: input.isActive ? 'active' : 'paused' } : {}),
+        updated_at: updatedAt,
+      })
+      .eq('id', agentId)
+      .eq('workspace_id', input.workspaceId)
+      .select()
+      .maybeSingle()
+
+    if (!error && data) {
+      return fromWorkspaceAgentRow(data as Record<string, unknown>)
+    }
+    console.warn('Supabase updateAgentDefinition failed, falling back to local state:', error?.message)
+  }
+
+  assertLocalFallbackAllowed('updateAgentDefinition')
+  const state = await readState()
+  const idx = state.agents.findIndex((agent) => agent.id === agentId && agent.workspaceId === input.workspaceId)
+  if (idx < 0) {
+    throw new Error('Agent not found')
+  }
+
+  state.agents[idx] = {
+    ...state.agents[idx],
+    name: input.name ?? state.agents[idx].name,
+    role: input.role ?? state.agents[idx].role,
+    model: input.model ?? state.agents[idx].model,
+    promptPack: input.promptPack ?? state.agents[idx].promptPack,
+    toolsConfig: input.toolsConfig ?? state.agents[idx].toolsConfig,
+    integrationConfig: input.integrationConfig ?? state.agents[idx].integrationConfig,
+    isActive: input.isActive ?? state.agents[idx].isActive,
+    updatedAt,
+  }
+  await writeState(state)
+  return state.agents[idx]
 }
 
 export async function listDeployments(workspaceId?: string) {

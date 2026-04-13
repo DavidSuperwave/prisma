@@ -1,4 +1,6 @@
+import { getCurrentAppUser } from "@/lib/auth";
 import { getSupabaseAdmin, getAssetBucketName } from "@/lib/supabaseAdmin";
+import { listWorkspaceMembershipsForUser } from "@/lib/workspaceStore";
 
 type Context = {
   params: Promise<{ workspaceSlug: string }>;
@@ -25,6 +27,17 @@ export async function POST(request: Request, context: Context) {
 
     if (!(file instanceof File) || file.size === 0) {
       return Response.json({ error: "A non-empty file is required." }, { status: 400 });
+    }
+
+    const user = await getCurrentAppUser();
+    if (!user) {
+      return Response.json({ error: "Authentication required." }, { status: 401 });
+    }
+
+    const memberships = await listWorkspaceMembershipsForUser(user.id, user.isPlatformAdmin);
+    const allowedWorkspace = memberships.find((entry) => entry.workspace.subdomain === workspaceSlug);
+    if (!allowedWorkspace) {
+      return Response.json({ error: "You do not have access to this workspace." }, { status: 403 });
     }
 
     const supabase = requireSupabaseAdmin();

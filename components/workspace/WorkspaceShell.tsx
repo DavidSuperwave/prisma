@@ -1,12 +1,11 @@
 import Link from "next/link";
 import { ShieldCheck } from "lucide-react";
-import type { CSSProperties } from "react";
-import styles from "./workspace-shell.module.css";
 
 type NavItem = {
   id: string;
   label: string;
   href: string;
+  meta?: string;
   active?: boolean;
   badge?: number;
   hidden?: boolean;
@@ -14,8 +13,11 @@ type NavItem = {
 
 type ContextRail = {
   headline: string;
-  summary: string;
-  bullets: string[];
+  summary?: string;
+  bullets: Array<{
+    label: string;
+    value: string;
+  }>;
 };
 
 type Props = {
@@ -24,11 +26,31 @@ type Props = {
   workspaceLogoUrl?: string | null;
   accentColor?: string | null;
   navItems: NavItem[];
-  contextRail: ContextRail;
+  contextRail?: ContextRail | null;
   currentRole?: string | null;
   currentUserEmail?: string | null;
   children: React.ReactNode;
 };
+
+function truncateEmail(email: string) {
+  if (email.length <= 24) {
+    return email;
+  }
+
+  const [name, domain] = email.split("@");
+  if (!domain) {
+    return `${email.slice(0, 21)}...`;
+  }
+
+  return `${name.slice(0, 10)}...@${domain}`;
+}
+
+function formatRole(role?: string | null) {
+  if (role === "admin") return "Admin del espacio";
+  if (role === "operator") return "Operador";
+  if (role === "viewer") return "Solo lectura";
+  return "Miembro del espacio";
+}
 
 export function WorkspaceShell({
   workspaceName,
@@ -41,163 +63,146 @@ export function WorkspaceShell({
   currentUserEmail,
   children,
 }: Props) {
+  const visibleItems = navItems.filter((item) => !item.hidden);
   const groupedItems = [
     {
-      label: "OPERAR",
-      items: navItems.filter((item) => ["home", "chat", "queue"].includes(item.id) && !item.hidden),
+      label: "Operate",
+      items: visibleItems.filter((item) => ["home", "chat", "queue"].includes(item.id)),
     },
     {
-      label: "DATOS",
-      items: navItems.filter((item) => ["data", "record"].includes(item.id) && !item.hidden),
-    },
-    {
-      label: "SISTEMA",
-      items: navItems.filter((item) => ["agents"].includes(item.id) && !item.hidden),
+      label: "Workspace",
+      items: visibleItems.filter((item) => !["home", "chat", "queue"].includes(item.id)),
     },
   ].filter((group) => group.items.length > 0);
-
-  const itemMeta: Record<string, string> = {
-    home: "🏠",
-    chat: "💬",
-    queue: "📋",
-    data: "📄",
-    record: "🧾",
-    agents: "🤖",
-  };
-
-  const roleLabel = currentRole === "admin" ? "Administrador" : currentRole === "viewer" ? "Visualizador" : "Operador";
-  const sidebarStyle: CSSProperties = {
-    ["--workspace-accent-brand" as string]: accentColor ?? "var(--color-accent)",
-  };
+  const userInitial = (currentUserEmail ?? workspaceName).slice(0, 1).toUpperCase();
 
   return (
-    <div className={styles.appShell}>
-      <div className={styles.shellGrid}>
-        <aside className={styles.sidebar} style={sidebarStyle}>
-          <div className={styles.brand}>
-            <p className={styles.brandEyebrow}>PRISMA WORKSPACE</p>
-            <div className={styles.brandRow}>
-              <div className={styles.brandAvatar}>
+    <div className="workspace-app">
+      <div className="workspace-shell">
+        <aside className="workspace-sidebar">
+          <div className="workspace-brand">
+            <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+              <div
+                style={{
+                  width: 42,
+                  height: 42,
+                  borderRadius: 16,
+                  background: accentColor ?? "var(--workspace-accent)",
+                  color: "#ffffff",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontWeight: 700,
+                  boxShadow: "0 10px 24px rgba(51, 92, 255, 0.22)",
+                  overflow: "hidden",
+                }}
+              >
                 {workspaceLogoUrl ? (
                   // eslint-disable-next-line @next/next/no-img-element
                   <img
                     src={workspaceLogoUrl}
                     alt={`${workspaceName} logo`}
-                    className={styles.brandAvatarImage}
+                    style={{ width: "100%", height: "100%", objectFit: "cover" }}
                   />
                 ) : (
                   workspaceName.slice(0, 1)
                 )}
               </div>
               <div>
-                <h1 className={styles.brandTitle}>{workspaceName}</h1>
-                <p className={styles.brandSubtitle}>{workspaceSlug}.prisma.com.mx</p>
-                <p className={styles.brandPlan}>base · {roleLabel}</p>
+                <h1 className="workspace-brand__title">{workspaceName}</h1>
+                <p className="workspace-brand__subtitle">Prisma workspace</p>
               </div>
             </div>
           </div>
 
-          <nav className={styles.nav}>
+          <nav className="workspace-nav">
             {groupedItems.map((group) => (
-              <div key={group.label} className={styles.navGroup}>
-                <p className={styles.navLabel}>{group.label}</p>
+              <div key={group.label} className="workspace-nav__group">
+                <p className="workspace-nav__label">{group.label}</p>
                 {group.items.map((item) => (
                   <Link
                     key={item.id}
                     href={item.href}
-                    className={`${styles.navItem} ${item.active ? styles.navItemActive : ""}`}
+                    className={`workspace-link workspace-nav__item ${item.active ? "workspace-nav__item--active" : ""}`}
                   >
-                    <div className={styles.navContent}>
-                      <span className={styles.navIcon}>{itemMeta[item.id] ?? "•"}</span>
-                      <div>
-                        <p className={styles.navTitle}>{item.label}</p>
-                      </div>
+                    <div>
+                      <p className="workspace-nav__title">{item.label}</p>
+                      {item.meta ? <p className="workspace-nav__meta">{item.meta}</p> : null}
                     </div>
                     {typeof item.badge === "number" && item.badge > 0 ? (
-                      <span className={styles.navBadge}>{item.badge}</span>
+                      <span className="workspace-pill workspace-pill--accent">{item.badge}</span>
                     ) : null}
                   </Link>
                 ))}
               </div>
             ))}
-
-            {currentRole === "admin" ? (
-              <div className={styles.navGroup}>
-                <p className={styles.navLabel}>ADMIN</p>
-                <Link href="/admin" className={styles.navItem}>
-                  <div className={styles.navContent}>
-                    <span className={styles.navIcon}>⚙️</span>
-                    <p className={styles.navTitle}>Configuración</p>
-                  </div>
-                </Link>
-              </div>
-            ) : null}
           </nav>
 
-          <div className={styles.sidebarBottom}>
-            <div className={styles.sessionCard}>
-              <p className={styles.cardEyebrow}>Sesión activa</p>
-              <strong>{currentUserEmail ?? "Usuario autenticado"}</strong>
-              <span>{roleLabel}</span>
-            </div>
-          </div>
+          {currentUserEmail ? (
+            <details className="workspace-user-menu">
+              <summary className="workspace-user-menu__summary" title={currentUserEmail}>
+                <span className="workspace-user-menu__avatar">{userInitial}</span>
+                <span className="workspace-user-menu__email">{truncateEmail(currentUserEmail)}</span>
+              </summary>
+              <div className="workspace-user-menu__panel">
+                <p className="workspace-user-menu__role">{formatRole(currentRole)}</p>
+                <Link href="/workspaces" className="workspace-link workspace-user-menu__link">
+                  All workspaces
+                </Link>
+                {currentRole === "admin" ? (
+                  <Link href="/admin" className="workspace-link workspace-user-menu__link">
+                    Open admin
+                  </Link>
+                ) : null}
+                <form action="/logout" method="post">
+                  <button type="submit" className="workspace-user-menu__button">
+                    Sign out
+                  </button>
+                </form>
+              </div>
+            </details>
+          ) : null}
         </aside>
 
-        <main className={styles.content}>
-          <header className={styles.header}>
-            <div className={styles.headerCopy}>
-              <p className={styles.headerEyebrow}>OPERACIÓN</p>
-              <h2 className={styles.headerTitle}>{workspaceName}</h2>
-              <p className={styles.headerDescription}>
-                Donde estás, qué importa y qué sigue: estructura clara para operar sin ruido.
-              </p>
+        <main className="workspace-main">
+          <header className="workspace-header">
+            <div className="workspace-header__copy">
+              <h2 className="workspace-header__title">{workspaceName}</h2>
             </div>
 
-            <div className={styles.headerActions}>
-              <div className={`${styles.pill} ${styles.pillStatus}`}>
+            <div className="workspace-header__actions">
+              <div className="workspace-pill workspace-pill--neutral">
                 <ShieldCheck size={14} />
-                Supervisado por humano
+                Human-supervised
               </div>
-              <Link href="/workspaces" className={`${styles.button} ${styles.buttonPrimary}`}>
-                Cambiar workspace
-              </Link>
-              <form action="/logout" method="post">
-                <button type="submit" className={styles.button}>
-                  Cerrar sesión
-                </button>
-              </form>
             </div>
           </header>
 
-          <section className={styles.pageBody}>{children}</section>
+          {children}
         </main>
 
-        <aside className={styles.rail}>
-          <p className={styles.cardEyebrow}>{contextRail.headline}</p>
-          <div className={styles.railStack}>
-            <div className={styles.railNote}>{contextRail.summary}</div>
-            <div className={styles.railPanel}>
-              <div className={styles.railPanelHeader}>
+        {contextRail ? (
+          <aside className="workspace-rail">
+            <div className="workspace-panel">
+              <div className="workspace-panel__header">
                 <div>
-                  <h3 className={styles.railPanelTitle}>Contexto visible</h3>
-                  <p className={styles.railPanelDescription}>
-                    Señales rápidas para entender estado, cobertura y carga operativa.
-                  </p>
+                  <h3 className="workspace-panel__title">{contextRail.headline}</h3>
+                  {contextRail.summary ? <p className="workspace-panel__description">{contextRail.summary}</p> : null}
                 </div>
               </div>
-              <div className={styles.railPanelContent}>
-                <div className={styles.kv}>
+              <div className="workspace-panel__content">
+                <div className="workspace-kv">
                   {contextRail.bullets.map((bullet) => (
-                    <div key={bullet} className={styles.kvRow}>
-                      <span className={styles.kvLabel}>Señal</span>
-                      <span className={styles.kvValue}>{bullet}</span>
+                    <div key={`${bullet.label}-${bullet.value}`} className="workspace-kv__row">
+                      <span className="workspace-kv__label">{bullet.label}</span>
+                      <span className="workspace-kv__value">{bullet.value}</span>
                     </div>
                   ))}
                 </div>
               </div>
             </div>
-          </div>
-        </aside>
+          </aside>
+        ) : null}
       </div>
     </div>
   );

@@ -1,4 +1,6 @@
+import { getCurrentAppUser } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
+import { listWorkspaceMembershipsForUser } from "@/lib/workspaceStore";
 
 const defaultSystemPrompt = `Eres agente de Prisma. Hablas en espanol para negocios mexicanos con tono claro, cercano y orientado a conversion. Tu trabajo es ayudar al visitante a entender como un agente IA por WhatsApp puede resolver su caso y mover la conversacion al siguiente paso.
 
@@ -485,6 +487,59 @@ async function callHermes(payload: ChatRequest & { message: string }) {
   return proxyToHermes({ payload, baseUrl, apiKey, model, agent, workspaceContext });
 }
 
+async function authorizeWorkspaceRequest(payload: ChatRequest) {
+  const requestedWorkspaceId = payload.workspace_id ?? payload.workspaceId;
+  const requestedAgentId = payload.agent_id ?? payload.agentId;
+  const requiresWorkspaceAccess = Boolean(requestedWorkspaceId || requestedAgentId);
+
+  if (!requiresWorkspaceAccess) {
+    return null;
+  }
+
+  const user = await getCurrentAppUser();
+  if (!user) {
+    return Response.json({ error: "Authentication required." }, { status: 401 });
+  }
+
+  const memberships = await listWorkspaceMembershipsForUser(user.id, user.isPlatformAdmin);
+  const membershipByWorkspaceId = new Map(memberships.map((entry) => [entry.workspaceId, entry]));
+  const membershipBySlug = new Map(memberships.map((entry) => [entry.workspace.subdomain, entry]));
+
+  if (requestedWorkspaceId) {
+    const allowedMembership = membershipByWorkspaceId.get(requestedWorkspaceId) ?? membershipBySlug.get(requestedWorkspaceId);
+    if (!allowedMembership) {
+      return Response.json({ error: "You do not have access to this workspace." }, { status: 403 });
+    }
+  }
+
+  if (requestedAgentId) {
+    const supabase = getSupabaseAdmin();
+    if (!supabase) {
+      return Response.json({ error: "Supabase admin client not configured." }, { status: 500 });
+    }
+
+    const { data: agentRow, error } = await supabase
+      .from("workspace_agents")
+      .select("id, workspace_id")
+      .eq("id", requestedAgentId)
+      .maybeSingle();
+
+    if (error) {
+      return Response.json({ error: error.message }, { status: 400 });
+    }
+
+    if (!agentRow) {
+      return Response.json({ error: "Agent not found." }, { status: 404 });
+    }
+
+    if (!membershipByWorkspaceId.has(String(agentRow.workspace_id))) {
+      return Response.json({ error: "You do not have access to this agent." }, { status: 403 });
+    }
+  }
+
+  return null;
+}
+
 async function callOpenRouter(payload: ChatRequest & { message: string }) {
   const apiKey = process.env.OPENROUTER_API_KEY;
   const model = process.env.OPENROUTER_MODEL ?? "[REDACTED]";
@@ -531,6 +586,11 @@ export async function POST(request: Request) {
   const message = payload.message?.trim();
   if (!message) {
     return Response.json({ error: "Message is required" }, { status: 400 });
+  }
+
+  const authorizationFailure = await authorizeWorkspaceRequest(payload);
+  if (authorizationFailure) {
+    return authorizationFailure;
   }
 
   const provider = resolveProvider();

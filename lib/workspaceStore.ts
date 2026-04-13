@@ -588,22 +588,46 @@ export async function listWorkspaceFields(workspaceId: string) {
 
 export async function listWorkspaceViews(workspaceId: string, objectId?: string) {
   const supabase = requireSupabaseAdmin();
-  let query = supabase
-    .from("workspace_views")
-    .select("id, workspace_id, object_id, name, filters, sort_by, sort_order, columns, group_by_field_id")
-    .eq("workspace_id", workspaceId)
-    .order("created_at", { ascending: true });
+  const buildQuery = (selectClause: string) => {
+    let query = supabase
+      .from("workspace_views")
+      .select(selectClause)
+      .eq("workspace_id", workspaceId)
+      .order("created_at", { ascending: true });
 
-  if (objectId) {
-    query = query.eq("object_id", objectId);
+    if (objectId) {
+      query = query.eq("object_id", objectId);
+    }
+
+    return query;
+  };
+
+  const preferredSelect = "id, workspace_id, object_id, name, filters, sort_by, sort_order, columns, group_by_field_id";
+  const fallbackSelect = "id, workspace_id, object_id, name, filters, sort_by, sort_order, columns";
+
+  const withGroupBy = await buildQuery(preferredSelect);
+  if (!withGroupBy.error) {
+    const rows = Array.isArray(withGroupBy.data) ? withGroupBy.data : [];
+    return rows.map((row) => mapView(row as unknown as Record<string, unknown>));
   }
 
-  const { data, error } = await query;
-  if (error) {
-    throw new Error(error.message);
+  // Backward-compatibility for environments where the M15 migration has not run yet.
+  if (!withGroupBy.error.message.includes("group_by_field_id")) {
+    throw new Error(withGroupBy.error.message);
   }
 
-  return (data ?? []).map((row) => mapView(row as Record<string, unknown>));
+  const withoutGroupBy = await buildQuery(fallbackSelect);
+  if (withoutGroupBy.error) {
+    throw new Error(withoutGroupBy.error.message);
+  }
+
+  const fallbackRows = Array.isArray(withoutGroupBy.data) ? withoutGroupBy.data : [];
+  return fallbackRows.map((row) =>
+    mapView({
+      ...(row as unknown as Record<string, unknown>),
+      group_by_field_id: null,
+    }),
+  );
 }
 
 export async function listWorkspaceRecords(workspaceId: string, objectId?: string) {

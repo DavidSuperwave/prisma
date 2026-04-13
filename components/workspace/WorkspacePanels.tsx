@@ -2041,6 +2041,11 @@ function BaseDataPanel({
               {objectFields.map((field) => {
                 const options = parseSelectOptions(field);
                 const value = recordDraft[field.key] ?? "";
+                const draftOptionValue = String(value ?? "");
+                const createSelectOptions =
+                  draftOptionValue.length > 0 && !options.includes(draftOptionValue)
+                    ? [draftOptionValue, ...options]
+                    : options;
                 return (
                   <label key={field.id} style={fieldStyle}>
                     {field.name}
@@ -2054,7 +2059,7 @@ function BaseDataPanel({
                         style={inputStyle}
                       >
                         <option value="">{field.required ? "Selecciona una opción" : "Sin valor"}</option>
-                        {options.map((option) => (
+                        {createSelectOptions.map((option) => (
                           <option key={option} value={option}>
                             {formatStatusLabel(option)}
                           </option>

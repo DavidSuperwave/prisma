@@ -153,6 +153,15 @@ button {
 
 .workspace-app {
   min-height: 100vh;
+  --workspace-accent: #335cff;
+  --workspace-text: #111827;
+  --workspace-muted: #6b7280;
+  --workspace-faint: #8a93a3;
+  --workspace-border: rgba(17, 24, 39, 0.12);
+  --workspace-panel: rgba(255, 255, 255, 0.9);
+  --workspace-panel-soft: rgba(249, 250, 251, 0.92);
+  --workspace-surface: rgba(255, 255, 255, 0.96);
+  --workspace-shadow: 0 14px 30px rgba(17, 24, 39, 0.06);
   background:
     radial-gradient(circle at top right, rgba(51, 92, 255, 0.08), transparent 26%),
     linear-gradient(180deg, #f7f7f2 0%, #f5f3ee 100%);

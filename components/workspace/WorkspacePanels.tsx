@@ -78,6 +78,18 @@ type DataPanelProps = {
   askHref?: string;
 };
 
+type BoardColumn = {
+  key: string;
+  value: string | null;
+  label: string;
+  records: PrismaWorkspaceRecord[];
+};
+
+type BoardDropTarget = {
+  recordId: string;
+  toValue: string | null;
+};
+
 type AgentPanelProps = {
   workspaceId: string;
   workspaceSlug: string;
@@ -1198,8 +1210,10 @@ function BaseDataPanel({
 }: DataPanelProps) {
   const [selectedObjectId, setSelectedObjectId] = useState<string>(initialObjectId ?? objects[0]?.id ?? "");
   const [selectedViewId, setSelectedViewId] = useState<string>(initialViewId ?? "all");
+  const [viewMode, setViewMode] = useState<"table" | "board">("table");
   const [query, setQuery] = useState("");
   const [localRecords, setLocalRecords] = useState<PrismaWorkspaceRecord[]>(records);
+  const [draggingRecordId, setDraggingRecordId] = useState<string | null>(null);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isCreatingRecord, setIsCreatingRecord] = useState(false);
   const [recordDraft, setRecordDraft] = useState<Record<string, unknown>>({});
@@ -1228,6 +1242,78 @@ function BaseDataPanel({
         )
       : true,
   );
+  const boardGroupField =
+    (currentView?.groupByFieldId
+      ? objectFields.find(
+          (field) =>
+            field.id === currentView.groupByFieldId &&
+            (field.type === "status" || field.type === "select"),
+        )
+      : null) ??
+    objectFields.find((field) => field.type === "status" || field.type === "select") ??
+    null;
+  const boardPrimaryField =
+    objectFields.find((field) => field.required && field.type === "text") ??
+    objectFields.find((field) => field.type === "text") ??
+    objectFields[0] ??
+    null;
+  const boardSecondaryFields = objectFields
+    .filter(
+      (field) =>
+        field.id !== boardPrimaryField?.id && field.id !== boardGroupField?.id,
+    )
+    .slice(0, 2);
+
+  function normalizeBoardValue(value: unknown) {
+    if (value === null || value === undefined || value === "") {
+      return null;
+    }
+    return String(value);
+  }
+
+  const boardColumns: BoardColumn[] = (() => {
+    if (!boardGroupField) {
+      return [];
+    }
+    const configuredOptions = parseSelectOptions(boardGroupField);
+    const valuesFromRecords = Array.from(
+      new Set(
+        visibleRecords
+          .map((record) =>
+            normalizeBoardValue(getRecordFieldValue(record, boardGroupField.key)),
+          )
+          .filter((value): value is string => Boolean(value)),
+      ),
+    );
+    const allValues = [...configuredOptions];
+    for (const value of valuesFromRecords) {
+      if (!allValues.includes(value)) {
+        allValues.push(value);
+      }
+    }
+    const baseColumns: BoardColumn[] = [
+      {
+        key: "board-empty",
+        value: null,
+        label: "Sin estado",
+        records: [],
+      },
+      ...allValues.map((value) => ({
+        key: `board-${value}`,
+        value,
+        label: formatStatusLabel(value),
+        records: [],
+      })),
+    ];
+    return baseColumns.map((column) => ({
+      ...column,
+      records: visibleRecords.filter(
+        (record) =>
+          normalizeBoardValue(getRecordFieldValue(record, boardGroupField.key)) ===
+          column.value,
+      ),
+    }));
+  })();
 
   useEffect(() => {
     setLocalRecords(records);
@@ -1265,6 +1351,12 @@ function BaseDataPanel({
       setSelectedViewId(initialViewId);
     }
   }, [initialViewId, selectedViewId]);
+
+  useEffect(() => {
+    if (viewMode === "board" && !boardGroupField) {
+      setViewMode("table");
+    }
+  }, [viewMode, boardGroupField]);
 
   function parseSelectOptions(field: PrismaWorkspaceField) {
     const rawValues =
@@ -1344,6 +1436,95 @@ function BaseDataPanel({
     setTableError("");
     setTableSuccess("");
     setIsCreateOpen(true);
+  }
+
+  function openCreatePanelForBoardColumn(targetValue: string | null) {
+    if (!canWrite || !object) {
+      return;
+    }
+    const nextDraft = objectFields.reduce<Record<string, unknown>>((accumulator, field) => {
+      accumulator[field.key] = initialValueForField(field);
+      return accumulator;
+    }, {});
+    if (boardGroupField) {
+      nextDraft[boardGroupField.key] = targetValue ?? "";
+    }
+    setRecordDraft(nextDraft);
+    setTableError("");
+    setTableSuccess("");
+    setIsCreateOpen(true);
+  }
+
+  function getBoardDropTarget(payload: string): BoardDropTarget | null {
+    try {
+      const parsed = JSON.parse(payload) as BoardDropTarget;
+      if (!parsed || typeof parsed.recordId !== "string") {
+        return null;
+      }
+      if (parsed.toValue !== null && parsed.toValue !== undefined && typeof parsed.toValue !== "string") {
+        return null;
+      }
+      return {
+        recordId: parsed.recordId,
+        toValue: parsed.toValue ?? null,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  async function moveRecordToBoardColumn(
+    record: PrismaWorkspaceRecord,
+    targetValue: string | null,
+  ) {
+    if (!canWrite || !boardGroupField) {
+      return;
+    }
+
+    const currentValue = normalizeBoardValue(getRecordFieldValue(record, boardGroupField.key));
+    if (currentValue === targetValue) {
+      return;
+    }
+
+    const nextData = {
+      ...record.data,
+      [boardGroupField.key]: targetValue ?? null,
+    };
+    const previousSnapshot = localRecords;
+
+    setTableError("");
+    setTableSuccess("");
+    setLocalRecords((current) =>
+      current.map((entry) =>
+        entry.id === record.id
+          ? {
+              ...entry,
+              data: nextData,
+            }
+          : entry,
+      ),
+    );
+    try {
+      const response = await fetch(`/api/workspaces/${workspaceSlug}/records/${record.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ data: nextData }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        record?: PrismaWorkspaceRecord;
+      };
+      if (!response.ok || !payload.record) {
+        throw new Error(payload.error ?? "No se pudo mover la tarjeta.");
+      }
+      setLocalRecords((current) =>
+        current.map((entry) => (entry.id === payload.record!.id ? payload.record! : entry)),
+      );
+      setTableSuccess("Estado actualizado.");
+    } catch (error) {
+      setLocalRecords(previousSnapshot);
+      setTableError(error instanceof Error ? error.message : "No se pudo mover la tarjeta.");
+    }
   }
 
   async function createRecord() {
@@ -1551,6 +1732,27 @@ function BaseDataPanel({
             ) : null}
           </div>
 
+          <div style={viewModeToggleStyle}>
+            <button
+              type="button"
+              style={viewMode === "table" ? viewModeButtonActiveStyle : viewModeButtonStyle}
+              onClick={() => setViewMode("table")}
+            >
+              Tabla
+            </button>
+            <button
+              type="button"
+              style={{
+                ...(viewMode === "board" ? viewModeButtonActiveStyle : viewModeButtonStyle),
+                borderRight: "none",
+              }}
+              onClick={() => setViewMode("board")}
+              disabled={!boardGroupField}
+            >
+              Tablero
+            </button>
+          </div>
+
           <label style={{ ...inputLabelStyle, minWidth: 280 }}>
             Buscar
             <div style={searchWrapStyle}>
@@ -1587,133 +1789,237 @@ function BaseDataPanel({
         {tableError ? <p style={inlineErrorStyle}>{tableError}</p> : null}
         {tableSuccess ? <p style={inlineSuccessStyle}>{tableSuccess}</p> : null}
 
-        {object && visibleRecords.length > 0 ? (
-          <div style={tableWrapStyle}>
-            <table style={tableStyle}>
-              <thead>
-                <tr>
-                  {objectFields.map((field) => (
-                    <th key={field.id} style={tableHeadStyle}>
-                      <span>{field.name}</span>
-                    </th>
-                  ))}
-                  {canWrite ? <th style={tableHeadStyle}>Acciones</th> : null}
-                </tr>
-              </thead>
-              <tbody>
-                {visibleRecords.map((record) => (
-                  <tr
-                    key={record.id}
-                    style={recordBaseHref ? clickableRowStyle : undefined}
-                    onClick={() => {
-                      if (editingCell) {
-                        return;
-                      }
-                      if (!recordBaseHref || !object?.id) {
-                        return;
-                      }
-                      window.location.href = `${recordBaseHref}&object=${object.id}&record=${record.id}`;
-                    }}
-                  >
-                    {objectFields.map((field) => {
-                      const value = getRecordFieldValue(record, field.key);
-                      const isEditing =
-                        editingCell?.recordId === record.id && editingCell.fieldKey === field.key;
-                      const options = parseSelectOptions(field);
+        {object ? (
+          viewMode === "table" ? (
+            visibleRecords.length > 0 ? (
+              <div style={tableWrapStyle}>
+                <table style={tableStyle}>
+                  <thead>
+                    <tr>
+                      {objectFields.map((field) => (
+                        <th key={field.id} style={tableHeadStyle}>
+                          <span>{field.name}</span>
+                        </th>
+                      ))}
+                      {canWrite ? <th style={tableHeadStyle}>Acciones</th> : null}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visibleRecords.map((record) => (
+                      <tr
+                        key={record.id}
+                        style={recordBaseHref ? clickableRowStyle : undefined}
+                        onClick={() => {
+                          if (editingCell) {
+                            return;
+                          }
+                          if (!recordBaseHref || !object?.id) {
+                            return;
+                          }
+                          window.location.href = `${recordBaseHref}&object=${object.id}&record=${record.id}`;
+                        }}
+                      >
+                        {objectFields.map((field) => {
+                          const value = getRecordFieldValue(record, field.key);
+                          const isEditing =
+                            editingCell?.recordId === record.id && editingCell.fieldKey === field.key;
+                          const options = parseSelectOptions(field);
 
-                      return (
-                        <td
-                          key={`${record.id}-${field.id}`}
-                          style={tableCellStyle}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            if (!canWrite) return;
-                            startInlineEdit(record, field);
-                          }}
-                        >
-                          {isEditing ? (
-                            field.type === "status" || field.type === "select" ? (
-                              <select
-                                autoFocus
-                                value={String(editingValue ?? "")}
-                                onChange={(event) => setEditingValue(event.target.value)}
-                                onBlur={() => void saveInlineEdit(record, field)}
-                                style={inlineInputStyle}
-                              >
-                                <option value="">Selecciona</option>
-                                {options.map((option) => (
-                                  <option key={option} value={option}>
-                                    {formatStatusLabel(option)}
-                                  </option>
-                                ))}
-                              </select>
-                            ) : field.type === "boolean" ? (
-                              <select
-                                autoFocus
-                                value={String(Boolean(editingValue))}
-                                onChange={(event) => setEditingValue(event.target.value === "true")}
-                                onBlur={() => void saveInlineEdit(record, field)}
-                                style={inlineInputStyle}
-                              >
-                                <option value="true">Sí</option>
-                                <option value="false">No</option>
-                              </select>
-                            ) : (
-                              <input
-                                autoFocus
-                                type={field.type === "number" ? "number" : field.type === "date" ? "date" : "text"}
-                                value={String(editingValue ?? "")}
-                                onChange={(event) => setEditingValue(event.target.value)}
-                                onBlur={() => void saveInlineEdit(record, field)}
-                                onKeyDown={(event) => {
-                                  if (event.key === "Escape") {
-                                    cancelInlineEdit();
-                                  }
-                                  if (event.key === "Enter") {
-                                    event.currentTarget.blur();
-                                  }
-                                }}
-                                style={inlineInputStyle}
-                              />
-                            )
-                          ) : field.key === "status" ? (
-                            <StatusPill tone={String(value ?? "").toLowerCase()}>
-                              {formatStatusLabel(String(value ?? "—"))}
-                            </StatusPill>
-                          ) : field.type === "boolean" ? (
-                            <span>{Boolean(value) ? "Sí" : "No"}</span>
-                          ) : (
-                            <span>{value !== null && value !== undefined && String(value).length > 0 ? String(value) : "—"}</span>
-                          )}
-                        </td>
-                      );
-                    })}
-                    {canWrite ? (
-                      <td style={tableCellStyle} onClick={(event) => event.stopPropagation()}>
-                        <button
-                          type="button"
-                          style={dangerButtonStyle}
-                          onClick={() => setDeleteTargetId(record.id)}
-                          disabled={isDeletingRecord}
-                        >
-                          Eliminar
-                        </button>
-                      </td>
-                    ) : null}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                          return (
+                            <td
+                              key={`${record.id}-${field.id}`}
+                              style={tableCellStyle}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                if (!canWrite) return;
+                                startInlineEdit(record, field);
+                              }}
+                            >
+                              {isEditing ? (
+                                field.type === "status" || field.type === "select" ? (
+                                  <select
+                                    autoFocus
+                                    value={String(editingValue ?? "")}
+                                    onChange={(event) => setEditingValue(event.target.value)}
+                                    onBlur={() => void saveInlineEdit(record, field)}
+                                    style={inlineInputStyle}
+                                  >
+                                    <option value="">Selecciona</option>
+                                    {options.map((option) => (
+                                      <option key={option} value={option}>
+                                        {formatStatusLabel(option)}
+                                      </option>
+                                    ))}
+                                  </select>
+                                ) : field.type === "boolean" ? (
+                                  <select
+                                    autoFocus
+                                    value={String(Boolean(editingValue))}
+                                    onChange={(event) => setEditingValue(event.target.value === "true")}
+                                    onBlur={() => void saveInlineEdit(record, field)}
+                                    style={inlineInputStyle}
+                                  >
+                                    <option value="true">Sí</option>
+                                    <option value="false">No</option>
+                                  </select>
+                                ) : (
+                                  <input
+                                    autoFocus
+                                    type={field.type === "number" ? "number" : field.type === "date" ? "date" : "text"}
+                                    value={String(editingValue ?? "")}
+                                    onChange={(event) => setEditingValue(event.target.value)}
+                                    onBlur={() => void saveInlineEdit(record, field)}
+                                    onKeyDown={(event) => {
+                                      if (event.key === "Escape") {
+                                        cancelInlineEdit();
+                                      }
+                                      if (event.key === "Enter") {
+                                        event.currentTarget.blur();
+                                      }
+                                    }}
+                                    style={inlineInputStyle}
+                                  />
+                                )
+                              ) : field.key === "status" ? (
+                                <StatusPill tone={String(value ?? "").toLowerCase()}>
+                                  {formatStatusLabel(String(value ?? "—"))}
+                                </StatusPill>
+                              ) : field.type === "boolean" ? (
+                                <span>{Boolean(value) ? "Sí" : "No"}</span>
+                              ) : (
+                                <span>
+                                  {value !== null && value !== undefined && String(value).length > 0 ? String(value) : "—"}
+                                </span>
+                              )}
+                            </td>
+                          );
+                        })}
+                        {canWrite ? (
+                          <td style={tableCellStyle} onClick={(event) => event.stopPropagation()}>
+                            <button
+                              type="button"
+                              style={dangerButtonStyle}
+                              onClick={() => setDeleteTargetId(record.id)}
+                              disabled={isDeletingRecord}
+                            >
+                              Eliminar
+                            </button>
+                          </td>
+                        ) : null}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <EmptyState
+                icon={FileStack}
+                title="No hay registros visibles"
+                description="Ajusta la vista o la búsqueda, o usa el copilot para crear los primeros registros."
+              />
+            )
+          ) : boardGroupField ? (
+            <div style={boardColumnsWrapStyle}>
+              {boardColumns.map((column) => (
+                <section
+                  key={column.key}
+                  style={{
+                    ...boardColumnStyle,
+                    borderColor:
+                      draggingRecordId && canWrite
+                        ? "rgba(51, 92, 255, 0.35)"
+                        : "var(--workspace-border)",
+                  }}
+                  onDragOver={(event) => {
+                    if (!canWrite) return;
+                    event.preventDefault();
+                  }}
+                  onDrop={(event) => {
+                    if (!canWrite) return;
+                    event.preventDefault();
+                    const payload = getBoardDropTarget(event.dataTransfer.getData("text/plain"));
+                    setDraggingRecordId(null);
+                    if (!payload) {
+                      return;
+                    }
+                    const record = visibleRecords.find((entry) => entry.id === payload.recordId);
+                    if (!record) {
+                      return;
+                    }
+                    void moveRecordToBoardColumn(record, column.value);
+                  }}
+                >
+                  <header style={boardColumnHeaderStyle}>
+                    <h3 style={boardColumnTitleStyle}>{column.label}</h3>
+                    <p style={boardColumnCountStyle}>{column.records.length}</p>
+                  </header>
+
+                  <div style={boardCardListStyle}>
+                    {column.records.map((record) => (
+                      <article
+                        key={record.id}
+                        draggable={canWrite}
+                        onDragStart={(event) => {
+                          if (!canWrite || !boardGroupField) {
+                            return;
+                          }
+                          const payload: BoardDropTarget = {
+                            recordId: record.id,
+                            toValue: normalizeBoardValue(getRecordFieldValue(record, boardGroupField.key)),
+                          };
+                          event.dataTransfer.setData("text/plain", JSON.stringify(payload));
+                          setDraggingRecordId(record.id);
+                        }}
+                        onDragEnd={() => setDraggingRecordId(null)}
+                        style={{
+                          ...boardCardStyle,
+                          opacity: draggingRecordId === record.id ? 0.65 : 1,
+                        }}
+                        onClick={() => {
+                          if (!recordBaseHref || !object?.id) {
+                            return;
+                          }
+                          window.location.href = `${recordBaseHref}&object=${object.id}&record=${record.id}`;
+                        }}
+                      >
+                        <p style={boardCardTitleStyle}>
+                          {boardPrimaryField
+                            ? String(getRecordFieldValue(record, boardPrimaryField.key) ?? "Sin título")
+                            : "Sin título"}
+                        </p>
+                        {boardSecondaryFields.map((field) => (
+                          <p key={field.id} style={boardCardMetaStyle}>
+                            {field.name}: {String(getRecordFieldValue(record, field.key) ?? "—")}
+                          </p>
+                        ))}
+                      </article>
+                    ))}
+                  </div>
+
+                  {canWrite ? (
+                    <button
+                      type="button"
+                      style={primaryButtonStyle}
+                      onClick={() => openCreatePanelForBoardColumn(column.value)}
+                    >
+                      + Nuevo
+                    </button>
+                  ) : null}
+                </section>
+              ))}
+            </div>
+          ) : (
+            <EmptyState
+              icon={Layers3}
+              title="Tablero no disponible"
+              description="Este objeto no tiene un campo de tipo estado o selección para agrupar las columnas."
+            />
+          )
         ) : (
           <EmptyState
             icon={FileStack}
-            title={object ? "No hay registros visibles" : "No hay objetos configurados"}
-            description={
-              object
-                ? "Ajusta la vista o la búsqueda, o usa el copilot para crear los primeros registros."
-                : "Primero crea objetos y campos para que la vista dinámica tenga estructura."
-            }
+            title="No hay objetos configurados"
+            description="Primero crea objetos y campos para que la vista dinámica tenga estructura."
           />
         )}
       </Panel>
@@ -4170,6 +4476,99 @@ const confirmCardStyle: React.CSSProperties = {
   padding: 18,
   display: "grid",
   gap: 12,
+};
+
+const viewModeToggleStyle: React.CSSProperties = {
+  display: "inline-flex",
+  border: "1px solid var(--workspace-border)",
+  borderRadius: 12,
+  overflow: "hidden",
+  background: "var(--workspace-panel)",
+};
+
+const viewModeButtonStyle: React.CSSProperties = {
+  border: "none",
+  borderRight: "1px solid var(--workspace-border)",
+  background: "transparent",
+  color: "var(--workspace-text)",
+  font: "inherit",
+  fontWeight: 600,
+  padding: "8px 12px",
+  cursor: "pointer",
+};
+
+const viewModeButtonActiveStyle: React.CSSProperties = {
+  ...viewModeButtonStyle,
+  background: "rgba(51, 92, 255, 0.12)",
+  color: "#2947cc",
+};
+
+const boardColumnsWrapStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
+  gap: 12,
+  alignItems: "start",
+};
+
+const boardColumnStyle: React.CSSProperties = {
+  border: "1px solid var(--workspace-border)",
+  borderRadius: 16,
+  background: "var(--workspace-panel-soft)",
+  padding: 12,
+  display: "grid",
+  gap: 10,
+  minHeight: 220,
+};
+
+const boardColumnHeaderStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 8,
+};
+
+const boardColumnTitleStyle: React.CSSProperties = {
+  margin: 0,
+  color: "var(--workspace-text)",
+  fontSize: 14,
+  fontWeight: 700,
+};
+
+const boardColumnCountStyle: React.CSSProperties = {
+  margin: 0,
+  color: "var(--workspace-muted)",
+  fontSize: 12,
+  fontWeight: 600,
+};
+
+const boardCardListStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 8,
+};
+
+const boardCardStyle: React.CSSProperties = {
+  border: "1px solid var(--workspace-border)",
+  borderRadius: 12,
+  background: "var(--workspace-panel)",
+  padding: 10,
+  display: "grid",
+  gap: 6,
+  cursor: "grab",
+};
+
+const boardCardTitleStyle: React.CSSProperties = {
+  margin: 0,
+  color: "var(--workspace-text)",
+  fontSize: 14,
+  fontWeight: 700,
+  lineHeight: 1.35,
+};
+
+const boardCardMetaStyle: React.CSSProperties = {
+  margin: 0,
+  color: "var(--workspace-muted)",
+  fontSize: 12,
+  lineHeight: 1.4,
 };
 
 const agentGridStyle: React.CSSProperties = {

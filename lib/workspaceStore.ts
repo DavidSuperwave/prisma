@@ -45,6 +45,7 @@ export type PrismaWorkspaceView = {
   sortBy: string | null;
   sortOrder: "asc" | "desc" | null;
   columns: string[];
+  groupByFieldId: string | null;
 };
 
 export type PrismaWorkspaceRecord = {
@@ -226,6 +227,7 @@ function mapView(row: Record<string, unknown>): PrismaWorkspaceView {
     sortBy: row.sort_by ? String(row.sort_by) : null,
     sortOrder: row.sort_order === "desc" ? "desc" : row.sort_order === "asc" ? "asc" : null,
     columns: Array.isArray(row.columns) ? (row.columns as string[]) : [],
+    groupByFieldId: row.group_by_field_id ? String(row.group_by_field_id) : null,
   };
 }
 
@@ -588,7 +590,7 @@ export async function listWorkspaceViews(workspaceId: string, objectId?: string)
   const supabase = requireSupabaseAdmin();
   let query = supabase
     .from("workspace_views")
-    .select("id, workspace_id, object_id, name, filters, sort_by, sort_order, columns")
+    .select("id, workspace_id, object_id, name, filters, sort_by, sort_order, columns, group_by_field_id")
     .eq("workspace_id", workspaceId)
     .order("created_at", { ascending: true });
 

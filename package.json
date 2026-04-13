@@ -15,7 +15,8 @@
     "next": "latest",
     "react": "latest",
     "react-dom": "latest",
-    "stripe": "^22.0.0"
+    "stripe": "^22.0.0",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.3.5",

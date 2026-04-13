@@ -16,6 +16,12 @@ import {
   RecordDetailPanel,
   TeamChatPanel,
 } from "@/components/workspace/WorkspacePanels";
+import {
+  ActivityPanel,
+  ChannelsPanel,
+  FieldsPanel,
+  ImportPanel,
+} from "@/components/workspace/Stage2Panels";
 import { requireAuthenticatedUser } from "@/lib/auth";
 
 type PageProps = {
@@ -125,11 +131,11 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
       <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: 32 }}>
         <div style={{ maxWidth: 520 }}>
           <p style={{ fontSize: 14, color: "#6B7280", textTransform: "uppercase", letterSpacing: "0.12em" }}>
-            Prisma workspace
+            Espacio Prisma
           </p>
-          <h1 style={{ marginTop: 12, fontSize: "2.4rem", lineHeight: 1.1 }}>Workspace not available</h1>
+          <h1 style={{ marginTop: 12, fontSize: "2.4rem", lineHeight: 1.1 }}>Espacio no disponible</h1>
           <p style={{ marginTop: 12, color: "#4B5563" }}>
-            You do not have access to this workspace in the current session.
+            No tienes acceso a este espacio con tu sesión actual.
           </p>
         </div>
       </div>
@@ -261,6 +267,47 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
         initialObjectId={query.object}
         initialViewId={query.view}
         recordBaseHref={`/workspaces/${snapshot.workspace.subdomain}?tab=record`}
+      />
+    );
+  }
+
+  if (selectedTab === "import") {
+    content = (
+      <ImportPanel
+        workspaceSlug={snapshot.workspace.subdomain}
+        objects={snapshot.objects}
+        fields={snapshot.fields}
+      />
+    );
+  }
+
+  if (selectedTab === "fields") {
+    content = (
+      <FieldsPanel
+        workspaceSlug={snapshot.workspace.subdomain}
+        currentRole={membership.role}
+        objects={snapshot.objects}
+        fields={snapshot.fields}
+      />
+    );
+  }
+
+  if (selectedTab === "channels") {
+    content = (
+      <ChannelsPanel
+        workspaceSlug={snapshot.workspace.subdomain}
+        currentRole={membership.role}
+        agents={formatAgentSummary(snapshot.agents)}
+      />
+    );
+  }
+
+  if (selectedTab === "activity") {
+    content = (
+      <ActivityPanel
+        workspaceSlug={snapshot.workspace.subdomain}
+        agents={snapshot.agents}
+        initialActivity={snapshot.activity}
       />
     );
   }
@@ -460,6 +507,37 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
           active: selectedTab === "data" && currentObject?.id === (documentsObject?.id ?? ""),
         },
         {
+          id: "import",
+          label: "Importar",
+          href: `/workspaces/${snapshot.workspace.subdomain}?tab=import`,
+          meta: "CSV / XLSX",
+          hidden: membership.role === "viewer",
+          active: selectedTab === "import",
+        },
+        {
+          id: "fields",
+          label: "Campos",
+          href: `/workspaces/${snapshot.workspace.subdomain}?tab=fields`,
+          meta: "Gestionar esquema",
+          hidden: membership.role !== "admin",
+          active: selectedTab === "fields",
+        },
+        {
+          id: "channels",
+          label: "Canales",
+          href: `/workspaces/${snapshot.workspace.subdomain}?tab=channels`,
+          meta: "WhatsApp",
+          hidden: membership.role === "viewer",
+          active: selectedTab === "channels",
+        },
+        {
+          id: "activity",
+          label: "Actividad",
+          href: `/workspaces/${snapshot.workspace.subdomain}?tab=activity`,
+          meta: "Feed filtrable",
+          active: selectedTab === "activity",
+        },
+        {
           id: "team-chat",
           label: "Equipo",
           href: `/workspaces/${snapshot.workspace.subdomain}?tab=team-chat`,
@@ -472,7 +550,7 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
         selectedTab === "queue" || selectedTab === "team-chat"
           ? null
           : {
-              headline: selectedTab === "agents" ? "Workspace agents" : selectedTab === "record" ? "Record context" : "Workspace context",
+              headline: selectedTab === "agents" ? "Agentes del espacio" : selectedTab === "record" ? "Contexto del registro" : "Contexto del espacio",
               summary:
                 selectedTab === "agents"
                   ? `${snapshot.agents.filter((agent) => agent.status === "active").length} agentes activos y ${snapshot.workspace.agentLimit} permitidos en este plan.`

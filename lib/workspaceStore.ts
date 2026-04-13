@@ -85,6 +85,20 @@ export type PrismaWorkspaceActivity = {
   createdAt: string;
 };
 
+export type PrismaWorkspaceImportHistory = {
+  id: string;
+  workspaceId: string;
+  objectId: string;
+  fileName: string;
+  totalRows: number;
+  importedRows: number;
+  skippedRows: number;
+  errorRows: number;
+  summary: Record<string, unknown>;
+  createdBy: string | null;
+  createdAt: string;
+};
+
 export type WorkspaceSnapshot = {
   workspace: PrismaWorkspace;
   objects: PrismaWorkspaceObject[];
@@ -307,6 +321,22 @@ function mapActivity(row: Record<string, unknown>): PrismaWorkspaceActivity {
     agentId: String(row.agent_id),
     action: String(row.action),
     details: (row.details as Record<string, unknown>) ?? {},
+    createdAt: String(row.created_at),
+  };
+}
+
+function mapImportHistory(row: Record<string, unknown>): PrismaWorkspaceImportHistory {
+  return {
+    id: String(row.id),
+    workspaceId: String(row.workspace_id),
+    objectId: String(row.object_id),
+    fileName: String(row.file_name),
+    totalRows: Number(row.total_rows ?? 0),
+    importedRows: Number(row.imported_rows ?? 0),
+    skippedRows: Number(row.skipped_rows ?? 0),
+    errorRows: Number(row.error_rows ?? 0),
+    summary: (row.summary as Record<string, unknown>) ?? {},
+    createdBy: row.created_by ? String(row.created_by) : null,
     createdAt: String(row.created_at),
   };
 }
@@ -662,6 +692,22 @@ export async function listWorkspaceActivity(workspaceId: string, limit = 30) {
   }
 
   return (data ?? []).map((row) => mapActivity(row as Record<string, unknown>));
+}
+
+export async function listWorkspaceImportHistory(workspaceId: string, limit = 20) {
+  const supabase = requireSupabaseAdmin();
+  const { data, error } = await supabase
+    .from("workspace_import_history")
+    .select("id, workspace_id, object_id, file_name, total_rows, imported_rows, skipped_rows, error_rows, summary, created_by, created_at")
+    .eq("workspace_id", workspaceId)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return (data ?? []).map((row) => mapImportHistory(row as Record<string, unknown>));
 }
 
 export async function getWorkspaceSnapshot(workspaceSlug: string): Promise<WorkspaceSnapshot | null> {

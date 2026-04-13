@@ -10,6 +10,7 @@ type AgentUpdateRequest = {
   apiEndpoint?: string;
   apiKey?: string;
   containerName?: string;
+  channelConfig?: Record<string, unknown>;
   status?: "active" | "paused" | "deploying" | "error";
 };
 
@@ -91,6 +92,17 @@ export async function PATCH(request: Request, context: Context) {
       update.container_name = trimmedContainerName;
     }
 
+    if (payload.channelConfig !== undefined) {
+      if (
+        !payload.channelConfig ||
+        typeof payload.channelConfig !== "object" ||
+        Array.isArray(payload.channelConfig)
+      ) {
+        return Response.json({ error: "channelConfig must be an object." }, { status: 400 });
+      }
+      update.channel_config = payload.channelConfig;
+    }
+
     if (payload.status !== undefined) {
       if (!["active", "paused", "deploying", "error"].includes(payload.status)) {
         return Response.json({ error: "Invalid status value." }, { status: 400 });
@@ -100,7 +112,7 @@ export async function PATCH(request: Request, context: Context) {
 
     if (Object.keys(update).length === 1) {
       return Response.json(
-        { error: "At least one field is required: apiEndpoint, apiKey, containerName, or status." },
+        { error: "At least one field is required: apiEndpoint, apiKey, containerName, channelConfig, or status." },
         { status: 400 },
       );
     }
@@ -111,7 +123,7 @@ export async function PATCH(request: Request, context: Context) {
       .update(update)
       .eq("id", agentId)
       .eq("workspace_id", authorization.membership.workspaceId)
-      .select("id, name, status, api_endpoint, container_name, knowledge_scope, updated_at")
+      .select("id, name, status, api_endpoint, container_name, channel_config, knowledge_scope, updated_at")
       .maybeSingle();
 
     if (error) {
@@ -129,6 +141,7 @@ export async function PATCH(request: Request, context: Context) {
         status: String(updatedAgent.status),
         apiEndpoint: String(updatedAgent.api_endpoint),
         containerName: String(updatedAgent.container_name),
+        channelConfig: (updatedAgent.channel_config as Record<string, unknown>) ?? {},
         lastHealthCheckAt:
           typeof (updatedAgent.knowledge_scope as Record<string, unknown> | null)?.last_health_check_at === "string"
             ? String((updatedAgent.knowledge_scope as Record<string, unknown>).last_health_check_at)
@@ -152,7 +165,7 @@ export async function POST(_request: Request, context: Context) {
     const supabase = requireSupabaseAdmin();
     const { data: agentRow, error: agentError } = await supabase
       .from("workspace_agents")
-      .select("id, workspace_id, api_endpoint, api_key, status, knowledge_scope")
+      .select("id, workspace_id, api_endpoint, api_key, status, knowledge_scope, cron_jobs")
       .eq("id", agentId)
       .eq("workspace_id", authorization.membership.workspaceId)
       .maybeSingle();
@@ -195,6 +208,38 @@ export async function POST(_request: Request, context: Context) {
       errorMessage = error instanceof Error ? error.message : "Failed to contact agent endpoint.";
     }
 
+    let cronRegistered = false;
+    let cronError = "";
+    const cronJobs = Array.isArray(agentRow.cron_jobs)
+      ? (agentRow.cron_jobs as Array<Record<string, unknown>>)
+      : [];
+    if (healthy && cronJobs.length > 0) {
+      try {
+        const cronResponse = await fetch(`${endpoint}/v1/cron`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "x-api-key": apiKey,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            jobs: cronJobs.map((job, index) => ({
+              lock: true,
+              ...job,
+              id: typeof job.id === "string" ? job.id : `job-${index + 1}`,
+            })),
+          }),
+        });
+        cronRegistered = cronResponse.ok;
+        if (!cronResponse.ok) {
+          const body = await cronResponse.text().catch(() => "");
+          cronError = body || `Cron registration failed with status ${cronResponse.status}.`;
+        }
+      } catch (error) {
+        cronError = error instanceof Error ? error.message : "Failed to register cron jobs.";
+      }
+    }
+
     const lastHealthCheckAt = new Date().toISOString();
     const previousKnowledgeScope = (agentRow.knowledge_scope as Record<string, unknown>) ?? {};
     const nextKnowledgeScope = {
@@ -202,7 +247,7 @@ export async function POST(_request: Request, context: Context) {
       last_health_check_at: lastHealthCheckAt,
     };
 
-    const nextStatus: "active" | "error" = healthy ? "active" : "error";
+    const nextStatus: "active" | "error" = healthy && !cronError ? "active" : "error";
     const { error: updateError } = await supabase
       .from("workspace_agents")
       .update({
@@ -220,7 +265,12 @@ export async function POST(_request: Request, context: Context) {
     return Response.json({
       health: {
         ok: healthy,
-        error: healthy ? undefined : errorMessage || "Unable to connect.",
+        error: healthy && !cronError ? undefined : cronError || errorMessage || "Unable to connect.",
+      },
+      cron: {
+        configured: cronJobs.length,
+        registered: cronRegistered,
+        error: cronError || undefined,
       },
       status: nextStatus,
       lastHealthCheckAt,

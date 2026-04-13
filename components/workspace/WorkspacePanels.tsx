@@ -1184,7 +1184,7 @@ export function ChatPanel({
   );
 }
 
-export function DataPanel({
+function BaseDataPanel({
   objects,
   fields,
   views,
@@ -1808,6 +1808,10 @@ export function DataPanel({
       ) : null}
     </div>
   );
+}
+
+export function DataPanel(props: DataPanelProps) {
+  return <BaseDataPanel {...props} />;
 }
 
 export function AgentsPanel({

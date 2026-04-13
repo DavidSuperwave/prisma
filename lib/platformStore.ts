@@ -631,6 +631,15 @@ function toWorkspaceAgentRow(agent: AgentDefinition) {
   const version =
     (typeof agent.integrationConfig.hermesVersion === 'string' && agent.integrationConfig.hermesVersion) ||
     'v2026.4.1'
+  const configuredCronJobs = Array.isArray(agent.integrationConfig.cronJobs)
+    ? (agent.integrationConfig.cronJobs as unknown[])
+    : []
+  const configuredChannelConfig =
+    agent.integrationConfig.channelConfig &&
+    typeof agent.integrationConfig.channelConfig === 'object' &&
+    !Array.isArray(agent.integrationConfig.channelConfig)
+      ? (agent.integrationConfig.channelConfig as Record<string, unknown>)
+      : {}
 
   return {
     id: agent.id,
@@ -652,8 +661,8 @@ function toWorkspaceAgentRow(agent: AgentDefinition) {
       legacy_role: agent.role,
       model: agent.model,
     },
-    cron_jobs: [],
-    channel_config: {},
+    cron_jobs: configuredCronJobs,
+    channel_config: configuredChannelConfig,
     memory_limit_mb: 512,
     cpu_limit: 0.5,
     created_at: agent.createdAt,

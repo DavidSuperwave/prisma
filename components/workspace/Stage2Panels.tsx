@@ -1146,9 +1146,11 @@ export function ActivityPanel({ workspaceSlug, agents, initialActivity }: Activi
   const [error, setError] = useState("");
 
   const actionOptions = useMemo(() => {
-    const fromInitial = Array.from(new Set(initialActivity.map((entry) => entry.action))).sort();
+    const fromInitial = Array.from(
+      new Set([...initialActivity.map((entry) => entry.action), ...activity.map((entry) => entry.action)]),
+    ).sort();
     return fromInitial;
-  }, [initialActivity]);
+  }, [initialActivity, activity]);
 
   useEffect(() => {
     let active = true;

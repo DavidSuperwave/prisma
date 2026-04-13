@@ -142,6 +142,13 @@
   font-weight: var(--font-medium);
 }
 
+.navMeta {
+  margin-top: 2px;
+  color: var(--color-text-tertiary);
+  font-size: 0.75rem;
+  line-height: 1rem;
+}
+
 .navBadge {
   display: inline-flex;
   min-width: 24px;

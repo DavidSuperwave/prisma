@@ -238,9 +238,25 @@ button {
   padding: 12px 14px;
 }
 
+.workspace-nav__item:hover {
+  background: rgba(17, 24, 39, 0.04);
+}
+
 .workspace-nav__item--active {
   border-color: rgba(51, 92, 255, 0.22);
   background: rgba(51, 92, 255, 0.08);
+  position: relative;
+}
+
+.workspace-nav__item--active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  border-radius: 999px;
+  background: #335cff;
 }
 
 .workspace-nav__title {
@@ -252,6 +268,24 @@ button {
   color: #7a8393;
   font-size: 12px;
   margin-top: 4px;
+}
+
+.workspace-nav__toggle {
+  width: 100%;
+  border: 1px solid rgba(17, 24, 39, 0.08);
+  cursor: pointer;
+  text-align: left;
+}
+
+.workspace-nav__subgroup {
+  display: grid;
+  gap: 8px;
+  padding-left: 14px;
+}
+
+.workspace-nav__item--nested {
+  border-radius: 10px;
+  padding: 10px 12px;
 }
 
 .workspace-main {

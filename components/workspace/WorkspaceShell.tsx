@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { ShieldCheck } from "lucide-react";
+import { ChevronDown, ShieldCheck } from "lucide-react";
 
 type NavItem = {
   id: string;
@@ -32,6 +32,12 @@ type Props = {
   children: React.ReactNode;
 };
 
+type NavItemGroup = {
+  primary: NavItem[];
+  dataItems: NavItem[];
+  trailing: NavItem[];
+};
+
 function truncateEmail(email: string) {
   if (email.length <= 24) {
     return email;
@@ -52,6 +58,14 @@ function formatRole(role?: string | null) {
   return "Miembro del espacio";
 }
 
+function splitNavItems(items: NavItem[]): NavItemGroup {
+  const primaryIds = new Set(["home", "chat", "agents", "queue", "documents", "team-chat"]);
+  const dataItems = items.filter((item) => item.id.startsWith("object-"));
+  const primary = items.filter((item) => primaryIds.has(item.id) && !item.id.startsWith("object-"));
+  const trailing = items.filter((item) => !primaryIds.has(item.id) && !item.id.startsWith("object-"));
+  return { primary, dataItems, trailing };
+}
+
 export function WorkspaceShell({
   workspaceName,
   workspaceSlug,
@@ -64,16 +78,10 @@ export function WorkspaceShell({
   children,
 }: Props) {
   const visibleItems = navItems.filter((item) => !item.hidden);
-  const groupedItems = [
-    {
-      label: "Operar",
-      items: visibleItems.filter((item) => ["home", "chat", "queue"].includes(item.id)),
-    },
-    {
-      label: "Espacio",
-      items: visibleItems.filter((item) => !["home", "chat", "queue"].includes(item.id)),
-    },
-  ].filter((group) => group.items.length > 0);
+  const { primary, dataItems, trailing } = splitNavItems(visibleItems);
+  const isDataExpanded = true;
+  const hasActiveDataItem = dataItems.some((item) => item.active);
+  const topLevelPrimary = primary.slice(0, 6);
   const userInitial = (currentUserEmail ?? workspaceName).slice(0, 1).toUpperCase();
 
   return (
@@ -110,32 +118,77 @@ export function WorkspaceShell({
               </div>
               <div>
                 <h1 className="workspace-brand__title">{workspaceName}</h1>
-                <p className="workspace-brand__subtitle">Prisma workspace</p>
+                <p className="workspace-brand__subtitle">Espacio Prisma</p>
               </div>
             </div>
           </div>
 
           <nav className="workspace-nav">
-            {groupedItems.map((group) => (
-              <div key={group.label} className="workspace-nav__group">
-                <p className="workspace-nav__label">{group.label}</p>
-                {group.items.map((item) => (
-                  <Link
-                    key={item.id}
-                    href={item.href}
-                    className={`workspace-link workspace-nav__item ${item.active ? "workspace-nav__item--active" : ""}`}
-                  >
-                    <div>
-                      <p className="workspace-nav__title">{item.label}</p>
-                      {item.meta ? <p className="workspace-nav__meta">{item.meta}</p> : null}
-                    </div>
-                    {typeof item.badge === "number" && item.badge > 0 ? (
-                      <span className="workspace-pill workspace-pill--accent">{item.badge}</span>
-                    ) : null}
-                  </Link>
-                ))}
+            <div className="workspace-nav__group">
+              <p className="workspace-nav__label">Navegación</p>
+              {topLevelPrimary.map((item) => (
+                <Link
+                  key={item.id}
+                  href={item.href}
+                  className={`workspace-link workspace-nav__item ${item.active ? "workspace-nav__item--active" : ""}`}
+                >
+                  <div>
+                    <p className="workspace-nav__title">{item.label}</p>
+                    {item.meta ? <p className="workspace-nav__meta">{item.meta}</p> : null}
+                  </div>
+                  {typeof item.badge === "number" && item.badge > 0 ? (
+                    <span className="workspace-pill workspace-pill--accent">{item.badge}</span>
+                  ) : null}
+                </Link>
+              ))}
+
+              <div
+                className={`workspace-nav__item workspace-nav__toggle ${hasActiveDataItem ? "workspace-nav__item--active" : ""}`}
+                aria-expanded={isDataExpanded}
+              >
+                <div>
+                  <p className="workspace-nav__title">Datos</p>
+                  <p className="workspace-nav__meta">{dataItems.length} objetos</p>
+                </div>
+                <ChevronDown
+                  size={16}
+                  style={{
+                    transform: isDataExpanded ? "rotate(0deg)" : "rotate(-90deg)",
+                    transition: "transform 160ms ease",
+                  }}
+                />
               </div>
-            ))}
+
+              {isDataExpanded ? (
+                <div className="workspace-nav__subgroup">
+                  {dataItems.map((item) => (
+                    <Link
+                      key={item.id}
+                      href={item.href}
+                      className={`workspace-link workspace-nav__item workspace-nav__item--nested ${item.active ? "workspace-nav__item--active" : ""}`}
+                    >
+                      <div>
+                        <p className="workspace-nav__title">{item.label}</p>
+                        {item.meta ? <p className="workspace-nav__meta">{item.meta}</p> : null}
+                      </div>
+                    </Link>
+                  ))}
+                </div>
+              ) : null}
+
+              {trailing.map((item) => (
+                <Link
+                  key={item.id}
+                  href={item.href}
+                  className={`workspace-link workspace-nav__item ${item.active ? "workspace-nav__item--active" : ""}`}
+                >
+                  <div>
+                    <p className="workspace-nav__title">{item.label}</p>
+                    {item.meta ? <p className="workspace-nav__meta">{item.meta}</p> : null}
+                  </div>
+                </Link>
+              ))}
+            </div>
           </nav>
 
           {currentUserEmail ? (

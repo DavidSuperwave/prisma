@@ -395,13 +395,6 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
       currentRole={membership.role}
       navItems={[
         {
-          id: "chat",
-          label: "Chat",
-          href: `/workspaces/${snapshot.workspace.subdomain}?tab=chat`,
-          meta: "Conversaciones con el CEO",
-          active: selectedTab === "chat",
-        },
-        {
           id: "home",
           label: "Inicio",
           href: `/workspaces/${snapshot.workspace.subdomain}?tab=home`,
@@ -409,20 +402,12 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
           active: selectedTab === "home",
         },
         {
-          id: "queue",
-          label: "Cola",
-          href: `/workspaces/${snapshot.workspace.subdomain}?tab=queue`,
-          badge: queueItems.length,
-          meta: "Tareas que requieren accion",
-          active: selectedTab === "queue",
+          id: "chat",
+          label: "Chat",
+          href: `/workspaces/${snapshot.workspace.subdomain}?tab=chat`,
+          meta: "Conversaciones con el CEO",
+          active: selectedTab === "chat",
         },
-        ...snapshot.objects.map((object) => ({
-          id: `object-${object.id}`,
-          label: object.name,
-          href: `/workspaces/${snapshot.workspace.subdomain}?tab=data&object=${object.id}`,
-          meta: object.description ?? "Vista operativa",
-          active: selectedTab === "data" && currentObject?.id === object.id,
-        })),
         {
           id: "agents",
           label: "Agentes",
@@ -432,12 +417,43 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
           hidden: membership.role === "viewer",
         },
         {
+          id: "queue",
+          label: "Cola",
+          href: `/workspaces/${snapshot.workspace.subdomain}?tab=queue`,
+          badge: queueItems.length,
+          meta: "Tareas que requieren accion",
+          active: selectedTab === "queue",
+        },
+        {
+          id: "documents",
+          label: "Documentos",
+          href: `/workspaces/${snapshot.workspace.subdomain}?tab=data&object=${snapshot.objects.find((object) => object.name === "Documents")?.id ?? ""}`,
+          meta: "Biblioteca y seguimiento documental",
+          hidden: !snapshot.objects.some((object) => object.name === "Documents"),
+          active:
+            selectedTab === "data" &&
+            currentObject?.id ===
+              (snapshot.objects.find((object) => object.name === "Documents")?.id ?? ""),
+        },
+        {
           id: "team-chat",
           label: "Equipo",
           href: `/workspaces/${snapshot.workspace.subdomain}?tab=team-chat`,
           meta: `${teamChatChannels.length} canales`,
           active: selectedTab === "team-chat",
         },
+        ...snapshot.objects.map((object) => ({
+          id: `object-${object.id}`,
+          label: object.name,
+          href: `/workspaces/${snapshot.workspace.subdomain}?tab=data&object=${object.id}`,
+          meta: object.description ?? "Vista operativa",
+          active: selectedTab === "data" && currentObject?.id === object.id,
+          hidden:
+            object.name === "Documents" ||
+            object.name === "Companies" ||
+            object.name === "Leads" ||
+            object.name === "Receivables",
+        })),
       ]}
       contextRail={
         selectedTab === "queue" || selectedTab === "team-chat"

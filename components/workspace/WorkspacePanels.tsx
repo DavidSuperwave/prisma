@@ -4,15 +4,19 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   AlertTriangle,
+  ArrowUp,
   ArrowRight,
   Bot,
   Building2,
   CircleDot,
   FileStack,
   Filter,
+  Globe,
   Layers3,
   LoaderCircle,
   MessageSquare,
+  Mic,
+  Plus,
   Search,
   ShieldCheck,
   Sparkles,
@@ -47,7 +51,11 @@ type OverviewProps = {
     title: string;
     subtitle: string;
     status: string;
+    objectId: string;
   }>;
+  greetingName?: string;
+  chatHref: string;
+  recordBaseHref?: string;
   activity: PrismaWorkspaceActivity[];
   suggestions: string[];
   agents: Array<{
@@ -295,7 +303,41 @@ function currentTimeLabel() {
   }).format(new Date());
 }
 
-export function OverviewPanel({ dashboardCards, metrics, queueItems, activity, suggestions, agents }: OverviewProps) {
+function resolveGreetingPrefix() {
+  const hour = new Date().getHours();
+  if (hour < 12) return "Buenos dias";
+  if (hour < 19) return "Buenas tardes";
+  return "Buenas noches";
+}
+
+function buildRevealStyle(isVisible: boolean, delayMs = 0): React.CSSProperties {
+  return {
+    opacity: isVisible ? 1 : 0,
+    transform: isVisible ? "translateX(0px)" : "translateX(-22px)",
+    transition: `opacity 420ms ease ${delayMs}ms, transform 420ms ease ${delayMs}ms`,
+  };
+}
+
+export function OverviewPanel({
+  dashboardCards,
+  metrics,
+  queueItems,
+  greetingName,
+  chatHref,
+  recordBaseHref,
+  activity,
+  suggestions,
+  agents,
+}: OverviewProps) {
+  const router = useRouter();
+  const [isVisible, setIsVisible] = useState(false);
+  const [chatDraft, setChatDraft] = useState("");
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setIsVisible(true), 40);
+    return () => window.clearTimeout(timer);
+  }, []);
+
   const stats = [
     { icon: Layers3, ...metrics[0] },
     { icon: Building2, ...metrics[1] },
@@ -303,171 +345,299 @@ export function OverviewPanel({ dashboardCards, metrics, queueItems, activity, s
     { icon: ShieldCheck, ...metrics[3] },
   ].filter((item) => item.label && item.value);
   const cards = dashboardCards?.length ? [...dashboardCards].sort((left, right) => left.config.position as number - (right.config.position as number)) : [];
+  const activeAgentsMetric =
+    stats.find((item) => item.label.toLowerCase().includes("agentes"))?.value ??
+    String(agents.filter((agent) => agent.status === "active").length);
+  const statusCards = queueItems.slice(0, 2).map((item) => ({
+    id: item.id,
+    title: item.title,
+    subtitle: item.subtitle,
+    tone: item.status.toLowerCase(),
+    label: formatStatusLabel(item.status),
+  }));
+  const latestActivity = activity[0];
+  if (latestActivity) {
+    statusCards.push({
+      id: latestActivity.id,
+      title: formatActivityLabel(latestActivity.action),
+      subtitle: formatActivityDetails(latestActivity.details),
+      tone: "active",
+      label: "Reciente",
+    });
+  }
+  if (statusCards.length === 0) {
+    statusCards.push({
+      id: "overview-empty",
+      title: "Operacion al dia",
+      subtitle: "No hay tareas urgentes en este momento.",
+      tone: "active",
+      label: "Estable",
+    });
+  }
+
+  function handleStartChat(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const prompt = chatDraft.trim();
+    if (prompt.length > 0) {
+      router.push(`${chatHref}&prompt=${encodeURIComponent(prompt)}`);
+      return;
+    }
+    router.push(chatHref);
+  }
+
+  function renderHomeHero() {
+    return (
+      <section style={{ ...homeHeroCardStyle, ...buildRevealStyle(isVisible, 0) }}>
+        <div style={homeHeroHeadingStyle}>
+          <p style={homeHeroLeadStyle}>{resolveGreetingPrefix()}, {greetingName ?? "equipo"}.</p>
+          <h2 style={homeHeroTitleStyle}>Tengo el dia en movimiento.</h2>
+          <p style={homeHeroMetaStyle}>
+            {queueItems.length} pendientes · {activity.length} actualizaciones · {activeAgentsMetric} agentes activos · actualizado {currentTimeLabel()}
+          </p>
+        </div>
+        <form onSubmit={handleStartChat} style={homeChatComposerStyle}>
+          <div style={homeChatTopRowStyle}>
+            <input
+              value={chatDraft}
+              onChange={(event) => setChatDraft(event.target.value)}
+              placeholder="Ask anything. O dime que quieres resolver hoy."
+              style={homeChatInputStyle}
+              aria-label="Escribe para abrir el chat"
+            />
+            <button type="submit" style={homeChatButtonStyle} aria-label="Abrir chat">
+              <ArrowUp size={14} />
+            </button>
+          </div>
+          <div style={homeChatBottomRowStyle}>
+            <div style={homeChatToolsLeftStyle}>
+              <button type="button" style={homeToolButtonIconStyle} aria-label="Agregar">
+                <Plus size={14} />
+              </button>
+              <button type="button" style={homeToolButtonIconStyle} aria-label="Web">
+                <Globe size={14} />
+              </button>
+              <button type="button" style={homeToolButtonStyle}>
+                Tools
+              </button>
+            </div>
+            <button type="button" style={homeToolButtonIconStyle} aria-label="Microfono">
+              <Mic size={14} />
+            </button>
+          </div>
+        </form>
+        <div style={homeStatusStripStyle}>
+          {statusCards.map((card) => (
+            <article key={card.id} style={homeStatusCardStyle}>
+              <div>
+                <p style={homeStatusLabelStyle}>{card.label}</p>
+                <p style={homeStatusTitleStyle}>{card.title}</p>
+                <p style={homeStatusMetaStyle}>{card.subtitle}</p>
+              </div>
+              <StatusPill tone={card.tone}>{card.label}</StatusPill>
+            </article>
+          ))}
+        </div>
+      </section>
+    );
+  }
+
+  function renderQueueRow(item: OverviewProps["queueItems"][number], keyPrefix: string) {
+    const rowContent = (
+      <>
+        <div>
+          <p style={queueTitleStyle}>{item.title}</p>
+          <p style={queueSubtitleStyle}>{item.subtitle}</p>
+        </div>
+        <div style={queueRightStyle}>
+          <StatusPill tone={item.status.toLowerCase()}>{formatStatusLabel(item.status)}</StatusPill>
+          <ArrowRight size={16} color="var(--workspace-muted)" />
+        </div>
+      </>
+    );
+
+    if (!recordBaseHref) {
+      return (
+        <div key={`${keyPrefix}-${item.id}`} style={queueItemStyle}>
+          {rowContent}
+        </div>
+      );
+    }
+
+    return (
+      <a
+        key={`${keyPrefix}-${item.id}`}
+        href={`${recordBaseHref}&object=${item.objectId}&record=${item.id}`}
+        style={queueItemLinkStyle}
+      >
+        {rowContent}
+      </a>
+    );
+  }
 
   if (cards.length > 0) {
     return (
       <div style={stackStyle}>
-        <Panel eyebrow="Home" title="Resumen operativo" description="Panel compuesto desde bloques del workspace.">
-          <div style={dashboardGridStyle}>
-            {cards.map((card) => {
-              if (card.cardType === "metric") {
-                const metric = stats.find((entry) => entry.label === String(card.config.metricKey ?? ""));
-                const Icon = metric?.icon ?? Layers3;
-                return (
-                  <article
-                    key={card.id}
-                    style={{
-                      ...metricCardStyle,
-                      gridColumn: card.gridWidth > 1 ? "span 2" : "span 1",
-                    }}
-                  >
-                    <div style={metricIconWrapStyle}>
-                      <Icon size={18} />
-                    </div>
-                    <p style={metricLabelStyle}>{card.title}</p>
-                    <p style={metricValueStyle}>{metric?.value ?? String(card.config.value ?? "—")}</p>
-                    <p style={metricHintStyle}>{card.subtitle ?? metric?.caption ?? ""}</p>
-                  </article>
-                );
-              }
+        {renderHomeHero()}
 
-              if (card.cardType === "queue") {
-                return (
-                  <div key={card.id} style={{ ...panelStyle, gridColumn: card.gridWidth > 1 ? "span 2" : "span 1" }}>
-                    <div style={panelHeaderStyle}>
-                      <div>
-                        <p style={eyebrowStyle}>Queue</p>
-                        <h2 style={panelTitleStyle}>{card.title}</h2>
-                        {card.subtitle ? <p style={panelDescriptionStyle}>{card.subtitle}</p> : null}
+        <div style={buildRevealStyle(isVisible, 130)}>
+          <Panel eyebrow="Home" title="Resumen operativo" description="Panel compuesto desde bloques del workspace.">
+            <div style={dashboardGridStyle}>
+              {cards.map((card) => {
+                if (card.cardType === "metric") {
+                  const metric = stats.find((entry) => entry.label === String(card.config.metricKey ?? ""));
+                  const Icon = metric?.icon ?? Layers3;
+                  return (
+                    <article
+                      key={card.id}
+                      style={{
+                        ...metricCardStyle,
+                        gridColumn: card.gridWidth > 1 ? "span 2" : "span 1",
+                      }}
+                    >
+                      <div style={metricIconWrapStyle}>
+                        <Icon size={18} />
                       </div>
-                    </div>
-                    <div style={queueListStyle}>
-                      {queueItems.slice(0, Number(card.config.limit ?? 4)).map((item) => (
-                        <div key={item.id} style={queueItemStyle}>
-                          <div>
-                            <p style={queueTitleStyle}>{item.title}</p>
-                            <p style={queueSubtitleStyle}>{item.subtitle}</p>
-                          </div>
-                          <StatusPill tone={item.status.toLowerCase()}>{formatStatusLabel(item.status)}</StatusPill>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                );
-              }
+                      <p style={metricLabelStyle}>{card.title}</p>
+                      <p style={metricValueStyle}>{metric?.value ?? String(card.config.value ?? "—")}</p>
+                      <p style={metricHintStyle}>{card.subtitle ?? metric?.caption ?? ""}</p>
+                    </article>
+                  );
+                }
 
-              if (card.cardType === "activity") {
-                return (
-                  <div key={card.id} style={{ ...panelStyle, gridColumn: card.gridWidth > 1 ? "span 2" : "span 1" }}>
-                    <div style={panelHeaderStyle}>
-                      <div>
-                        <p style={eyebrowStyle}>Actividad</p>
-                        <h2 style={panelTitleStyle}>{card.title}</h2>
-                        {card.subtitle ? <p style={panelDescriptionStyle}>{card.subtitle}</p> : null}
-                      </div>
-                    </div>
-                    <div style={activityListStyle}>
-                      {activity.slice(0, Number(card.config.limit ?? 6)).map((entry) => (
-                        <div key={entry.id} style={agentActivityRowStyle}>
-                          <p style={activityActionStyle}>{formatActivityLabel(entry.action)}</p>
-                          <p style={activityDetailStyle}>{formatActivityDetails(entry.details)}</p>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                );
-              }
-
-              if (card.cardType === "status") {
-                const activeAgents = agents.filter((agent) => agent.status === "active").length;
-                return (
-                  <div key={card.id} style={{ ...panelStyle, gridColumn: card.gridWidth > 1 ? "span 2" : "span 1" }}>
-                    <div style={panelHeaderStyle}>
-                      <div>
-                        <p style={eyebrowStyle}>Estado</p>
-                        <h2 style={panelTitleStyle}>{card.title}</h2>
-                        {card.subtitle ? <p style={panelDescriptionStyle}>{card.subtitle}</p> : null}
-                      </div>
-                    </div>
-                    <div style={detailListStyle}>
-                      <div style={queueItemStyle}>
+                if (card.cardType === "queue") {
+                  return (
+                    <div key={card.id} style={{ ...panelStyle, gridColumn: card.gridWidth > 1 ? "span 2" : "span 1" }}>
+                      <div style={panelHeaderStyle}>
                         <div>
-                          <p style={queueTitleStyle}>Agentes activos</p>
-                          <p style={queueSubtitleStyle}>{activeAgents} disponibles</p>
+                          <p style={eyebrowStyle}>Queue</p>
+                          <h2 style={panelTitleStyle}>{card.title}</h2>
+                          {card.subtitle ? <p style={panelDescriptionStyle}>{card.subtitle}</p> : null}
                         </div>
-                        <StatusPill tone="active">{activeAgents > 0 ? "Estable" : "Sin agentes"}</StatusPill>
                       </div>
-                      <div style={queueItemStyle}>
+                      <div style={queueListStyle}>
+                        {queueItems.slice(0, Number(card.config.limit ?? 4)).map((item) => renderQueueRow(item, card.id))}
+                      </div>
+                    </div>
+                  );
+                }
+
+                if (card.cardType === "activity") {
+                  return (
+                    <div key={card.id} style={{ ...panelStyle, gridColumn: card.gridWidth > 1 ? "span 2" : "span 1" }}>
+                      <div style={panelHeaderStyle}>
                         <div>
-                          <p style={queueTitleStyle}>Seguimientos</p>
-                          <p style={queueSubtitleStyle}>{queueItems.length} items en cola</p>
+                          <p style={eyebrowStyle}>Actividad</p>
+                          <h2 style={panelTitleStyle}>{card.title}</h2>
+                          {card.subtitle ? <p style={panelDescriptionStyle}>{card.subtitle}</p> : null}
                         </div>
-                        <StatusPill tone={queueItems.length > 0 ? "pending" : "active"}>{queueItems.length > 0 ? "Atencion" : "Al dia"}</StatusPill>
                       </div>
-                    </div>
-                  </div>
-                );
-              }
-
-              if (card.cardType === "table") {
-                const rows = (card.config.rows as Array<{ title: string; value: string; meta?: string }> | undefined) ?? [];
-                return (
-                  <div key={card.id} style={{ ...panelStyle, gridColumn: card.gridWidth > 1 ? "span 2" : "span 1" }}>
-                    <div style={panelHeaderStyle}>
-                      <div>
-                        <p style={eyebrowStyle}>Vista</p>
-                        <h2 style={panelTitleStyle}>{card.title}</h2>
-                        {card.subtitle ? <p style={panelDescriptionStyle}>{card.subtitle}</p> : null}
-                      </div>
-                    </div>
-                    <div style={detailListStyle}>
-                      {rows.map((row) => (
-                        <div key={`${card.id}-${row.title}`} style={queueItemStyle}>
-                          <div>
-                            <p style={queueTitleStyle}>{row.title}</p>
-                            {row.meta ? <p style={queueSubtitleStyle}>{row.meta}</p> : null}
+                      <div style={activityListStyle}>
+                        {activity.slice(0, Number(card.config.limit ?? 6)).map((entry) => (
+                          <div key={entry.id} style={agentActivityRowStyle}>
+                            <p style={activityActionStyle}>{formatActivityLabel(entry.action)}</p>
+                            <p style={activityDetailStyle}>{formatActivityDetails(entry.details)}</p>
                           </div>
-                          <strong style={recordFieldValueStyle}>{row.value}</strong>
-                        </div>
-                      ))}
+                        ))}
+                      </div>
                     </div>
-                  </div>
-                );
-              }
+                  );
+                }
 
-              return null;
-            })}
-          </div>
-        </Panel>
+                if (card.cardType === "status") {
+                  const activeAgents = agents.filter((agent) => agent.status === "active").length;
+                  return (
+                    <div key={card.id} style={{ ...panelStyle, gridColumn: card.gridWidth > 1 ? "span 2" : "span 1" }}>
+                      <div style={panelHeaderStyle}>
+                        <div>
+                          <p style={eyebrowStyle}>Estado</p>
+                          <h2 style={panelTitleStyle}>{card.title}</h2>
+                          {card.subtitle ? <p style={panelDescriptionStyle}>{card.subtitle}</p> : null}
+                        </div>
+                      </div>
+                      <div style={detailListStyle}>
+                        <div style={queueItemStyle}>
+                          <div>
+                            <p style={queueTitleStyle}>Agentes activos</p>
+                            <p style={queueSubtitleStyle}>{activeAgents} disponibles</p>
+                          </div>
+                          <StatusPill tone="active">{activeAgents > 0 ? "Estable" : "Sin agentes"}</StatusPill>
+                        </div>
+                        <div style={queueItemStyle}>
+                          <div>
+                            <p style={queueTitleStyle}>Seguimientos</p>
+                            <p style={queueSubtitleStyle}>{queueItems.length} items en cola</p>
+                          </div>
+                          <StatusPill tone={queueItems.length > 0 ? "pending" : "active"}>{queueItems.length > 0 ? "Atencion" : "Al dia"}</StatusPill>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                }
+
+                if (card.cardType === "table") {
+                  const rows = (card.config.rows as Array<{ title: string; value: string; meta?: string }> | undefined) ?? [];
+                  return (
+                    <div key={card.id} style={{ ...panelStyle, gridColumn: card.gridWidth > 1 ? "span 2" : "span 1" }}>
+                      <div style={panelHeaderStyle}>
+                        <div>
+                          <p style={eyebrowStyle}>Vista</p>
+                          <h2 style={panelTitleStyle}>{card.title}</h2>
+                          {card.subtitle ? <p style={panelDescriptionStyle}>{card.subtitle}</p> : null}
+                        </div>
+                      </div>
+                      <div style={detailListStyle}>
+                        {rows.map((row) => (
+                          <div key={`${card.id}-${row.title}`} style={queueItemStyle}>
+                            <div>
+                              <p style={queueTitleStyle}>{row.title}</p>
+                              {row.meta ? <p style={queueSubtitleStyle}>{row.meta}</p> : null}
+                            </div>
+                            <strong style={recordFieldValueStyle}>{row.value}</strong>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                }
+
+                return null;
+              })}
+            </div>
+          </Panel>
+        </div>
       </div>
     );
   }
 
   return (
     <div style={stackStyle}>
-      <Panel
-        eyebrow="Home"
-        title="Resumen operativo"
-        description="Lo importante del dia en un solo lugar."
-      >
-        <div style={metricGridStyle}>
-          {stats.map((stat) => {
-            const Icon = stat.icon;
-            return (
-              <article key={stat.label} style={metricCardStyle}>
-                <div style={metricIconWrapStyle}>
-                  <Icon size={18} />
-                </div>
-                <p style={metricLabelStyle}>{stat.label}</p>
-                <p style={metricValueStyle}>{stat.value}</p>
-                <p style={metricHintStyle}>{stat.caption}</p>
-              </article>
-            );
-          })}
-        </div>
-      </Panel>
+      {renderHomeHero()}
 
-      <div style={overviewGridStyle}>
+      <div style={buildRevealStyle(isVisible, 130)}>
+        <Panel
+          eyebrow="Home"
+          title="Resumen operativo"
+          description="Lo importante del dia en un solo lugar."
+        >
+          <div style={metricGridStyle}>
+            {stats.map((stat) => {
+              const Icon = stat.icon;
+              return (
+                <article key={stat.label} style={metricCardStyle}>
+                  <div style={metricIconWrapStyle}>
+                    <Icon size={18} />
+                  </div>
+                  <p style={metricLabelStyle}>{stat.label}</p>
+                  <p style={metricValueStyle}>{stat.value}</p>
+                  <p style={metricHintStyle}>{stat.caption}</p>
+                </article>
+              );
+            })}
+          </div>
+        </Panel>
+      </div>
+
+      <div style={{ ...overviewGridStyle, ...buildRevealStyle(isVisible, 210) }}>
         <Panel
           eyebrow="Queue"
           title="Prioridades que requieren intervención"
@@ -481,18 +651,7 @@ export function OverviewPanel({ dashboardCards, metrics, queueItems, activity, s
             />
           ) : (
             <div style={queueListStyle}>
-              {queueItems.map((item) => (
-                <div key={item.id} style={queueItemStyle}>
-                  <div>
-                    <p style={queueTitleStyle}>{item.title}</p>
-                    <p style={queueSubtitleStyle}>{item.subtitle}</p>
-                  </div>
-                  <div style={queueRightStyle}>
-                    <StatusPill tone={item.status.toLowerCase()}>{item.status}</StatusPill>
-                    <ArrowRight size={16} color="var(--workspace-muted)" />
-                  </div>
-                </div>
-              ))}
+              {queueItems.map((item) => renderQueueRow(item, "overview"))}
             </div>
           )}
         </Panel>
@@ -529,7 +688,7 @@ export function OverviewPanel({ dashboardCards, metrics, queueItems, activity, s
         </Panel>
       </div>
 
-      <div style={overviewGridStyle}>
+      <div style={{ ...overviewGridStyle, ...buildRevealStyle(isVisible, 290) }}>
         <Panel
         eyebrow="Copilot"
           title="Siguientes pasos sugeridos"
@@ -3853,13 +4012,13 @@ const stackStyle: React.CSSProperties = {
 };
 
 const panelStyle: React.CSSProperties = {
-  border: "1px solid var(--workspace-border)",
-  borderRadius: 26,
-  background: "var(--workspace-panel)",
-  padding: 24,
-  boxShadow: "var(--workspace-shadow)",
+  border: "1px solid rgba(15, 23, 42, 0.08)",
+  borderRadius: 24,
+  background: "rgba(255, 255, 255, 0.96)",
+  padding: 22,
+  boxShadow: "0 10px 26px rgba(15, 23, 42, 0.06)",
   display: "grid",
-  gap: 20,
+  gap: 18,
 };
 
 const panelHeaderStyle: React.CSSProperties = {
@@ -4133,9 +4292,9 @@ const teamChatComposerBoxStyle: React.CSSProperties = {
 };
 
 const metricCardStyle: React.CSSProperties = {
-  border: "1px solid var(--workspace-border)",
-  borderRadius: 22,
-  background: "var(--workspace-panel-soft)",
+  border: "1px solid rgba(15, 23, 42, 0.08)",
+  borderRadius: 20,
+  background: "rgba(255, 255, 255, 0.98)",
   padding: 18,
   display: "grid",
   gap: 10,
@@ -4168,6 +4327,158 @@ const metricValueStyle: React.CSSProperties = {
 
 const metricHintStyle: React.CSSProperties = {
   margin: 0,
+  fontSize: 13,
+  color: "var(--workspace-muted)",
+};
+
+const homeHeroCardStyle: React.CSSProperties = {
+  border: "1px solid rgba(15, 23, 42, 0.08)",
+  borderRadius: 28,
+  background: "rgba(255, 255, 255, 0.98)",
+  boxShadow: "0 14px 30px rgba(15, 23, 42, 0.05)",
+  padding: 26,
+  display: "grid",
+  gap: 16,
+};
+
+const homeHeroHeadingStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 8,
+};
+
+const homeHeroLeadStyle: React.CSSProperties = {
+  margin: 0,
+  color: "var(--workspace-muted)",
+  fontSize: 30,
+  fontWeight: 500,
+};
+
+const homeHeroTitleStyle: React.CSSProperties = {
+  margin: 0,
+  fontSize: 58,
+  lineHeight: 1,
+  fontFamily: "var(--font-display)",
+  color: "var(--workspace-text)",
+};
+
+const homeHeroMetaStyle: React.CSSProperties = {
+  margin: 0,
+  color: "var(--workspace-muted)",
+  fontSize: 15,
+};
+
+const homeChatComposerStyle: React.CSSProperties = {
+  border: "1px solid rgba(15, 23, 42, 0.08)",
+  borderRadius: 30,
+  background: "rgba(255, 255, 255, 0.98)",
+  padding: "10px 12px",
+  display: "grid",
+  gap: 8,
+};
+
+const homeChatTopRowStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "minmax(0, 1fr) auto",
+  alignItems: "center",
+  gap: 8,
+};
+
+const homeChatBottomRowStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 8,
+};
+
+const homeChatToolsLeftStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+};
+
+const homeChatInputStyle: React.CSSProperties = {
+  width: "100%",
+  borderRadius: 14,
+  border: "none",
+  outline: "none",
+  background: "transparent",
+  color: "var(--workspace-text)",
+  padding: "8px 10px",
+  font: "inherit",
+  fontSize: 18,
+};
+
+const homeChatButtonStyle: React.CSSProperties = {
+  width: 32,
+  height: 32,
+  borderRadius: "50%",
+  border: "none",
+  background: "#111827",
+  color: "#ffffff",
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  cursor: "pointer",
+};
+
+const homeToolButtonStyle: React.CSSProperties = {
+  borderRadius: 999,
+  border: "1px solid rgba(15, 23, 42, 0.12)",
+  background: "rgba(255, 255, 255, 0.98)",
+  color: "var(--workspace-text)",
+  font: "inherit",
+  fontSize: 12,
+  fontWeight: 600,
+  padding: "6px 12px",
+  cursor: "pointer",
+};
+
+const homeToolButtonIconStyle: React.CSSProperties = {
+  ...homeToolButtonStyle,
+  width: 30,
+  height: 30,
+  borderRadius: "50%",
+  padding: 0,
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+};
+
+const homeStatusStripStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
+  gap: 12,
+};
+
+const homeStatusCardStyle: React.CSSProperties = {
+  border: "1px solid rgba(15, 23, 42, 0.08)",
+  borderRadius: 18,
+  background: "rgba(255, 255, 255, 0.98)",
+  padding: 16,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 12,
+};
+
+const homeStatusLabelStyle: React.CSSProperties = {
+  margin: 0,
+  fontSize: 11,
+  letterSpacing: "0.1em",
+  textTransform: "uppercase",
+  color: "var(--workspace-muted)",
+  fontWeight: 700,
+};
+
+const homeStatusTitleStyle: React.CSSProperties = {
+  margin: "6px 0 0",
+  fontSize: 14,
+  color: "var(--workspace-text)",
+  fontWeight: 700,
+};
+
+const homeStatusMetaStyle: React.CSSProperties = {
+  margin: "4px 0 0",
   fontSize: 13,
   color: "var(--workspace-muted)",
 };
@@ -4275,6 +4586,13 @@ const queueItemStyle: React.CSSProperties = {
   alignItems: "center",
   justifyContent: "space-between",
   gap: 16,
+};
+
+const queueItemLinkStyle: React.CSSProperties = {
+  ...queueItemStyle,
+  textDecoration: "none",
+  color: "inherit",
+  background: "var(--workspace-panel-soft)",
 };
 
 const queueTitleStyle: React.CSSProperties = {

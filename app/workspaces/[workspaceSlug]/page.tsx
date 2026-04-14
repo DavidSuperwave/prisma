@@ -26,7 +26,7 @@ import { requireAuthenticatedUser } from "@/lib/auth";
 
 type PageProps = {
   params: Promise<{ workspaceSlug: string }>;
-  searchParams: Promise<{ object?: string; view?: string; record?: string; tab?: string; ask?: string }>;
+  searchParams: Promise<{ object?: string; view?: string; record?: string; tab?: string; ask?: string; prompt?: string }>;
 };
 
 function formatAgentSummary(agents: Array<{
@@ -128,6 +128,16 @@ function formatActivityDetail(details: Record<string, unknown>) {
     .map(([key, value]) => `${key.replace(/_/g, " ")}: ${String(value)}`);
 
   return entries.join(" · ") || "Actividad registrada";
+}
+
+function buildGreetingName(email: string | null, fallback: string) {
+  const source = email?.split("@")[0] ?? fallback;
+  return source
+    .split(/[._\-\s]+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part.slice(0, 1).toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 export default async function WorkspaceDetailPage({ params, searchParams }: PageProps) {
@@ -243,7 +253,9 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
     snapshot.agents[0] ??
     null;
   const askPrompt =
-    query.ask === "record" && selectedRecord
+    typeof query.prompt === "string" && query.prompt.trim().length > 0
+      ? query.prompt.trim()
+      : query.ask === "record" && selectedRecord
       ? `Analiza el registro ${((typeof getRecordFieldValue(selectedRecord, "name") === "string" && String(getRecordFieldValue(selectedRecord, "name"))) || (typeof getRecordFieldValue(selectedRecord, "company_name") === "string" && String(getRecordFieldValue(selectedRecord, "company_name"))) || (typeof getRecordFieldValue(selectedRecord, "document_name") === "string" && String(getRecordFieldValue(selectedRecord, "document_name"))) || "seleccionado")} y dime que acciones humanas pendientes ves.`
       : query.ask === "dataset" && currentObject
         ? `Resume el dataset ${currentObject.name} y sugiere las siguientes acciones operativas.`
@@ -261,6 +273,9 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
       }))}
       metrics={metrics}
       queueItems={queueItems}
+      greetingName={buildGreetingName(user.email, snapshot.workspace.name)}
+      chatHref={`/workspaces/${snapshot.workspace.subdomain}?tab=chat`}
+      recordBaseHref={`/workspaces/${snapshot.workspace.subdomain}?tab=record`}
       activity={snapshot.activity}
       suggestions={[
         "Revisa los leads que siguen sin documentos antes del cierre del dia.",
@@ -499,6 +514,13 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
           active: selectedTab === "chat",
         },
         {
+          id: "inbox",
+          label: "Inbox",
+          href: `/workspaces/${snapshot.workspace.subdomain}?tab=inbox`,
+          meta: "Proximamente",
+          disabled: true,
+        },
+        {
           id: "agents",
           label: "Agentes",
           href: `/workspaces/${snapshot.workspace.subdomain}?tab=agents`,
@@ -508,7 +530,7 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
         },
         {
           id: "queue",
-          label: "Cola",
+          label: "Cola operativa",
           href: `/workspaces/${snapshot.workspace.subdomain}?tab=queue`,
           badge: queueItems.length,
           meta: "Tareas que requieren accion",
@@ -521,14 +543,6 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
           meta: "Biblioteca y seguimiento documental",
           hidden: !documentsObject,
           active: selectedTab === "data" && currentObject?.id === (documentsObject?.id ?? ""),
-        },
-        {
-          id: "import",
-          label: "Importar",
-          href: `/workspaces/${snapshot.workspace.subdomain}?tab=import`,
-          meta: "CSV / XLSX",
-          hidden: membership.role === "viewer",
-          active: selectedTab === "import",
         },
         {
           id: "fields",
@@ -560,33 +574,16 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
           meta: `${teamChatChannels.length} canales`,
           active: selectedTab === "team-chat",
         },
+        {
+          id: "import",
+          label: "Importar",
+          href: `/workspaces/${snapshot.workspace.subdomain}?tab=import`,
+          meta: "CSV / XLSX",
+          hidden: membership.role === "viewer",
+          active: selectedTab === "import",
+        },
         ...objectNavItems,
       ]}
-      contextRail={
-        selectedTab === "queue" || selectedTab === "team-chat"
-          ? null
-          : {
-              headline: selectedTab === "agents" ? "Agentes del espacio" : selectedTab === "record" ? "Contexto del registro" : "Contexto del espacio",
-              summary:
-                selectedTab === "agents"
-                  ? `${snapshot.agents.filter((agent) => agent.status === "active").length} agentes activos y ${snapshot.workspace.agentLimit} permitidos en este plan.`
-                  : selectedTab === "record"
-                    ? "Estado, responsables y trazabilidad del registro actual."
-                    : "Resumen rapido del estado operativo del workspace.",
-              bullets:
-                selectedTab === "record"
-                  ? [
-                      { label: "Estado", value: humanizeStatus(String(getRecordFieldValue(selectedRecord ?? currentRecords[0] ?? snapshot.records[0], "status") ?? "active")) },
-                      { label: "Responsable", value: String(getRecordFieldValue(selectedRecord ?? currentRecords[0] ?? snapshot.records[0], "owner") ?? "Sin asignar") },
-                      { label: "Actividad", value: `${snapshot.activity.length} acciones recientes` },
-                    ]
-                  : [
-                      { label: "Plan", value: `${snapshot.workspace.planTier} · ${snapshot.agents.length}/${snapshot.workspace.agentLimit} agentes` },
-                      { label: "Datos", value: `${snapshot.objects.length} tablas y ${snapshot.records.length} registros` },
-                      { label: "Actividad", value: `${snapshot.activity.length} acciones recientes` },
-                    ],
-            }
-      }
     >
       {content}
     </WorkspaceShell>

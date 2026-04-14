@@ -1,5 +1,16 @@
 import Link from "next/link";
-import { ChevronDown, ShieldCheck } from "lucide-react";
+import {
+  Activity,
+  Bot,
+  ChevronDown,
+  Database,
+  FolderOpen,
+  Home,
+  Inbox,
+  MessageSquare,
+  Upload,
+  Users,
+} from "lucide-react";
 
 type NavItem = {
   id: string;
@@ -9,15 +20,7 @@ type NavItem = {
   active?: boolean;
   badge?: number;
   hidden?: boolean;
-};
-
-type ContextRail = {
-  headline: string;
-  summary?: string;
-  bullets: Array<{
-    label: string;
-    value: string;
-  }>;
+  disabled?: boolean;
 };
 
 type Props = {
@@ -26,7 +29,6 @@ type Props = {
   workspaceLogoUrl?: string | null;
   accentColor?: string | null;
   navItems: NavItem[];
-  contextRail?: ContextRail | null;
   currentRole?: string | null;
   currentUserEmail?: string | null;
   children: React.ReactNode;
@@ -59,11 +61,24 @@ function formatRole(role?: string | null) {
 }
 
 function splitNavItems(items: NavItem[]): NavItemGroup {
-  const primaryIds = new Set(["home", "chat", "agents", "queue", "documents", "import", "fields", "channels", "activity", "team-chat"]);
+  const primaryIds = new Set(["home", "chat", "inbox", "agents", "queue", "documents", "fields", "channels", "activity", "team-chat"]);
   const dataItems = items.filter((item) => item.id.startsWith("object-"));
   const primary = items.filter((item) => primaryIds.has(item.id) && !item.id.startsWith("object-"));
   const trailing = items.filter((item) => !primaryIds.has(item.id) && !item.id.startsWith("object-"));
   return { primary, dataItems, trailing };
+}
+
+function getNavIcon(itemId: string) {
+  if (itemId.startsWith("object-")) return Database;
+  if (itemId === "home") return Home;
+  if (itemId === "chat") return MessageSquare;
+  if (itemId === "inbox") return Inbox;
+  if (itemId === "agents") return Bot;
+  if (itemId === "queue") return Activity;
+  if (itemId === "documents") return FolderOpen;
+  if (itemId === "team-chat") return Users;
+  if (itemId === "import") return Upload;
+  return Database;
 }
 
 export function WorkspaceShell({
@@ -72,7 +87,6 @@ export function WorkspaceShell({
   workspaceLogoUrl,
   accentColor,
   navItems,
-  contextRail,
   currentRole,
   currentUserEmail,
   children,
@@ -83,100 +97,107 @@ export function WorkspaceShell({
   const topLevelPrimary = primary.slice(0, 6);
   const userInitial = (currentUserEmail ?? workspaceName).slice(0, 1).toUpperCase();
 
+  function renderNavItem(item: NavItem, nested = false) {
+    const Icon = getNavIcon(item.id);
+    const className = `workspace-nav__item ${nested ? "workspace-nav__item--nested" : ""} ${item.active ? "workspace-nav__item--active" : ""} ${item.disabled ? "workspace-nav__item--disabled" : ""}`.trim();
+    const content = (
+      <>
+        <span className="workspace-nav__icon" aria-hidden="true">
+          <Icon size={14} />
+        </span>
+        <div className="workspace-nav__item-text">
+          <span className="workspace-nav__title">{item.label}</span>
+          {item.meta ? (
+            <span className="workspace-nav__meta" title={item.meta}>
+              {item.meta}
+            </span>
+          ) : null}
+        </div>
+        {typeof item.badge === "number" && item.badge > 0 ? (
+          <span className="workspace-pill workspace-pill--accent workspace-pill--nav">{item.badge}</span>
+        ) : null}
+      </>
+    );
+
+    if (item.disabled) {
+      return (
+        <div key={item.id} className={className} aria-disabled="true">
+          {content}
+        </div>
+      );
+    }
+
+    return (
+      <Link key={item.id} href={item.href} className={`workspace-link ${className}`}>
+        {content}
+      </Link>
+    );
+  }
+
   return (
     <div className="workspace-app">
       <div className="workspace-shell">
         <aside className="workspace-sidebar">
-          <div className="workspace-brand">
-            <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <Link
+            href={`/workspaces/${workspaceSlug}?tab=home`}
+            className={`workspace-link workspace-brand workspace-brand-link ${workspaceLogoUrl ? "workspace-brand--has-logo" : ""}`}
+          >
+            <div className="workspace-brand__row">
               <div
+                className="workspace-brand__mark"
                 style={{
-                  width: 42,
-                  height: 42,
-                  borderRadius: 16,
                   background: accentColor ?? "var(--workspace-accent)",
                   color: "#ffffff",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  fontWeight: 700,
-                  boxShadow: "0 10px 24px rgba(51, 92, 255, 0.22)",
-                  overflow: "hidden",
                 }}
               >
                 {workspaceLogoUrl ? (
                   // eslint-disable-next-line @next/next/no-img-element
                   <img
                     src={workspaceLogoUrl}
-                    alt={`${workspaceName} logo`}
-                    style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                    alt=""
+                    className="workspace-brand__mark-img"
                   />
                 ) : (
-                  workspaceName.slice(0, 1)
+                  <span className="workspace-brand__initial">{workspaceName.slice(0, 1)}</span>
                 )}
               </div>
-              <div>
-                <h1 className="workspace-brand__title">{workspaceName}</h1>
-                <p className="workspace-brand__subtitle">Espacio Prisma</p>
+              <div className="workspace-brand__text">
+                {workspaceLogoUrl ? (
+                  <>
+                    <span className="workspace-sr-only">{workspaceName}</span>
+                    <span className="workspace-brand__subtitle" aria-hidden="true">
+                      Espacio Prisma
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span className="workspace-brand__name">{workspaceName}</span>
+                    <span className="workspace-brand__subtitle">Espacio Prisma</span>
+                  </>
+                )}
               </div>
             </div>
-          </div>
+          </Link>
 
-          <nav className="workspace-nav">
+          <nav className="workspace-nav workspace-nav--rail">
             <div className="workspace-nav__group">
               <p className="workspace-nav__label">Navegación</p>
-              {topLevelPrimary.map((item) => (
-                <Link
-                  key={item.id}
-                  href={item.href}
-                  className={`workspace-link workspace-nav__item ${item.active ? "workspace-nav__item--active" : ""}`}
-                >
-                  <div>
-                    <p className="workspace-nav__title">{item.label}</p>
-                    {item.meta ? <p className="workspace-nav__meta">{item.meta}</p> : null}
-                  </div>
-                  {typeof item.badge === "number" && item.badge > 0 ? (
-                    <span className="workspace-pill workspace-pill--accent">{item.badge}</span>
-                  ) : null}
-                </Link>
-              ))}
+              {topLevelPrimary.map((item) => renderNavItem(item))}
 
               <details className="workspace-nav__details" open={hasActiveDataItem}>
                 <summary className={`workspace-nav__item workspace-nav__toggle ${hasActiveDataItem ? "workspace-nav__item--active" : ""}`}>
-                  <div>
-                    <p className="workspace-nav__title">Datos</p>
-                    <p className="workspace-nav__meta">{dataItems.length} objetos</p>
+                  <div className="workspace-nav__item-text">
+                    <span className="workspace-nav__title">Datos</span>
+                    <span className="workspace-nav__meta">{dataItems.length} objetos</span>
                   </div>
-                  <ChevronDown size={16} className="workspace-nav__toggle-icon" />
+                  <ChevronDown size={14} className="workspace-nav__toggle-icon" />
                 </summary>
                 <div className="workspace-nav__subgroup">
-                  {dataItems.map((item) => (
-                    <Link
-                      key={item.id}
-                      href={item.href}
-                      className={`workspace-link workspace-nav__item workspace-nav__item--nested ${item.active ? "workspace-nav__item--active" : ""}`}
-                    >
-                      <div>
-                        <p className="workspace-nav__title">{item.label}</p>
-                        {item.meta ? <p className="workspace-nav__meta">{item.meta}</p> : null}
-                      </div>
-                    </Link>
-                  ))}
+                  {dataItems.map((item) => renderNavItem(item, true))}
                 </div>
               </details>
 
-              {trailing.map((item) => (
-                <Link
-                  key={item.id}
-                  href={item.href}
-                  className={`workspace-link workspace-nav__item ${item.active ? "workspace-nav__item--active" : ""}`}
-                >
-                  <div>
-                    <p className="workspace-nav__title">{item.label}</p>
-                    {item.meta ? <p className="workspace-nav__meta">{item.meta}</p> : null}
-                  </div>
-                </Link>
-              ))}
+              {trailing.map((item) => renderNavItem(item))}
             </div>
           </nav>
 
@@ -206,45 +227,7 @@ export function WorkspaceShell({
           ) : null}
         </aside>
 
-        <main className="workspace-main">
-          <header className="workspace-header">
-            <div className="workspace-header__copy">
-              <h2 className="workspace-header__title">{workspaceName}</h2>
-            </div>
-
-            <div className="workspace-header__actions">
-              <div className="workspace-pill workspace-pill--neutral">
-                <ShieldCheck size={14} />
-                Supervisado por humanos
-              </div>
-            </div>
-          </header>
-
-          {children}
-        </main>
-
-        {contextRail ? (
-          <aside className="workspace-rail">
-            <div className="workspace-panel">
-              <div className="workspace-panel__header">
-                <div>
-                  <h3 className="workspace-panel__title">{contextRail.headline}</h3>
-                  {contextRail.summary ? <p className="workspace-panel__description">{contextRail.summary}</p> : null}
-                </div>
-              </div>
-              <div className="workspace-panel__content">
-                <div className="workspace-kv">
-                  {contextRail.bullets.map((bullet) => (
-                    <div key={`${bullet.label}-${bullet.value}`} className="workspace-kv__row">
-                      <span className="workspace-kv__label">{bullet.label}</span>
-                      <span className="workspace-kv__value">{bullet.value}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </aside>
-        ) : null}
+        <main className="workspace-main">{children}</main>
       </div>
     </div>
   );

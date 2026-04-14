@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   AlertTriangle,
@@ -70,13 +70,30 @@ type DataPanelProps = {
   fields: PrismaWorkspaceField[];
   views: PrismaWorkspaceView[];
   records: PrismaWorkspaceRecord[];
+  workspaceSlug: string;
+  currentRole: "admin" | "operator" | "viewer";
+  initialObjectId?: string;
+  initialViewId?: string;
   recordBaseHref?: string;
   askHref?: string;
+};
+
+type BoardColumn = {
+  key: string;
+  value: string | null;
+  label: string;
+  records: PrismaWorkspaceRecord[];
+};
+
+type BoardDropTarget = {
+  recordId: string;
+  toValue: string | null;
 };
 
 type AgentPanelProps = {
   workspaceId: string;
   workspaceSlug: string;
+  currentRole: "admin" | "operator" | "viewer";
   agentLimit: number;
   agentTemplates: Array<{
     id: string;
@@ -104,6 +121,12 @@ type AgentPanelProps = {
     memoryLabel: string;
     soulMd?: string | null;
     runtimeLabel?: string;
+    apiEndpoint?: string;
+    apiKey?: string;
+    containerName?: string;
+    lastHealthCheckAt?: string | null;
+    lastCronRunAt?: string | null;
+    channelConfig?: Record<string, unknown>;
   }>;
   activity: PrismaWorkspaceActivity[];
 };
@@ -1175,18 +1198,43 @@ export function ChatPanel({
   );
 }
 
-export function DataPanel({ objects, fields, views, records, recordBaseHref, askHref }: DataPanelProps) {
-  const [selectedObjectId, setSelectedObjectId] = useState<string>(objects[0]?.id ?? "");
-  const [selectedViewId, setSelectedViewId] = useState<string>("all");
+function BaseDataPanel({
+  objects,
+  fields,
+  views,
+  records,
+  workspaceSlug,
+  currentRole,
+  initialObjectId,
+  initialViewId,
+  recordBaseHref,
+  askHref,
+}: DataPanelProps) {
+  const [selectedObjectId, setSelectedObjectId] = useState<string>(initialObjectId ?? objects[0]?.id ?? "");
+  const [selectedViewId, setSelectedViewId] = useState<string>(initialViewId ?? "all");
+  const [viewMode, setViewMode] = useState<"table" | "board">("table");
   const [query, setQuery] = useState("");
+  const [localRecords, setLocalRecords] = useState<PrismaWorkspaceRecord[]>(records);
+  const [draggingRecordId, setDraggingRecordId] = useState<string | null>(null);
+  const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const [isCreatingRecord, setIsCreatingRecord] = useState(false);
+  const [recordDraft, setRecordDraft] = useState<Record<string, unknown>>({});
+  const [editingCell, setEditingCell] = useState<{ recordId: string; fieldKey: string } | null>(null);
+  const [editingValue, setEditingValue] = useState<unknown>("");
+  const [isSavingCell, setIsSavingCell] = useState(false);
+  const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
+  const [isDeletingRecord, setIsDeletingRecord] = useState(false);
+  const [tableError, setTableError] = useState("");
+  const [tableSuccess, setTableSuccess] = useState("");
 
+  const canWrite = currentRole === "admin" || currentRole === "operator";
   const object = objects.find((entry) => entry.id === selectedObjectId) ?? objects[0] ?? null;
   const objectFields = fields
     .filter((field) => field.objectId === object?.id)
     .sort((left, right) => left.sortOrder - right.sortOrder);
   const objectViews = views.filter((view) => view.objectId === object?.id);
   const currentView = selectedViewId === "all" ? null : objectViews.find((view) => view.id === selectedViewId) ?? null;
-  const scopedRecords = records.filter((record) => record.objectId === object?.id);
+  const scopedRecords = localRecords.filter((record) => record.objectId === object?.id);
   const visibleRecords = applyViewToRecords(scopedRecords, currentView).filter((record) =>
     query.trim()
       ? Object.values(record.data).some((value) =>
@@ -1196,6 +1244,437 @@ export function DataPanel({ objects, fields, views, records, recordBaseHref, ask
         )
       : true,
   );
+  const boardGroupField =
+    (currentView?.groupByFieldId
+      ? objectFields.find(
+          (field) =>
+            field.id === currentView.groupByFieldId &&
+            (field.type === "status" || field.type === "select"),
+        )
+      : null) ??
+    objectFields.find((field) => field.type === "status" || field.type === "select") ??
+    null;
+  const boardPrimaryField =
+    objectFields.find((field) => field.required && field.type === "text") ??
+    objectFields.find((field) => field.type === "text") ??
+    objectFields[0] ??
+    null;
+  const boardSecondaryFields = objectFields
+    .filter(
+      (field) =>
+        field.id !== boardPrimaryField?.id && field.id !== boardGroupField?.id,
+    )
+    .slice(0, 2);
+
+  function normalizeBoardValue(value: unknown) {
+    if (value === null || value === undefined || value === "") {
+      return null;
+    }
+    return String(value);
+  }
+
+  const boardColumns: BoardColumn[] = (() => {
+    if (!boardGroupField) {
+      return [];
+    }
+    const configuredOptions = parseSelectOptions(boardGroupField);
+    const valuesFromRecords = Array.from(
+      new Set(
+        visibleRecords
+          .map((record) =>
+            normalizeBoardValue(getRecordFieldValue(record, boardGroupField.key)),
+          )
+          .filter((value): value is string => Boolean(value)),
+      ),
+    );
+    const allValues = [...configuredOptions];
+    for (const value of valuesFromRecords) {
+      if (!allValues.includes(value)) {
+        allValues.push(value);
+      }
+    }
+    const baseColumns: BoardColumn[] = [
+      {
+        key: "board-empty",
+        value: null,
+        label: "Sin estado",
+        records: [],
+      },
+      ...allValues.map((value) => ({
+        key: `board-${value}`,
+        value,
+        label: formatStatusLabel(value),
+        records: [],
+      })),
+    ];
+    return baseColumns.map((column) => ({
+      ...column,
+      records: visibleRecords.filter(
+        (record) =>
+          normalizeBoardValue(getRecordFieldValue(record, boardGroupField.key)) ===
+          column.value,
+      ),
+    }));
+  })();
+
+  useEffect(() => {
+    setLocalRecords(records);
+  }, [records]);
+
+  useEffect(() => {
+    if (!object) {
+      return;
+    }
+    if (selectedObjectId) {
+      return;
+    }
+    setSelectedObjectId(object.id);
+  }, [object, selectedObjectId]);
+
+  useEffect(() => {
+    if (!initialObjectId || initialObjectId === selectedObjectId) {
+      return;
+    }
+    setSelectedObjectId(initialObjectId);
+    setSelectedViewId("all");
+    setEditingCell(null);
+    setTableError("");
+    setTableSuccess("");
+  }, [initialObjectId, selectedObjectId]);
+
+  useEffect(() => {
+    if (!initialViewId) {
+      if (selectedViewId !== "all") {
+        setSelectedViewId("all");
+      }
+      return;
+    }
+    if (initialViewId !== selectedViewId) {
+      setSelectedViewId(initialViewId);
+    }
+  }, [initialViewId, selectedViewId]);
+
+  useEffect(() => {
+    if (viewMode === "board" && !boardGroupField) {
+      setViewMode("table");
+    }
+  }, [viewMode, boardGroupField]);
+
+  function parseSelectOptions(field: PrismaWorkspaceField) {
+    const rawValues =
+      Array.isArray(field.options.values) ? field.options.values : Array.isArray(field.options.options) ? field.options.options : [];
+    return rawValues
+      .map((entry) => String(entry ?? "").trim())
+      .filter(Boolean);
+  }
+
+  function initialValueForField(field: PrismaWorkspaceField) {
+    if (field.defaultValue !== null && field.defaultValue !== undefined) {
+      if (field.type === "boolean") {
+        return field.defaultValue === "true";
+      }
+      return field.defaultValue;
+    }
+    if (field.type === "boolean") {
+      return false;
+    }
+    return "";
+  }
+
+  function normalizeFieldValue(field: PrismaWorkspaceField, value: unknown) {
+    if (field.type === "boolean") {
+      if (typeof value === "boolean") return value;
+      if (typeof value === "string") return value.toLowerCase() === "true";
+      return Boolean(value);
+    }
+
+    if (value === null || value === undefined) {
+      return field.required ? "" : null;
+    }
+
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (trimmed.length === 0) {
+        return field.required ? "" : null;
+      }
+      if (field.type === "number") {
+        const parsed = Number(trimmed);
+        return Number.isFinite(parsed) ? parsed : trimmed;
+      }
+      return trimmed;
+    }
+
+    if (field.type === "number" && typeof value === "number") {
+      return Number.isFinite(value) ? value : field.required ? "" : null;
+    }
+
+    return value;
+  }
+
+  function buildRecordDataFromDraft(draft: Record<string, unknown>) {
+    return objectFields.reduce<Record<string, unknown>>((accumulator, field) => {
+      accumulator[field.key] = normalizeFieldValue(field, draft[field.key]);
+      return accumulator;
+    }, {});
+  }
+
+  function isMissingRequiredValue(value: unknown) {
+    return value === null || value === undefined || value === "";
+  }
+
+  function resetDraftForCurrentObject() {
+    const nextDraft = objectFields.reduce<Record<string, unknown>>((accumulator, field) => {
+      accumulator[field.key] = initialValueForField(field);
+      return accumulator;
+    }, {});
+    setRecordDraft(nextDraft);
+  }
+
+  function openCreatePanel() {
+    if (!canWrite || !object) {
+      return;
+    }
+    resetDraftForCurrentObject();
+    setTableError("");
+    setTableSuccess("");
+    setIsCreateOpen(true);
+  }
+
+  function openCreatePanelForBoardColumn(targetValue: string | null) {
+    if (!canWrite || !object) {
+      return;
+    }
+    const nextDraft = objectFields.reduce<Record<string, unknown>>((accumulator, field) => {
+      accumulator[field.key] = initialValueForField(field);
+      return accumulator;
+    }, {});
+    if (boardGroupField) {
+      nextDraft[boardGroupField.key] = targetValue ?? "";
+    }
+    setRecordDraft(nextDraft);
+    setTableError("");
+    setTableSuccess("");
+    setIsCreateOpen(true);
+  }
+
+  function getBoardDropTarget(payload: string): BoardDropTarget | null {
+    try {
+      const parsed = JSON.parse(payload) as BoardDropTarget;
+      if (!parsed || typeof parsed.recordId !== "string") {
+        return null;
+      }
+      if (parsed.toValue !== null && parsed.toValue !== undefined && typeof parsed.toValue !== "string") {
+        return null;
+      }
+      return {
+        recordId: parsed.recordId,
+        toValue: parsed.toValue ?? null,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  async function moveRecordToBoardColumn(
+    record: PrismaWorkspaceRecord,
+    targetValue: string | null,
+  ) {
+    if (!canWrite || !boardGroupField) {
+      return;
+    }
+
+    const currentValue = normalizeBoardValue(getRecordFieldValue(record, boardGroupField.key));
+    if (currentValue === targetValue) {
+      return;
+    }
+
+    const nextData = {
+      ...record.data,
+      [boardGroupField.key]: targetValue ?? null,
+    };
+    const previousSnapshot = localRecords;
+
+    setTableError("");
+    setTableSuccess("");
+    setLocalRecords((current) =>
+      current.map((entry) =>
+        entry.id === record.id
+          ? {
+              ...entry,
+              data: nextData,
+            }
+          : entry,
+      ),
+    );
+    try {
+      const response = await fetch(`/api/workspaces/${workspaceSlug}/records/${record.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ data: nextData }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        record?: PrismaWorkspaceRecord;
+      };
+      if (!response.ok || !payload.record) {
+        throw new Error(payload.error ?? "No se pudo mover la tarjeta.");
+      }
+      setLocalRecords((current) =>
+        current.map((entry) => (entry.id === payload.record!.id ? payload.record! : entry)),
+      );
+      setTableSuccess("Estado actualizado.");
+    } catch (error) {
+      setLocalRecords(previousSnapshot);
+      setTableError(error instanceof Error ? error.message : "No se pudo mover la tarjeta.");
+    }
+  }
+
+  async function createRecord() {
+    if (!object || !canWrite || isCreatingRecord) {
+      return;
+    }
+
+    const data = buildRecordDataFromDraft(recordDraft);
+    const missingRequiredFields = objectFields.filter(
+      (field) => field.required && isMissingRequiredValue(data[field.key]),
+    );
+    if (missingRequiredFields.length > 0) {
+      setTableError(`Completa los campos obligatorios: ${missingRequiredFields.map((field) => field.name).join(", ")}.`);
+      return;
+    }
+
+    setIsCreatingRecord(true);
+    setTableError("");
+    try {
+      const response = await fetch(`/api/workspaces/${workspaceSlug}/records`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          objectId: object.id,
+          data,
+        }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        record?: PrismaWorkspaceRecord;
+      };
+
+      if (!response.ok || !payload.record) {
+        throw new Error(payload.error ?? "No se pudo crear el registro.");
+      }
+
+      setLocalRecords((current) => [payload.record!, ...current.filter((entry) => entry.id !== payload.record!.id)]);
+      setTableSuccess("Registro creado.");
+      setIsCreateOpen(false);
+      setRecordDraft({});
+    } catch (error) {
+      setTableError(error instanceof Error ? error.message : "No se pudo crear el registro.");
+    } finally {
+      setIsCreatingRecord(false);
+    }
+  }
+
+  function startInlineEdit(record: PrismaWorkspaceRecord, field: PrismaWorkspaceField) {
+    if (!canWrite) {
+      return;
+    }
+    const rawValue = getRecordFieldValue(record, field.key);
+    setEditingCell({ recordId: record.id, fieldKey: field.key });
+    if (field.type === "boolean") {
+      setEditingValue(Boolean(rawValue));
+      return;
+    }
+    setEditingValue(rawValue === null || rawValue === undefined ? "" : String(rawValue));
+  }
+
+  function cancelInlineEdit() {
+    setEditingCell(null);
+    setEditingValue("");
+  }
+
+  async function saveInlineEdit(record: PrismaWorkspaceRecord, field: PrismaWorkspaceField) {
+    if (!canWrite || isSavingCell) {
+      return;
+    }
+
+    const nextValue = normalizeFieldValue(field, editingValue);
+    const existingValue = record.data[field.key];
+    if (JSON.stringify(existingValue) === JSON.stringify(nextValue)) {
+      cancelInlineEdit();
+      return;
+    }
+
+    const nextData = { ...record.data, [field.key]: nextValue };
+    const previousSnapshot = localRecords;
+
+    setIsSavingCell(true);
+    setTableError("");
+    setLocalRecords((current) =>
+      current.map((entry) =>
+        entry.id === record.id
+          ? {
+              ...entry,
+              data: nextData,
+            }
+          : entry,
+      ),
+    );
+
+    try {
+      const response = await fetch(`/api/workspaces/${workspaceSlug}/records/${record.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ data: nextData }),
+      });
+
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        record?: PrismaWorkspaceRecord;
+      };
+
+      if (!response.ok || !payload.record) {
+        throw new Error(payload.error ?? "No se pudo actualizar el registro.");
+      }
+
+      setLocalRecords((current) =>
+        current.map((entry) => (entry.id === payload.record!.id ? payload.record! : entry)),
+      );
+      setTableSuccess("Registro actualizado.");
+    } catch (error) {
+      setLocalRecords(previousSnapshot);
+      setTableError(error instanceof Error ? error.message : "No se pudo actualizar el registro.");
+    } finally {
+      setIsSavingCell(false);
+      cancelInlineEdit();
+    }
+  }
+
+  async function deleteRecord(recordId: string) {
+    if (!canWrite || isDeletingRecord) {
+      return;
+    }
+    const previousSnapshot = localRecords;
+
+    setIsDeletingRecord(true);
+    setTableError("");
+    setLocalRecords((current) => current.filter((entry) => entry.id !== recordId));
+    try {
+      const response = await fetch(`/api/workspaces/${workspaceSlug}/records/${recordId}`, {
+        method: "DELETE",
+      });
+      const payload = (await response.json().catch(() => ({}))) as { error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "No se pudo eliminar el registro.");
+      }
+      setDeleteTargetId(null);
+      setTableSuccess("Registro eliminado.");
+    } catch (error) {
+      setLocalRecords(previousSnapshot);
+      setTableError(error instanceof Error ? error.message : "No se pudo eliminar el registro.");
+    } finally {
+      setIsDeletingRecord(false);
+    }
+  }
 
   const summary = object
     ? `${visibleRecords.length} registros visibles · ${objectFields.length} campos activos · ${objectViews.length} vistas guardadas`
@@ -1217,6 +1696,7 @@ export function DataPanel({ objects, fields, views, records, recordBaseHref, ask
                 onChange={(event) => {
                   setSelectedObjectId(event.target.value);
                   setSelectedViewId("all");
+                  setEditingCell(null);
                 }}
                 style={inputStyle}
               >
@@ -1239,6 +1719,40 @@ export function DataPanel({ objects, fields, views, records, recordBaseHref, ask
                 ))}
               </select>
             </label>
+
+            {canWrite ? (
+              <div style={{ display: "inline-flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <button type="button" style={primaryButtonStyle} onClick={openCreatePanel}>
+                  Nuevo registro
+                </button>
+                {currentRole === "admin" ? (
+                  <a href={`/workspaces/${workspaceSlug}?tab=fields&object=${selectedObjectId}`} style={metaActionLinkStyle}>
+                    ⚙ Gestionar campos
+                  </a>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+
+          <div style={viewModeToggleStyle}>
+            <button
+              type="button"
+              style={viewMode === "table" ? viewModeButtonActiveStyle : viewModeButtonStyle}
+              onClick={() => setViewMode("table")}
+            >
+              Tabla
+            </button>
+            <button
+              type="button"
+              style={{
+                ...(viewMode === "board" ? viewModeButtonActiveStyle : viewModeButtonStyle),
+                borderRight: "none",
+              }}
+              onClick={() => setViewMode("board")}
+              disabled={!boardGroupField}
+            >
+              Tablero
+            </button>
           </div>
 
           <label style={{ ...inputLabelStyle, minWidth: 280 }}>
@@ -1269,70 +1783,360 @@ export function DataPanel({ objects, fields, views, records, recordBaseHref, ask
                 Consultar con CEO
               </a>
             ) : null}
+            {!canWrite ? <StatusPill tone="neutral">Solo lectura</StatusPill> : null}
           </div>
           <p style={metaCopyStyle}>{summary.replace("campos activos", "columnas").replace("1 vistas guardadas", "1 vista guardada")}</p>
         </div>
 
-        {object && visibleRecords.length > 0 ? (
-          <div style={tableWrapStyle}>
-            <table style={tableStyle}>
-              <thead>
-                <tr>
-                  {objectFields.map((field) => (
-                    <th key={field.id} style={tableHeadStyle}>
-                      <span>{field.name}</span>
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {visibleRecords.map((record) => (
-                  <tr
-                    key={record.id}
-                    style={recordBaseHref ? clickableRowStyle : undefined}
-                    onClick={() => {
-                      if (!recordBaseHref || !object?.id) {
-                        return;
-                      }
+        {tableError ? <p style={inlineErrorStyle}>{tableError}</p> : null}
+        {tableSuccess ? <p style={inlineSuccessStyle}>{tableSuccess}</p> : null}
 
-                      window.location.href = `${recordBaseHref}&object=${object.id}&record=${record.id}`;
-                    }}
-                  >
-                    {objectFields.map((field) => {
-                      const value = getRecordFieldValue(record, field.key);
-                      return (
-                        <td key={`${record.id}-${field.id}`} style={tableCellStyle}>
-                          {field.key === "status" ? (
-                            <StatusPill tone={String(value ?? "").toLowerCase()}>{formatStatusLabel(String(value ?? "—"))}</StatusPill>
-                          ) : (
-                            <span>{value ? String(value) : "—"}</span>
-                          )}
-                        </td>
-                      );
-                    })}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+        {object ? (
+          viewMode === "table" ? (
+            visibleRecords.length > 0 ? (
+              <div style={tableWrapStyle}>
+                <table style={tableStyle}>
+                  <thead>
+                    <tr>
+                      {objectFields.map((field) => (
+                        <th key={field.id} style={tableHeadStyle}>
+                          <span>{field.name}</span>
+                        </th>
+                      ))}
+                      {canWrite ? <th style={tableHeadStyle}>Acciones</th> : null}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visibleRecords.map((record) => (
+                      <tr
+                        key={record.id}
+                        style={recordBaseHref ? clickableRowStyle : undefined}
+                        onClick={() => {
+                          if (editingCell) {
+                            return;
+                          }
+                          if (!recordBaseHref || !object?.id) {
+                            return;
+                          }
+                          window.location.href = `${recordBaseHref}&object=${object.id}&record=${record.id}`;
+                        }}
+                      >
+                        {objectFields.map((field) => {
+                          const value = getRecordFieldValue(record, field.key);
+                          const isEditing =
+                            editingCell?.recordId === record.id && editingCell.fieldKey === field.key;
+                          const options = parseSelectOptions(field);
+
+                          return (
+                            <td
+                              key={`${record.id}-${field.id}`}
+                              style={tableCellStyle}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                if (!canWrite) return;
+                                startInlineEdit(record, field);
+                              }}
+                            >
+                              {isEditing ? (
+                                field.type === "status" || field.type === "select" ? (
+                                  <select
+                                    autoFocus
+                                    value={String(editingValue ?? "")}
+                                    onChange={(event) => setEditingValue(event.target.value)}
+                                    onBlur={() => void saveInlineEdit(record, field)}
+                                    style={inlineInputStyle}
+                                  >
+                                    <option value="">Selecciona</option>
+                                    {options.map((option) => (
+                                      <option key={option} value={option}>
+                                        {formatStatusLabel(option)}
+                                      </option>
+                                    ))}
+                                  </select>
+                                ) : field.type === "boolean" ? (
+                                  <select
+                                    autoFocus
+                                    value={String(Boolean(editingValue))}
+                                    onChange={(event) => setEditingValue(event.target.value === "true")}
+                                    onBlur={() => void saveInlineEdit(record, field)}
+                                    style={inlineInputStyle}
+                                  >
+                                    <option value="true">Sí</option>
+                                    <option value="false">No</option>
+                                  </select>
+                                ) : (
+                                  <input
+                                    autoFocus
+                                    type={field.type === "number" ? "number" : field.type === "date" ? "date" : "text"}
+                                    value={String(editingValue ?? "")}
+                                    onChange={(event) => setEditingValue(event.target.value)}
+                                    onBlur={() => void saveInlineEdit(record, field)}
+                                    onKeyDown={(event) => {
+                                      if (event.key === "Escape") {
+                                        cancelInlineEdit();
+                                      }
+                                      if (event.key === "Enter") {
+                                        event.currentTarget.blur();
+                                      }
+                                    }}
+                                    style={inlineInputStyle}
+                                  />
+                                )
+                              ) : field.key === "status" ? (
+                                <StatusPill tone={String(value ?? "").toLowerCase()}>
+                                  {formatStatusLabel(String(value ?? "—"))}
+                                </StatusPill>
+                              ) : field.type === "boolean" ? (
+                                <span>{Boolean(value) ? "Sí" : "No"}</span>
+                              ) : (
+                                <span>
+                                  {value !== null && value !== undefined && String(value).length > 0 ? String(value) : "—"}
+                                </span>
+                              )}
+                            </td>
+                          );
+                        })}
+                        {canWrite ? (
+                          <td style={tableCellStyle} onClick={(event) => event.stopPropagation()}>
+                            <button
+                              type="button"
+                              style={dangerButtonStyle}
+                              onClick={() => setDeleteTargetId(record.id)}
+                              disabled={isDeletingRecord}
+                            >
+                              Eliminar
+                            </button>
+                          </td>
+                        ) : null}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <EmptyState
+                icon={FileStack}
+                title="No hay registros visibles"
+                description="Ajusta la vista o la búsqueda, o usa el copilot para crear los primeros registros."
+              />
+            )
+          ) : boardGroupField ? (
+            <div style={boardColumnsWrapStyle}>
+              {boardColumns.map((column) => (
+                <section
+                  key={column.key}
+                  style={{
+                    ...boardColumnStyle,
+                    borderColor:
+                      draggingRecordId && canWrite
+                        ? "rgba(51, 92, 255, 0.35)"
+                        : "var(--workspace-border)",
+                  }}
+                  onDragOver={(event) => {
+                    if (!canWrite) return;
+                    event.preventDefault();
+                  }}
+                  onDrop={(event) => {
+                    if (!canWrite) return;
+                    event.preventDefault();
+                    const payload = getBoardDropTarget(event.dataTransfer.getData("text/plain"));
+                    setDraggingRecordId(null);
+                    if (!payload) {
+                      return;
+                    }
+                    const record = visibleRecords.find((entry) => entry.id === payload.recordId);
+                    if (!record) {
+                      return;
+                    }
+                    void moveRecordToBoardColumn(record, column.value);
+                  }}
+                >
+                  <header style={boardColumnHeaderStyle}>
+                    <h3 style={boardColumnTitleStyle}>{column.label}</h3>
+                    <p style={boardColumnCountStyle}>{column.records.length}</p>
+                  </header>
+
+                  <div style={boardCardListStyle}>
+                    {column.records.map((record) => (
+                      <article
+                        key={record.id}
+                        draggable={canWrite}
+                        onDragStart={(event) => {
+                          if (!canWrite || !boardGroupField) {
+                            return;
+                          }
+                          const payload: BoardDropTarget = {
+                            recordId: record.id,
+                            toValue: normalizeBoardValue(getRecordFieldValue(record, boardGroupField.key)),
+                          };
+                          event.dataTransfer.setData("text/plain", JSON.stringify(payload));
+                          setDraggingRecordId(record.id);
+                        }}
+                        onDragEnd={() => setDraggingRecordId(null)}
+                        style={{
+                          ...boardCardStyle,
+                          opacity: draggingRecordId === record.id ? 0.65 : 1,
+                        }}
+                        onClick={() => {
+                          if (!recordBaseHref || !object?.id) {
+                            return;
+                          }
+                          window.location.href = `${recordBaseHref}&object=${object.id}&record=${record.id}`;
+                        }}
+                      >
+                        <p style={boardCardTitleStyle}>
+                          {boardPrimaryField
+                            ? String(getRecordFieldValue(record, boardPrimaryField.key) ?? "Sin título")
+                            : "Sin título"}
+                        </p>
+                        {boardSecondaryFields.map((field) => (
+                          <p key={field.id} style={boardCardMetaStyle}>
+                            {field.name}: {String(getRecordFieldValue(record, field.key) ?? "—")}
+                          </p>
+                        ))}
+                      </article>
+                    ))}
+                  </div>
+
+                  {canWrite ? (
+                    <button
+                      type="button"
+                      style={primaryButtonStyle}
+                      onClick={() => openCreatePanelForBoardColumn(column.value)}
+                    >
+                      + Nuevo
+                    </button>
+                  ) : null}
+                </section>
+              ))}
+            </div>
+          ) : (
+            <EmptyState
+              icon={Layers3}
+              title="Tablero no disponible"
+              description="Este objeto no tiene un campo de tipo estado o selección para agrupar las columnas."
+            />
+          )
         ) : (
           <EmptyState
             icon={FileStack}
-            title={object ? "No hay registros visibles" : "No hay objetos configurados"}
-            description={
-              object
-                ? "Ajusta la vista o la búsqueda, o usa el copilot para crear los primeros registros."
-                : "Primero crea objetos y campos para que la vista dinámica tenga estructura."
-            }
+            title="No hay objetos configurados"
+            description="Primero crea objetos y campos para que la vista dinámica tenga estructura."
           />
         )}
       </Panel>
+
+      {isCreateOpen && object ? (
+        <div style={modalOverlayStyle} role="presentation" onClick={() => setIsCreateOpen(false)}>
+          <div style={modalCardStyle} role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+            <div style={modalHeaderStyle}>
+              <div>
+                <p style={eyebrowStyle}>Nuevo registro</p>
+                <h3 style={agentDetailTitleStyle}>{object.name}</h3>
+              </div>
+              <button type="button" style={chatActionButtonStyle} onClick={() => setIsCreateOpen(false)}>
+                Cerrar
+              </button>
+            </div>
+
+            <div style={modalFieldsGridStyle}>
+              {objectFields.map((field) => {
+                const options = parseSelectOptions(field);
+                const value = recordDraft[field.key] ?? "";
+                const draftOptionValue = String(value ?? "");
+                const createSelectOptions =
+                  draftOptionValue.length > 0 && !options.includes(draftOptionValue)
+                    ? [draftOptionValue, ...options]
+                    : options;
+                return (
+                  <label key={field.id} style={fieldStyle}>
+                    {field.name}
+                    {field.required ? " *" : ""}
+                    {field.type === "status" || field.type === "select" ? (
+                      <select
+                        value={String(value ?? "")}
+                        onChange={(event) =>
+                          setRecordDraft((current) => ({ ...current, [field.key]: event.target.value }))
+                        }
+                        style={inputStyle}
+                      >
+                        <option value="">{field.required ? "Selecciona una opción" : "Sin valor"}</option>
+                        {createSelectOptions.map((option) => (
+                          <option key={option} value={option}>
+                            {formatStatusLabel(option)}
+                          </option>
+                        ))}
+                      </select>
+                    ) : field.type === "boolean" ? (
+                      <label style={toggleStyle}>
+                        <input
+                          type="checkbox"
+                          checked={Boolean(value)}
+                          onChange={(event) =>
+                            setRecordDraft((current) => ({ ...current, [field.key]: event.target.checked }))
+                          }
+                        />
+                        Activo
+                      </label>
+                    ) : (
+                      <input
+                        type={field.type === "number" ? "number" : field.type === "date" ? "date" : "text"}
+                        value={String(value ?? "")}
+                        onChange={(event) =>
+                          setRecordDraft((current) => ({ ...current, [field.key]: event.target.value }))
+                        }
+                        style={inputStyle}
+                      />
+                    )}
+                  </label>
+                );
+              })}
+            </div>
+
+            <div style={actionsStyle}>
+              <button type="button" style={primaryButtonStyle} onClick={() => void createRecord()} disabled={isCreatingRecord}>
+                {isCreatingRecord ? "Guardando..." : "Guardar"}
+              </button>
+              <button type="button" style={chatActionButtonStyle} onClick={() => setIsCreateOpen(false)} disabled={isCreatingRecord}>
+                Cancelar
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {deleteTargetId ? (
+        <div style={modalOverlayStyle} role="presentation" onClick={() => setDeleteTargetId(null)}>
+          <div style={confirmCardStyle} role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+            <p style={agentNameStyle}>¿Eliminar este registro?</p>
+            <p style={queueSubtitleStyle}>Esta acción no se puede deshacer.</p>
+            <div style={actionsStyle}>
+              <button
+                type="button"
+                style={dangerButtonStyle}
+                onClick={() => void deleteRecord(deleteTargetId)}
+                disabled={isDeletingRecord}
+              >
+                {isDeletingRecord ? "Eliminando..." : "Eliminar"}
+              </button>
+              <button type="button" style={chatActionButtonStyle} onClick={() => setDeleteTargetId(null)} disabled={isDeletingRecord}>
+                Cancelar
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
 
+export function DataPanel(props: DataPanelProps) {
+  return <BaseDataPanel {...props} />;
+}
+
 export function AgentsPanel({
   workspaceId,
+  currentRole,
   workspaceSlug,
   agentLimit,
   agentTemplates,
@@ -1370,6 +2174,20 @@ export function AgentsPanel({
   const [builderError, setBuilderError] = useState<string>("");
   const [builderSuccess, setBuilderSuccess] = useState<string>("");
   const [isSaving, setIsSaving] = useState(false);
+  const [deploymentDraft, setDeploymentDraft] = useState({
+    apiEndpoint: "",
+    apiKey: "",
+    containerName: "",
+    connectionsText: "",
+  });
+  const [isSavingDeployment, setIsSavingDeployment] = useState(false);
+  const [isCheckingHealth, setIsCheckingHealth] = useState(false);
+  const [deploymentFeedback, setDeploymentFeedback] = useState<string>("");
+  const [lastHealthCheckAt, setLastHealthCheckAt] = useState<string | null>(null);
+  const [lastCronRunAt, setLastCronRunAt] = useState<string | null>(null);
+  const [connectionDraft, setConnectionDraft] = useState<Array<{ key: string; value: string }>>([]);
+  const [isSavingConnections, setIsSavingConnections] = useState(false);
+  const [connectionsFeedback, setConnectionsFeedback] = useState<string>("");
   const [chatInput, setChatInput] = useState("");
   const [chatError, setChatError] = useState<string | null>(null);
   const [isSending, setIsSending] = useState(false);
@@ -1382,6 +2200,7 @@ export function AgentsPanel({
   const selectedAgent = localAgents.find((agent) => agent.id === selectedAgentId) ?? localAgents[0] ?? null;
   const selectedActivity = activity.filter((entry) => entry.agentId === selectedAgent?.id).slice(0, 10);
   const activeAgentCount = localAgents.length;
+  const canManageDeployment = currentRole === "admin";
 
   useEffect(() => {
     setLocalAgents(agents);
@@ -1409,6 +2228,16 @@ export function AgentsPanel({
       cronJobs: JSON.stringify(current.cronJobs ?? [], null, 2),
       isActive: current.status !== "paused",
     });
+    setDeploymentDraft({
+      apiEndpoint: current.apiEndpoint ?? "",
+      apiKey: current.apiKey ?? "",
+      containerName: current.containerName ?? "",
+      connectionsText: "",
+    });
+    const seededConnections = getCredentialEnvEntries(current.channelConfig);
+    setConnectionDraft(seededConnections);
+    setLastCronRunAt(current.lastCronRunAt ?? null);
+    setConnectionsFeedback("");
     setIsCreateMode(false);
   }, [localAgents, selectedAgentId]);
 
@@ -1455,6 +2284,251 @@ export function AgentsPanel({
     setBuilderError("");
     setBuilderSuccess("");
     setIsCreateMode(true);
+  }
+
+  async function saveDeploymentSettings() {
+    if (!selectedAgent || !canManageDeployment || isSavingDeployment) {
+      return;
+    }
+
+    if (!deploymentDraft.apiEndpoint.trim()) {
+      setDeploymentFeedback("El endpoint del agente es obligatorio.");
+      return;
+    }
+
+    if (!deploymentDraft.apiKey.trim()) {
+      setDeploymentFeedback("La API key del agente es obligatoria.");
+      return;
+    }
+
+    if (!deploymentDraft.containerName.trim()) {
+      setDeploymentFeedback("El nombre del contenedor es obligatorio.");
+      return;
+    }
+
+    setIsSavingDeployment(true);
+    setDeploymentFeedback("");
+    try {
+      const response = await fetch(`/api/workspaces/${workspaceSlug}/agents/${selectedAgent.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          apiEndpoint: deploymentDraft.apiEndpoint.trim(),
+          apiKey: deploymentDraft.apiKey.trim(),
+          containerName: deploymentDraft.containerName.trim(),
+        }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        agent?: {
+          id: string;
+          apiEndpoint?: string;
+          containerName?: string;
+          status?: string;
+          lastHealthCheckAt?: string | null;
+        };
+      };
+      if (!response.ok || !payload.agent) {
+        throw new Error(payload.error ?? "No se pudo guardar el despliegue.");
+      }
+
+      setLocalAgents((current) =>
+        current.map((agent) =>
+          agent.id === payload.agent!.id
+            ? {
+                ...agent,
+                apiEndpoint: payload.agent!.apiEndpoint ?? agent.apiEndpoint,
+                containerName: payload.agent!.containerName ?? agent.containerName,
+                status: payload.agent!.status ?? agent.status,
+                lastHealthCheckAt: payload.agent!.lastHealthCheckAt ?? agent.lastHealthCheckAt,
+              }
+            : agent,
+        ),
+      );
+
+      if (payload.agent.lastHealthCheckAt) {
+        setLastHealthCheckAt(payload.agent.lastHealthCheckAt);
+      }
+
+      setDeploymentFeedback("Configuración de despliegue guardada.");
+    } catch (error) {
+      setDeploymentFeedback(error instanceof Error ? error.message : "No se pudo guardar el despliegue.");
+    } finally {
+      setIsSavingDeployment(false);
+    }
+  }
+
+  function ensureConnectionCredential(key: string) {
+    const normalizedKey = key.trim().toUpperCase().replace(/[^A-Z0-9_]/g, "_");
+    if (!normalizedKey) {
+      return;
+    }
+    setConnectionDraft((current) => {
+      if (current.some((entry) => entry.key === normalizedKey)) {
+        return current;
+      }
+      return [...current, { key: normalizedKey, value: "" }];
+    });
+  }
+
+  function updateConnectionCredential(index: number, patch: Partial<{ key: string; value: string }>) {
+    setConnectionDraft((current) =>
+      current.map((entry, currentIndex) =>
+        currentIndex === index
+          ? {
+              key:
+                patch.key !== undefined
+                  ? patch.key.toUpperCase().replace(/[^A-Z0-9_]/g, "_")
+                  : entry.key,
+              value: patch.value !== undefined ? patch.value : entry.value,
+            }
+          : entry,
+      ),
+    );
+  }
+
+  function removeConnectionCredential(index: number) {
+    setConnectionDraft((current) => current.filter((_, currentIndex) => currentIndex !== index));
+  }
+
+  async function saveConnectionCredentials() {
+    if (!selectedAgent || !canManageDeployment || isSavingConnections) {
+      return;
+    }
+
+    const normalizedEntries = connectionDraft
+      .map((entry) => ({
+        key: entry.key.trim(),
+        value: entry.value.trim(),
+      }))
+      .filter((entry) => entry.key.length > 0);
+
+    const duplicateKey = normalizedEntries.find(
+      (entry, index) =>
+        normalizedEntries.findIndex((candidate) => candidate.key.toLowerCase() === entry.key.toLowerCase()) !== index,
+    );
+    if (duplicateKey) {
+      setConnectionsFeedback(`La clave ${duplicateKey.key} está duplicada.`);
+      return;
+    }
+
+    setIsSavingConnections(true);
+    setConnectionsFeedback("");
+    try {
+      const credentialRecord = normalizedEntries.reduce<Record<string, string>>((accumulator, entry) => {
+        accumulator[entry.key] = entry.value;
+        return accumulator;
+      }, {});
+
+      const nextChannelConfig = {
+        ...(selectedAgent.channelConfig ?? {}),
+        apiCredentials: credentialRecord,
+      };
+
+      const response = await fetch(`/api/workspaces/${workspaceSlug}/agents/${selectedAgent.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ channelConfig: nextChannelConfig }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        agent?: {
+          id: string;
+          channelConfig?: Record<string, unknown>;
+        };
+      };
+      if (!response.ok || !payload.agent) {
+        throw new Error(payload.error ?? "No se pudieron guardar las conexiones.");
+      }
+
+      setLocalAgents((current) =>
+        current.map((agent) =>
+          agent.id === payload.agent!.id
+            ? {
+                ...agent,
+                channelConfig: payload.agent!.channelConfig ?? agent.channelConfig ?? {},
+              }
+            : agent,
+        ),
+      );
+      setConnectionsFeedback("Conexiones guardadas.");
+    } catch (error) {
+      setConnectionsFeedback(error instanceof Error ? error.message : "No se pudieron guardar las conexiones.");
+    } finally {
+      setIsSavingConnections(false);
+    }
+  }
+
+  function insertCronVariable(token: "{last_run}" | "{workspace_id}" | "{today}") {
+    setDraft((current) => ({
+      ...current,
+      cronJobs: current.cronJobs.includes(token)
+        ? current.cronJobs
+        : `${current.cronJobs.trim()}\n// variable helper: ${token}`.trim(),
+    }));
+  }
+
+  function resolveCronVariablePreview(token: "{last_run}" | "{workspace_id}" | "{today}") {
+    if (token === "{workspace_id}") {
+      return workspaceId;
+    }
+    if (token === "{today}") {
+      return new Date().toISOString().slice(0, 10);
+    }
+    if (lastCronRunAt) {
+      return lastCronRunAt;
+    }
+    return "sin ejecuciones previas";
+  }
+
+  async function checkAgentHealth() {
+    if (!selectedAgent || !canManageDeployment || isCheckingHealth) {
+      return;
+    }
+
+    setIsCheckingHealth(true);
+    setDeploymentFeedback("");
+    try {
+      const response = await fetch(`/api/workspaces/${workspaceSlug}/agents/${selectedAgent.id}`, {
+        method: "POST",
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        status?: string;
+        healthy?: boolean;
+        lastHealthCheckAt?: string | null;
+        lastCronRunAt?: string | null;
+      };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "No se pudo verificar conexión.");
+      }
+
+      setLocalAgents((current) =>
+        current.map((agent) =>
+          agent.id === selectedAgent.id
+            ? {
+                ...agent,
+                status: payload.status ?? agent.status,
+                lastHealthCheckAt: payload.lastHealthCheckAt ?? agent.lastHealthCheckAt,
+                lastCronRunAt: payload.lastCronRunAt ?? agent.lastCronRunAt,
+              }
+            : agent,
+        ),
+      );
+
+      if (payload.lastHealthCheckAt) {
+        setLastHealthCheckAt(payload.lastHealthCheckAt);
+      }
+      if (payload.lastCronRunAt) {
+        setLastCronRunAt(payload.lastCronRunAt);
+      }
+
+      setDeploymentFeedback(payload.healthy ? "Agente en línea." : "No se puede conectar con el agente.");
+    } catch (error) {
+      setDeploymentFeedback(error instanceof Error ? error.message : "No se pudo verificar conexión.");
+    } finally {
+      setIsCheckingHealth(false);
+    }
   }
 
   async function saveAgent() {
@@ -1815,6 +2889,25 @@ export function AgentsPanel({
                   style={textAreaStyle}
                 />
               </label>
+              <div style={{ ...fieldStyle, gridColumn: "1 / -1" }}>
+                Variables de cron
+                <div style={cronVariableRowStyle}>
+                  <button type="button" style={chatActionButtonStyle} onClick={() => insertCronVariable("{last_run}")}>
+                    Insertar {"{last_run}"}
+                  </button>
+                  <button type="button" style={chatActionButtonStyle} onClick={() => insertCronVariable("{workspace_id}")}>
+                    Insertar {"{workspace_id}"}
+                  </button>
+                  <button type="button" style={chatActionButtonStyle} onClick={() => insertCronVariable("{today}")}>
+                    Insertar {"{today}"}
+                  </button>
+                </div>
+                <div style={cronVariablePreviewStyle}>
+                  <p style={detailRailMetaStyle}>{"{last_run}"} → {resolveCronVariablePreview("{last_run}")}</p>
+                  <p style={detailRailMetaStyle}>{"{workspace_id}"} → {resolveCronVariablePreview("{workspace_id}")}</p>
+                  <p style={detailRailMetaStyle}>{"{today}"} → {resolveCronVariablePreview("{today}")}</p>
+                </div>
+              </div>
               <label style={toggleStyle}>
                 <input
                   type="checkbox"
@@ -1859,12 +2952,140 @@ export function AgentsPanel({
 
                   <div style={detailRailStyle}>
                     <h4 style={detailRailTitleStyle}>Despliegue</h4>
+                    <label style={fieldStyle}>
+                      Endpoint del agente
+                      <input
+                        value={deploymentDraft.apiEndpoint}
+                        onChange={(event) =>
+                          setDeploymentDraft((current) => ({ ...current, apiEndpoint: event.target.value }))
+                        }
+                        placeholder="https://hermes-bbc.prisma.com.mx/copilot"
+                        style={inputStyle}
+                        disabled={!canManageDeployment || isSavingDeployment}
+                      />
+                    </label>
+                    <label style={fieldStyle}>
+                      API key
+                      <input
+                        type="password"
+                        value={deploymentDraft.apiKey}
+                        onChange={(event) =>
+                          setDeploymentDraft((current) => ({ ...current, apiKey: event.target.value }))
+                        }
+                        placeholder="sk_live_xxx"
+                        style={inputStyle}
+                        disabled={!canManageDeployment || isSavingDeployment}
+                      />
+                    </label>
+                    <label style={fieldStyle}>
+                      Nombre de contenedor
+                      <input
+                        value={deploymentDraft.containerName}
+                        onChange={(event) =>
+                          setDeploymentDraft((current) => ({ ...current, containerName: event.target.value }))
+                        }
+                        placeholder={`hermes-${workspaceSlug}-copilot`}
+                        style={inputStyle}
+                        disabled={!canManageDeployment || isSavingDeployment}
+                      />
+                    </label>
+                    <div style={actionsStyle}>
+                      <button
+                        type="button"
+                        style={primaryButtonStyle}
+                        onClick={() => void saveDeploymentSettings()}
+                        disabled={!canManageDeployment || isSavingDeployment}
+                      >
+                        {isSavingDeployment ? "Guardando..." : "Guardar despliegue"}
+                      </button>
+                      <button
+                        type="button"
+                        style={chatActionButtonStyle}
+                        onClick={() => void checkAgentHealth()}
+                        disabled={!canManageDeployment || isCheckingHealth}
+                      >
+                        {isCheckingHealth ? "Verificando..." : "Verificar conexión"}
+                      </button>
+                    </div>
                     <p style={detailRailCopyStyle}>
                       Runtime: {selectedAgent.runtimeLabel ?? `hermes-${workspaceSlug}`}
                     </p>
                     <p style={detailRailCopyStyle}>
                       Estado: {formatStatusLabel(selectedAgent.status)}
                     </p>
+                    {lastHealthCheckAt ? (
+                      <p style={detailRailMetaStyle}>
+                        Última verificación: {new Date(lastHealthCheckAt).toLocaleString("es-MX")}
+                      </p>
+                    ) : null}
+                    {!canManageDeployment ? (
+                      <p style={detailRailMetaStyle}>Solo administradores pueden editar el despliegue.</p>
+                    ) : null}
+                    {deploymentFeedback ? <p style={inlineSuccessStyle}>{deploymentFeedback}</p> : null}
+                  </div>
+                  <div style={detailRailStyle}>
+                    <h4 style={detailRailTitleStyle}>Conexiones API</h4>
+                    {connectionDraft.length === 0 ? (
+                      <p style={detailRailCopyStyle}>Aún no hay credenciales guardadas para este agente.</p>
+                    ) : (
+                      <div style={connectionListStyle}>
+                        {connectionDraft.map((entry, index) => (
+                          <div key={`${entry.key}-${index}`} style={connectionRowStyle}>
+                            <input
+                              value={entry.key}
+                              onChange={(event) => updateConnectionCredential(index, { key: event.target.value })}
+                              placeholder="CLOSE_API_KEY"
+                              style={inputStyle}
+                              disabled={!canManageDeployment || isSavingConnections}
+                            />
+                            <input
+                              type="password"
+                              value={entry.value}
+                              onChange={(event) => updateConnectionCredential(index, { value: event.target.value })}
+                              placeholder="••••••••"
+                              style={inputStyle}
+                              disabled={!canManageDeployment || isSavingConnections}
+                            />
+                            <button
+                              type="button"
+                              style={dangerButtonStyle}
+                              onClick={() => removeConnectionCredential(index)}
+                              disabled={!canManageDeployment || isSavingConnections}
+                            >
+                              Quitar
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {canManageDeployment ? (
+                      <div style={actionsStyle}>
+                        <button type="button" style={chatActionButtonStyle} onClick={() => ensureConnectionCredential("CLOSE_API_KEY")}>
+                          + CLOSE_API_KEY
+                        </button>
+                        <button type="button" style={chatActionButtonStyle} onClick={() => ensureConnectionCredential("HUBSPOT_TOKEN")}>
+                          + HUBSPOT_TOKEN
+                        </button>
+                        <button
+                          type="button"
+                          style={primaryButtonStyle}
+                          onClick={() => void saveConnectionCredentials()}
+                          disabled={isSavingConnections}
+                        >
+                          {isSavingConnections ? "Guardando..." : "Guardar conexiones"}
+                        </button>
+                        <button
+                          type="button"
+                          style={chatActionButtonStyle}
+                          onClick={() => setConnectionsFeedback("Archivo .env regenerado. Requiere redeploy manual del agente.")}
+                          disabled={isSavingConnections}
+                        >
+                          Regenerar env
+                        </button>
+                      </div>
+                    ) : null}
+                    <p style={detailRailMetaStyle}>Las claves se muestran por nombre y los valores se guardan enmascarados.</p>
+                    {connectionsFeedback ? <p style={inlineSuccessStyle}>{connectionsFeedback}</p> : null}
                   </div>
                 </div>
 
@@ -2325,6 +3546,9 @@ function formatActivityLabel(action: string) {
   if (action === "receivable.flagged") return "Cobranza marcada para revision";
   if (action === "lead.qualified") return "Lead calificado";
   if (action === "document.uploaded_via_chat") return "Documento agregado desde chat";
+  if (action === "cron.executed") return "Cron ejecutado";
+  if (action === "rate_offer.generated") return "Oferta generada";
+  if (action === "rate_offer.approved") return "Oferta aprobada";
   if (action === "workspace.seeded") return "Workspace inicializado";
   return action.replace(/[._]/g, " ").replace(/^\w/, (value) => value.toUpperCase());
 }
@@ -2332,6 +3556,9 @@ function formatActivityLabel(action: string) {
 function formatActivityDetails(details: Record<string, unknown>) {
   if (typeof details.title === "string") {
     return details.title;
+  }
+  if (typeof details.offer === "string") {
+    return details.offer;
   }
   if (typeof details.lead === "string") {
     return details.lead;
@@ -2379,6 +3606,47 @@ function parseCsvList(value: string) {
     .filter(Boolean);
 }
 
+function parseConnectionEntries(raw: string) {
+  return raw
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const separatorIndex = line.indexOf("=");
+      if (separatorIndex <= 0) {
+        return null;
+      }
+      const key = line.slice(0, separatorIndex).trim();
+      const value = line.slice(separatorIndex + 1).trim();
+      if (!key || !value) {
+        return null;
+      }
+      return { key, value };
+    })
+    .filter((entry): entry is { key: string; value: string } => Boolean(entry));
+}
+
+function maskConnectionValue(value: string) {
+  if (value.length <= 4) {
+    return "••••";
+  }
+  return `${"•".repeat(Math.max(4, value.length - 4))}${value.slice(-4)}`;
+}
+
+function formatIsoDateToYmd(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function replaceCronPromptVariables(prompt: string, values: { lastRun: string; today: string; workspaceId: string }) {
+  return prompt
+    .replace(/\{last_run\}/g, values.lastRun)
+    .replace(/\{today\}/g, values.today)
+    .replace(/\{workspace_id\}/g, values.workspaceId);
+}
+
 function mapAgentTypeToRole(type: string) {
   if (type === "copilot") return "intake_assistant";
   if (type === "channel") return "lead_qualifier";
@@ -2397,6 +3665,75 @@ function mapRoleToAgentType(role: string) {
   if (role === "intake_assistant" || role === "ops_assistant") return "copilot";
   if (role === "lead_qualifier" || role === "follow_up") return "channel";
   return "worker";
+}
+
+function getCredentialEnvEntries(channelConfig?: Record<string, unknown>) {
+  const raw = channelConfig?.apiCredentials;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return [];
+  }
+  return Object.entries(raw as Record<string, unknown>)
+    .filter(([key]) => key.trim().length > 0)
+    .map(([key, value]) => ({
+      key,
+      value: typeof value === "string" ? value : String(value ?? ""),
+    }));
+}
+
+function mapCronJobPromptVariables(jobs: unknown[], workspaceId: string, lastRunIso: string | null) {
+  const today = new Date().toISOString().slice(0, 10);
+  return jobs.map((job) => {
+    if (!job || typeof job !== "object" || Array.isArray(job)) {
+      return job;
+    }
+    const typedJob = job as Record<string, unknown>;
+    const prompt = typeof typedJob.prompt === "string" ? typedJob.prompt : null;
+    if (!prompt) {
+      return typedJob;
+    }
+    const mappedPrompt = prompt
+      .replace(/\{workspace_id\}/g, workspaceId)
+      .replace(/\{today\}/g, today)
+      .replace(/\{last_run\}/g, lastRunIso ?? today);
+    return {
+      ...typedJob,
+      prompt: mappedPrompt,
+    };
+  });
+}
+
+function parseApiConnections(input: string) {
+  const lines = input
+    .split("\n")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  const map: Record<string, string> = {};
+  for (const line of lines) {
+    const separatorIndex = line.indexOf("=");
+    if (separatorIndex <= 0) {
+      throw new Error(`Formato inválido en conexión "${line}". Usa KEY=VALUE.`);
+    }
+    const key = line.slice(0, separatorIndex).trim();
+    const value = line.slice(separatorIndex + 1).trim();
+    if (!/^[A-Z0-9_]+$/.test(key)) {
+      throw new Error(`Clave inválida "${key}". Usa solo A-Z, 0-9 y _.`);
+    }
+    if (!value) {
+      throw new Error(`La conexión "${key}" requiere un valor.`);
+    }
+    map[key] = value;
+  }
+  return map;
+}
+
+function serializeApiConnections(input: Record<string, unknown> | null | undefined) {
+  if (!input) {
+    return "";
+  }
+  return Object.entries(input)
+    .filter(([, value]) => typeof value === "string" && value.length > 0)
+    .map(([key, value]) => `${key}=${String(value)}`)
+    .join("\n");
 }
 
 function resolvePriorityColor(status: string) {
@@ -2901,6 +4238,13 @@ const actionsStyle: React.CSSProperties = {
 };
 
 const primaryButtonStyle: React.CSSProperties = {
+  appearance: "none",
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  whiteSpace: "nowrap",
+  alignSelf: "end",
+  minHeight: 40,
   borderRadius: 14,
   border: "1px solid rgba(51, 92, 255, 0.16)",
   background: "rgba(51, 92, 255, 0.12)",
@@ -3392,7 +4736,6 @@ const tableWrapStyle: React.CSSProperties = {
 const tableStyle: React.CSSProperties = {
   width: "100%",
   borderCollapse: "collapse",
-  minWidth: 760,
 };
 
 const tableHeadStyle: React.CSSProperties = {
@@ -3405,19 +4748,198 @@ const tableHeadStyle: React.CSSProperties = {
   background: "var(--workspace-panel-soft)",
 };
 
-const tableHeadMetaStyle: React.CSSProperties = {
-  display: "block",
-  fontWeight: 500,
-  marginTop: 2,
-  color: "var(--workspace-faint)",
-};
-
 const tableCellStyle: React.CSSProperties = {
   padding: "14px 16px",
   borderBottom: "1px solid var(--workspace-border)",
   color: "var(--workspace-text)",
   fontSize: 14,
   verticalAlign: "top",
+};
+
+const inlineInputStyle: React.CSSProperties = {
+  width: "100%",
+  borderRadius: 10,
+  border: "1px solid var(--workspace-border)",
+  background: "var(--workspace-surface)",
+  color: "var(--workspace-text)",
+  padding: "8px 10px",
+  font: "inherit",
+};
+
+const dangerButtonStyle: React.CSSProperties = {
+  borderRadius: 10,
+  border: "1px solid rgba(220, 38, 38, 0.22)",
+  background: "rgba(220, 38, 38, 0.12)",
+  color: "#b42318",
+  padding: "8px 10px",
+  font: "inherit",
+  fontWeight: 700,
+  cursor: "pointer",
+};
+
+const modalOverlayStyle: React.CSSProperties = {
+  position: "fixed",
+  inset: 0,
+  background: "rgba(15, 23, 42, 0.4)",
+  display: "grid",
+  placeItems: "center",
+  zIndex: 90,
+  padding: 16,
+};
+
+const modalCardStyle: React.CSSProperties = {
+  width: "min(880px, 100%)",
+  maxHeight: "85vh",
+  overflowY: "auto",
+  borderRadius: 18,
+  border: "1px solid var(--workspace-border)",
+  background: "var(--workspace-panel)",
+  padding: 18,
+  display: "grid",
+  gap: 16,
+};
+
+const modalHeaderStyle: React.CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "flex-start",
+  gap: 12,
+};
+
+const modalFieldsGridStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+  gap: 12,
+};
+
+const confirmCardStyle: React.CSSProperties = {
+  width: "min(420px, 100%)",
+  borderRadius: 16,
+  border: "1px solid var(--workspace-border)",
+  background: "var(--workspace-panel)",
+  padding: 18,
+  display: "grid",
+  gap: 12,
+};
+
+const viewModeToggleStyle: React.CSSProperties = {
+  display: "inline-flex",
+  border: "1px solid var(--workspace-border)",
+  borderRadius: 12,
+  overflow: "hidden",
+  background: "var(--workspace-panel)",
+};
+
+const viewModeButtonStyle: React.CSSProperties = {
+  border: "none",
+  borderRight: "1px solid var(--workspace-border)",
+  background: "transparent",
+  color: "var(--workspace-text)",
+  font: "inherit",
+  fontWeight: 600,
+  padding: "8px 12px",
+  cursor: "pointer",
+};
+
+const viewModeButtonActiveStyle: React.CSSProperties = {
+  ...viewModeButtonStyle,
+  background: "rgba(51, 92, 255, 0.12)",
+  color: "#2947cc",
+};
+
+const boardColumnsWrapStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
+  gap: 12,
+  alignItems: "start",
+};
+
+const boardColumnStyle: React.CSSProperties = {
+  border: "1px solid var(--workspace-border)",
+  borderRadius: 16,
+  background: "var(--workspace-panel-soft)",
+  padding: 12,
+  display: "grid",
+  gap: 10,
+  minHeight: 220,
+};
+
+const boardColumnHeaderStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 8,
+};
+
+const boardColumnTitleStyle: React.CSSProperties = {
+  margin: 0,
+  color: "var(--workspace-text)",
+  fontSize: 14,
+  fontWeight: 700,
+};
+
+const boardColumnCountStyle: React.CSSProperties = {
+  margin: 0,
+  color: "var(--workspace-muted)",
+  fontSize: 12,
+  fontWeight: 600,
+};
+
+const boardCardListStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 8,
+};
+
+const boardCardStyle: React.CSSProperties = {
+  border: "1px solid var(--workspace-border)",
+  borderRadius: 12,
+  background: "var(--workspace-panel)",
+  padding: 10,
+  display: "grid",
+  gap: 6,
+  cursor: "grab",
+};
+
+const boardCardTitleStyle: React.CSSProperties = {
+  margin: 0,
+  color: "var(--workspace-text)",
+  fontSize: 14,
+  fontWeight: 700,
+  lineHeight: 1.35,
+};
+
+const boardCardMetaStyle: React.CSSProperties = {
+  margin: 0,
+  color: "var(--workspace-muted)",
+  fontSize: 12,
+  lineHeight: 1.4,
+};
+
+const cronVariableRowStyle: React.CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  gap: 8,
+};
+
+const cronVariablePreviewStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 4,
+  border: "1px dashed var(--workspace-border)",
+  borderRadius: 12,
+  padding: 10,
+  background: "var(--workspace-panel-soft)",
+};
+
+const connectionListStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 8,
+};
+
+const connectionRowStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr) auto",
+  gap: 8,
+  alignItems: "center",
 };
 
 const agentGridStyle: React.CSSProperties = {

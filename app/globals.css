@@ -153,6 +153,15 @@ button {
 
 .workspace-app {
   min-height: 100vh;
+  --workspace-accent: #335cff;
+  --workspace-text: #111827;
+  --workspace-muted: #6b7280;
+  --workspace-faint: #8a93a3;
+  --workspace-border: rgba(17, 24, 39, 0.12);
+  --workspace-panel: rgba(255, 255, 255, 0.9);
+  --workspace-panel-soft: rgba(249, 250, 251, 0.92);
+  --workspace-surface: rgba(255, 255, 255, 0.96);
+  --workspace-shadow: 0 14px 30px rgba(17, 24, 39, 0.06);
   background:
     radial-gradient(circle at top right, rgba(51, 92, 255, 0.08), transparent 26%),
     linear-gradient(180deg, #f7f7f2 0%, #f5f3ee 100%);
@@ -238,9 +247,25 @@ button {
   padding: 12px 14px;
 }
 
+.workspace-nav__item:hover {
+  background: rgba(17, 24, 39, 0.04);
+}
+
 .workspace-nav__item--active {
   border-color: rgba(51, 92, 255, 0.22);
   background: rgba(51, 92, 255, 0.08);
+  position: relative;
+}
+
+.workspace-nav__item--active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  border-radius: 999px;
+  background: #335cff;
 }
 
 .workspace-nav__title {
@@ -254,10 +279,56 @@ button {
   margin-top: 4px;
 }
 
+.workspace-nav__details {
+  display: grid;
+  gap: 8px;
+}
+
+.workspace-nav__toggle {
+  width: 100%;
+  border: 1px solid rgba(17, 24, 39, 0.08);
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.workspace-nav__toggle::-webkit-details-marker {
+  display: none;
+}
+
+.workspace-nav__details .workspace-nav__toggle-icon {
+  transform: rotate(-90deg);
+  transition: transform 160ms ease;
+}
+
+.workspace-nav__details[open] .workspace-nav__toggle-icon {
+  transform: rotate(0deg);
+}
+
+.workspace-nav__subgroup {
+  display: grid;
+  gap: 8px;
+  padding-left: 14px;
+}
+
+.workspace-nav__item--nested {
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.workspace-nav__details:not([open]) .workspace-nav__subgroup {
+  display: none;
+}
+
 .workspace-main {
   padding: 28px 30px 36px;
   display: grid;
   gap: 24px;
+  min-width: 0;
 }
 
 .workspace-header {
@@ -600,6 +671,7 @@ button {
   display: grid;
   align-content: start;
   gap: 18px;
+  min-width: 0;
 }
 
 .workspace-hero-stack {

@@ -64,8 +64,9 @@ export default async function LoginPage({ searchParams }: PageProps) {
           }}
         >
           <p style={{ margin: 0, fontWeight: 700 }}>Seeded demo accounts</p>
-          <p style={{ margin: 0, color: "#475467" }}>Admin: demo-admin@prisma.local</p>
-          <p style={{ margin: 0, color: "#475467" }}>Operator: demo-operator@prisma.local</p>
+          <p style={{ margin: 0, color: "#475467" }}>Admin (George): george@bbc.local</p>
+          <p style={{ margin: 0, color: "#475467" }}>Operator (Maria): maria@bbc.local</p>
+          <p style={{ margin: 0, color: "#475467" }}>Viewer (Carlos): carlos@bbc.local</p>
           <p style={{ margin: 0, color: "#475467" }}>Password: PrismaDemo!2026</p>
         </div>
       </div>

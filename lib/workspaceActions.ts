@@ -19,6 +19,7 @@ type ViewDefinition = {
   sortBy?: string | null;
   sortOrder?: "asc" | "desc";
   columns?: string[];
+  groupByFieldId?: string | null;
 };
 
 type DashboardCardSeed = {
@@ -155,6 +156,7 @@ async function ensureView(workspaceId: string, objectId: string, view: ViewDefin
     sort_by: view.sortBy ?? null,
     sort_order: view.sortOrder ?? "asc",
     columns: view.columns ?? [],
+    group_by_field_id: view.groupByFieldId ?? null,
   };
 
   if (existing?.id) {

@@ -144,14 +144,19 @@ export async function listWorkspaceCollaborators(workspaceId: string): Promise<W
 
   return [
     {
-      id: "demo-admin",
-      email: "demo-admin@prisma.local",
+      id: "george-bbc",
+      email: "george@bbc.local",
       role: "admin",
     },
     {
-      id: "demo-operator",
-      email: "demo-operator@prisma.local",
+      id: "maria-bbc",
+      email: "maria@bbc.local",
       role: "operator",
+    },
+    {
+      id: "carlos-bbc",
+      email: "carlos@bbc.local",
+      role: "viewer",
     },
   ];
 }

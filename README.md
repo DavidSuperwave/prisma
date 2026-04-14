@@ -96,6 +96,16 @@ Recommended routing for your goals:
 
 The repo uses `proxy.ts` for host-based rewrites.
 
+## Product build spec source of truth
+
+The active product roadmap + stage-gate source of truth is `docs/PRISMA-MASTER-SPEC-V1.md`.
+It replaces prior split milestone/spec documents and defines the required execution order:
+
+- Stage 1: `M2 + M6` (critical blockers, must pass first)
+- Stage 2: `M7 + M8 + M9 + M11 + M14` (parallel after Stage 1)
+- Stage 3: `M12 + M13 + M15` (polish layer, parallel)
+- Stage 4: `M10` (BBC launch only after all prior gates pass)
+
 ## Schema source of truth
 
 The active database source of truth is now the migration files under `supabase/migrations`.

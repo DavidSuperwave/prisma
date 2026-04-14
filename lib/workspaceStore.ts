@@ -45,6 +45,7 @@ export type PrismaWorkspaceView = {
   sortBy: string | null;
   sortOrder: "asc" | "desc" | null;
   columns: string[];
+  groupByFieldId: string | null;
 };
 
 export type PrismaWorkspaceRecord = {
@@ -82,6 +83,20 @@ export type PrismaWorkspaceActivity = {
   agentId: string;
   action: string;
   details: Record<string, unknown>;
+  createdAt: string;
+};
+
+export type PrismaWorkspaceImportHistory = {
+  id: string;
+  workspaceId: string;
+  objectId: string;
+  fileName: string;
+  totalRows: number;
+  importedRows: number;
+  skippedRows: number;
+  errorRows: number;
+  summary: Record<string, unknown>;
+  createdBy: string | null;
   createdAt: string;
 };
 
@@ -212,6 +227,7 @@ function mapView(row: Record<string, unknown>): PrismaWorkspaceView {
     sortBy: row.sort_by ? String(row.sort_by) : null,
     sortOrder: row.sort_order === "desc" ? "desc" : row.sort_order === "asc" ? "asc" : null,
     columns: Array.isArray(row.columns) ? (row.columns as string[]) : [],
+    groupByFieldId: row.group_by_field_id ? String(row.group_by_field_id) : null,
   };
 }
 
@@ -307,6 +323,22 @@ function mapActivity(row: Record<string, unknown>): PrismaWorkspaceActivity {
     agentId: String(row.agent_id),
     action: String(row.action),
     details: (row.details as Record<string, unknown>) ?? {},
+    createdAt: String(row.created_at),
+  };
+}
+
+function mapImportHistory(row: Record<string, unknown>): PrismaWorkspaceImportHistory {
+  return {
+    id: String(row.id),
+    workspaceId: String(row.workspace_id),
+    objectId: String(row.object_id),
+    fileName: String(row.file_name),
+    totalRows: Number(row.total_rows ?? 0),
+    importedRows: Number(row.imported_rows ?? 0),
+    skippedRows: Number(row.skipped_rows ?? 0),
+    errorRows: Number(row.error_rows ?? 0),
+    summary: (row.summary as Record<string, unknown>) ?? {},
+    createdBy: row.created_by ? String(row.created_by) : null,
     createdAt: String(row.created_at),
   };
 }
@@ -556,22 +588,46 @@ export async function listWorkspaceFields(workspaceId: string) {
 
 export async function listWorkspaceViews(workspaceId: string, objectId?: string) {
   const supabase = requireSupabaseAdmin();
-  let query = supabase
-    .from("workspace_views")
-    .select("id, workspace_id, object_id, name, filters, sort_by, sort_order, columns")
-    .eq("workspace_id", workspaceId)
-    .order("created_at", { ascending: true });
+  const buildQuery = (selectClause: string) => {
+    let query = supabase
+      .from("workspace_views")
+      .select(selectClause)
+      .eq("workspace_id", workspaceId)
+      .order("created_at", { ascending: true });
 
-  if (objectId) {
-    query = query.eq("object_id", objectId);
+    if (objectId) {
+      query = query.eq("object_id", objectId);
+    }
+
+    return query;
+  };
+
+  const preferredSelect = "id, workspace_id, object_id, name, filters, sort_by, sort_order, columns, group_by_field_id";
+  const fallbackSelect = "id, workspace_id, object_id, name, filters, sort_by, sort_order, columns";
+
+  const withGroupBy = await buildQuery(preferredSelect);
+  if (!withGroupBy.error) {
+    const rows = Array.isArray(withGroupBy.data) ? withGroupBy.data : [];
+    return rows.map((row) => mapView(row as unknown as Record<string, unknown>));
   }
 
-  const { data, error } = await query;
-  if (error) {
-    throw new Error(error.message);
+  // Backward-compatibility for environments where the M15 migration has not run yet.
+  if (!withGroupBy.error.message.includes("group_by_field_id")) {
+    throw new Error(withGroupBy.error.message);
   }
 
-  return (data ?? []).map((row) => mapView(row as Record<string, unknown>));
+  const withoutGroupBy = await buildQuery(fallbackSelect);
+  if (withoutGroupBy.error) {
+    throw new Error(withoutGroupBy.error.message);
+  }
+
+  const fallbackRows = Array.isArray(withoutGroupBy.data) ? withoutGroupBy.data : [];
+  return fallbackRows.map((row) =>
+    mapView({
+      ...(row as unknown as Record<string, unknown>),
+      group_by_field_id: null,
+    }),
+  );
 }
 
 export async function listWorkspaceRecords(workspaceId: string, objectId?: string) {
@@ -662,6 +718,22 @@ export async function listWorkspaceActivity(workspaceId: string, limit = 30) {
   }
 
   return (data ?? []).map((row) => mapActivity(row as Record<string, unknown>));
+}
+
+export async function listWorkspaceImportHistory(workspaceId: string, limit = 20) {
+  const supabase = requireSupabaseAdmin();
+  const { data, error } = await supabase
+    .from("workspace_import_history")
+    .select("id, workspace_id, object_id, file_name, total_rows, imported_rows, skipped_rows, error_rows, summary, created_by, created_at")
+    .eq("workspace_id", workspaceId)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return (data ?? []).map((row) => mapImportHistory(row as Record<string, unknown>));
 }
 
 export async function getWorkspaceSnapshot(workspaceSlug: string): Promise<WorkspaceSnapshot | null> {

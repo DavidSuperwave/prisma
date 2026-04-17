@@ -31,6 +31,30 @@ type DashboardCardSeed = {
   config: Record<string, unknown>;
 };
 
+export type WorkspaceSchemaFieldProposal = {
+  name: string;
+  key: string;
+  type: string;
+  required?: boolean;
+  options?: Record<string, unknown>;
+};
+
+export type WorkspaceSchemaObjectProposal = {
+  name: string;
+  singularName?: string | null;
+  pluralName?: string | null;
+  description?: string | null;
+  icon?: string | null;
+  fields: WorkspaceSchemaFieldProposal[];
+};
+
+export type WorkspaceSchemaProposal = {
+  proposalId: string;
+  title: string;
+  objects: WorkspaceSchemaObjectProposal[];
+  sourcePrompt?: string | null;
+};
+
 function requireSupabaseAdmin() {
   const supabase = getSupabaseAdmin();
   if (!supabase) {
@@ -132,6 +156,19 @@ async function ensureFields(workspaceId: string, objectId: string, fields: Field
   if (error) {
     throw error;
   }
+}
+
+async function resolveActivityAgentId(workspaceId: string) {
+  const supabase = requireSupabaseAdmin();
+  const { data } = await supabase
+    .from("workspace_agents")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .in("type", ["copilot", "worker"])
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  return data?.id ? String(data.id) : null;
 }
 
 async function ensureView(workspaceId: string, objectId: string, view: ViewDefinition) {
@@ -313,6 +350,69 @@ export async function bootstrapWorkspaceCrm(workspaceId: string) {
   return {
     createdObjects: ["Contacts", "Companies", "Deals"],
     createdViews: ["New Leads", "Pipeline"],
+  };
+}
+
+export async function applyWorkspaceSchemaProposal(
+  workspaceId: string,
+  proposal: WorkspaceSchemaProposal,
+  actorUserId?: string | null,
+) {
+  const createdObjects: Array<{ objectName: string; fieldCount: number }> = [];
+
+  for (const objectProposal of proposal.objects) {
+    const objectName = objectProposal.name.trim();
+    if (!objectName) {
+      continue;
+    }
+    const objectId = await ensureObject(workspaceId, {
+      name: objectName,
+      singularName: objectProposal.singularName?.trim() || objectName,
+      pluralName: objectProposal.pluralName?.trim() || `${objectName}s`,
+      description: objectProposal.description?.trim() || "Created from CEO schema proposal.",
+      icon: objectProposal.icon?.trim() || "database",
+    });
+
+    const normalizedFields: FieldDefinition[] = objectProposal.fields.map((field, index) => ({
+      name: field.name,
+      key: field.key,
+      type: field.type,
+      required: field.required ?? false,
+      options: field.options ?? {},
+      sortOrder: index + 1,
+    }));
+
+    if (normalizedFields.length > 0) {
+      await ensureFields(workspaceId, objectId, normalizedFields);
+    }
+
+    createdObjects.push({
+      objectName,
+      fieldCount: normalizedFields.length,
+    });
+  }
+
+  const supabase = requireSupabaseAdmin();
+  const activityAgentId = await resolveActivityAgentId(workspaceId);
+  if (activityAgentId) {
+    await supabase.from("agent_activity").insert({
+      workspace_id: workspaceId,
+      agent_id: activityAgentId,
+      action: "schema.applied",
+      details: {
+        proposal_id: proposal.proposalId,
+        title: proposal.title,
+        objects: createdObjects,
+        source_prompt: proposal.sourcePrompt ?? null,
+        created_by: actorUserId ?? null,
+      },
+    });
+  }
+
+  return {
+    proposalId: proposal.proposalId,
+    title: proposal.title,
+    createdObjects,
   };
 }
 

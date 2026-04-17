@@ -212,11 +212,6 @@ export function WorkspaceShell({
                 <Link href="/workspaces" className="workspace-link workspace-user-menu__link">
                   Todos los workspaces
                 </Link>
-                {currentRole === "admin" ? (
-                  <Link href="/admin" className="workspace-link workspace-user-menu__link">
-                    Abrir admin
-                  </Link>
-                ) : null}
                 <form action="/logout" method="post">
                   <button type="submit" className="workspace-user-menu__button">
                     Cerrar sesión

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   AlertTriangle,
@@ -31,6 +31,7 @@ import type {
   PrismaWorkspaceView,
 } from "@/lib/workspaceStore";
 import { applyViewToRecords, deriveQueueItems, getRecordFieldValue } from "@/lib/workspaceStore";
+import { consumeCompleteSseDataLines } from "@/lib/chatSseClient";
 
 type OverviewProps = {
   dashboardCards?: Array<{
@@ -48,6 +49,7 @@ type OverviewProps = {
   }>;
   queueItems: Array<{
     id: string;
+    recordId?: string;
     title: string;
     subtitle: string;
     status: string;
@@ -102,6 +104,7 @@ type AgentPanelProps = {
   workspaceId: string;
   workspaceSlug: string;
   currentRole: "admin" | "operator" | "viewer";
+  currentUserEmail?: string | null;
   agentLimit: number;
   agentTemplates: Array<{
     id: string;
@@ -118,6 +121,7 @@ type AgentPanelProps = {
   agents: Array<{
     id: string;
     name: string;
+    legacyRole?: string | null;
     type: string;
     status: string;
     description: string | null;
@@ -143,6 +147,7 @@ type QueuePanelProps = {
   recordBaseHref?: string;
   queueItems: Array<{
     id: string;
+    recordId?: string;
     title: string;
     subtitle: string;
     status: string;
@@ -162,7 +167,13 @@ type ChatPanelProps = {
     label: string;
     href?: string;
     prompt?: string;
-    action?: "bootstrap-crm" | "bootstrap-dashboard";
+    action?:
+      | "bootstrap-crm"
+      | "bootstrap-dashboard"
+      | "scenario-close-import"
+      | "scenario-seasonal-analysis"
+      | "scenario-quote-approval"
+      | "scenario-calendar-scheduling";
     preset?: "operations" | "sales" | "crm" | "custom";
   }>;
   suggestedPrompts: string[];
@@ -173,12 +184,19 @@ type ChatPanelProps = {
     activeRecordName?: string | null;
     queueTitles: string[];
   };
-  copilotAgent: {
+  chatAgents: Array<{
     id: string;
     name: string;
+    type: "copilot" | "channel" | "worker";
     status: string;
     description: string | null;
-  } | null;
+    isPrimaryCopilot?: boolean;
+    readinessState?: "ready" | "draft";
+    readinessIssues?: string[];
+    isReadyForExecution?: boolean;
+  }>;
+  primaryAgentId?: string | null;
+  canSetPrimaryAgent?: boolean;
   askPrompt?: string | null;
 };
 
@@ -233,7 +251,43 @@ type ChatMessage = {
   role: "user" | "assistant";
   content: string;
   timestamp: string;
+  blocks?: ChatMessageBlock[];
+  attachments?: unknown[];
 };
+
+type ChatSchemaProposalField = {
+  name: string;
+  key: string;
+  type: string;
+  required?: boolean;
+};
+
+type ChatSchemaProposalObject = {
+  name: string;
+  singularName?: string;
+  pluralName?: string;
+  description?: string;
+  icon?: string;
+  fields: ChatSchemaProposalField[];
+};
+
+type ChatSchemaProposal = {
+  proposalId: string;
+  title: string;
+  rationale?: string;
+  requiresApproval: boolean;
+  sourcePrompt?: string;
+  suggestedNextAction?: string;
+  objects: ChatSchemaProposalObject[];
+};
+
+type ChatMessageBlock =
+  | {
+      kind: "schema_proposal";
+      proposal: ChatSchemaProposal;
+      approvalState?: "pending" | "approved" | "failed";
+      approvalMessage?: string;
+    };
 
 type ChatAttachment = {
   id: string;
@@ -244,8 +298,10 @@ type ChatAttachment = {
 
 type ChatSession = {
   id: string;
+  agentId: string;
   title: string;
-  conversationId: string;
+  source: string;
+  runtimeConversationId: string;
   messages: ChatMessage[];
   attachments: ChatAttachment[];
   updatedAt: string;
@@ -276,24 +332,18 @@ function Panel({
   );
 }
 
-function createSession(userId: string) {
+function createSession(userId: string, agentId: string) {
   const sessionId = typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}`;
   return {
     id: sessionId,
+    agentId,
     title: "Nuevo chat",
-    conversationId: `user-${userId}-${sessionId}`,
+    source: "workspace_chat",
+    runtimeConversationId: `user-${userId}-${agentId}-${sessionId}`,
     messages: [],
     attachments: [],
     updatedAt: new Date().toISOString(),
   } satisfies ChatSession;
-}
-
-function parseSseChunk(chunk: string) {
-  return chunk
-    .split("\n\n")
-    .map((part) => part.trim())
-    .filter(Boolean)
-    .flatMap((part) => part.split("\n").filter((line) => line.startsWith("data: ")).map((line) => line.slice(6)));
 }
 
 function currentTimeLabel() {
@@ -358,7 +408,7 @@ export function OverviewPanel({
   const latestActivity = activity[0];
   if (latestActivity) {
     statusCards.push({
-      id: latestActivity.id,
+      id: String(latestActivity.id),
       title: formatActivityLabel(latestActivity.action),
       subtitle: formatActivityDetails(latestActivity.details),
       tone: "active",
@@ -466,7 +516,11 @@ export function OverviewPanel({
     return (
       <a
         key={`${keyPrefix}-${item.id}`}
-        href={`${recordBaseHref}&object=${item.objectId}&record=${item.id}`}
+        href={
+          recordBaseHref && item.objectId && (item.recordId ?? item.id)
+            ? `${recordBaseHref}&object=${item.objectId}&record=${item.recordId ?? item.id}`
+            : undefined
+        }
         style={queueItemLinkStyle}
       >
         {rowContent}
@@ -775,7 +829,11 @@ export function QueuePanel({ queueItems, recordBaseHref }: QueuePanelProps) {
             {filteredQueueItems.map((item) => (
               <a
                 key={item.id}
-                href={recordBaseHref ? `${recordBaseHref}&object=${item.objectId}&record=${item.id}` : undefined}
+                href={
+                  recordBaseHref && item.objectId && (item.recordId ?? item.id)
+                    ? `${recordBaseHref}&object=${item.objectId}&record=${item.recordId ?? item.id}`
+                    : undefined
+                }
                 style={{
                   ...queueTableRowStyle,
                   borderLeft: `4px solid ${resolvePriorityColor(item.status)}`,
@@ -809,47 +867,259 @@ export function ChatPanel({
   quickActions,
   suggestedPrompts,
   contextSummary,
-  copilotAgent,
+  chatAgents,
+  primaryAgentId,
+  canSetPrimaryAgent = false,
   askPrompt,
 }: ChatPanelProps) {
-  const storageKey = `prisma-chat:${workspaceSlug}:${userId}:${copilotAgent?.id ?? "copilot"}`;
   const router = useRouter();
+  const sortedAgents = [...chatAgents].sort((left, right) => {
+    const leftPrimary = left.isPrimaryCopilot ? 1 : 0;
+    const rightPrimary = right.isPrimaryCopilot ? 1 : 0;
+    if (leftPrimary !== rightPrimary) {
+      return rightPrimary - leftPrimary;
+    }
+    if (left.type === "copilot" && right.type !== "copilot") return -1;
+    if (left.type !== "copilot" && right.type === "copilot") return 1;
+    if (left.status === "active" && right.status !== "active") return -1;
+    if (left.status !== "active" && right.status === "active") return 1;
+    return left.name.localeCompare(right.name, "es");
+  });
+  const defaultAgentId =
+    (primaryAgentId && sortedAgents.some((agent) => agent.id === primaryAgentId) ? primaryAgentId : null) ??
+    sortedAgents.find((agent) => agent.isPrimaryCopilot)?.id ??
+    sortedAgents.find((agent) => agent.type === "copilot" && agent.status === "active")?.id ??
+    sortedAgents.find((agent) => agent.type === "copilot")?.id ??
+    sortedAgents.find((agent) => agent.status === "active")?.id ??
+    sortedAgents[0]?.id ??
+    "";
+  const [selectedAgentId, setSelectedAgentId] = useState<string>(defaultAgentId);
+  const selectedAgent = sortedAgents.find((agent) => agent.id === selectedAgentId) ?? null;
+  const storageKey = `prisma-chat:${workspaceSlug}:${userId}:${selectedAgentId || "none"}`;
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string>("");
+  const [isSessionsLoading, setIsSessionsLoading] = useState(false);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [renameDraft, setRenameDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
+  const [pendingProposalId, setPendingProposalId] = useState<string | null>(null);
+
+  function toTimeLabel(isoTimestamp: string) {
+    return new Intl.DateTimeFormat("es-MX", {
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(new Date(isoTimestamp));
+  }
+
+  function normalizeAttachmentsFromMessages(messages: ChatMessage[]) {
+    const map = new Map<string, ChatAttachment>();
+    for (const message of messages) {
+      const attachmentsFromMetadata = message.attachments;
+      if (!Array.isArray(attachmentsFromMetadata)) {
+        continue;
+      }
+      for (const item of attachmentsFromMetadata) {
+        if (!item || typeof item !== "object" || Array.isArray(item)) {
+          continue;
+        }
+        const typed = item as Record<string, unknown>;
+        const id = typeof typed.id === "string" ? typed.id : "";
+        const fileName = typeof typed.fileName === "string" ? typed.fileName : "";
+        const publicUrl = typeof typed.publicUrl === "string" ? typed.publicUrl : "";
+        if (!id || !fileName || !publicUrl) {
+          continue;
+        }
+        map.set(id, {
+          id,
+          fileName,
+          publicUrl,
+          contentType:
+            typeof typed.contentType === "string" ? typed.contentType : "application/octet-stream",
+        });
+      }
+    }
+    return Array.from(map.values());
+  }
+
+  const fetchConversationMessages = useCallback(async (conversationId: string) => {
+    const response = await fetch(
+      `/api/workspaces/${workspaceSlug}/conversations/${conversationId}/messages`,
+    );
+    const payload = (await response.json().catch(() => ({}))) as {
+      error?: string;
+      messages?: Array<{
+        id: string;
+        role: string;
+        content: string;
+        blocks?: unknown[];
+        attachments?: unknown[];
+        createdAt: string;
+      }>;
+    };
+    if (!response.ok) {
+      throw new Error(payload.error ?? "No se pudo cargar la conversación.");
+    }
+    const mappedMessages: ChatMessage[] = (payload.messages ?? []).map((message) => ({
+      id: message.id,
+      role: message.role === "assistant" ? "assistant" : "user",
+      content: message.content ?? "",
+      timestamp: toTimeLabel(message.createdAt),
+      blocks: Array.isArray(message.blocks) ? (message.blocks as ChatMessageBlock[]) : [],
+      attachments: Array.isArray(message.attachments) ? message.attachments : [],
+    })) as ChatMessage[];
+    return {
+      messages: mappedMessages,
+      attachments: normalizeAttachmentsFromMessages(mappedMessages),
+    };
+  }, [workspaceSlug]);
+
+  async function importLegacySessions(agentId: string) {
+    if (typeof window === "undefined") {
+      return false;
+    }
+    const raw = window.localStorage.getItem(storageKey);
+    if (!raw) {
+      return false;
+    }
+    let parsedSessions: ChatSession[] = [];
+    try {
+      parsedSessions = JSON.parse(raw) as ChatSession[];
+    } catch {
+      return false;
+    }
+    if (!Array.isArray(parsedSessions) || parsedSessions.length === 0) {
+      return false;
+    }
+
+    let imported = 0;
+    for (const legacy of parsedSessions.slice(0, 8)) {
+      const response = await fetch(`/api/workspaces/${workspaceSlug}/conversations`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          agentId,
+          title: legacy.title,
+          runtimeConversationId:
+            typeof legacy.runtimeConversationId === "string"
+              ? legacy.runtimeConversationId
+              : (legacy as unknown as { conversationId?: string }).conversationId,
+          source: "workspace_chat",
+          metadata: {
+            migrated_from_local_storage: true,
+          },
+          seedMessages: (Array.isArray(legacy.messages) ? legacy.messages : []).map((message) => ({
+            role: message.role,
+            content: message.content,
+            blocks: message.blocks ?? [],
+            metadata: {},
+          })),
+        }),
+      });
+      if (response.ok) {
+        imported += 1;
+      }
+    }
+    return imported > 0;
+  }
+
+  async function loadConversations(agentId: string) {
+    setIsSessionsLoading(true);
+    setError(null);
+    try {
+      const fetchConversations = async () => {
+        const response = await fetch(
+          `/api/workspaces/${workspaceSlug}/conversations?agentId=${encodeURIComponent(agentId)}&source=workspace_chat`,
+        );
+        const payload = (await response.json().catch(() => ({}))) as {
+          error?: string;
+          conversations?: Array<{
+            id: string;
+            title: string;
+            source: string;
+            runtimeConversationId: string;
+            updatedAt: string;
+          }>;
+        };
+        if (!response.ok) {
+          throw new Error(payload.error ?? "No se pudieron cargar las conversaciones.");
+        }
+        return payload.conversations ?? [];
+      };
+
+      let conversationRows = await fetchConversations();
+      if (conversationRows.length === 0) {
+        const imported = await importLegacySessions(agentId);
+        if (imported) {
+          conversationRows = await fetchConversations();
+        }
+      }
+
+      if (conversationRows.length === 0) {
+        const createResponse = await fetch(`/api/workspaces/${workspaceSlug}/conversations`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ agentId }),
+        });
+        const createPayload = (await createResponse.json().catch(() => ({}))) as {
+          error?: string;
+          conversation?: {
+            id: string;
+            title: string;
+            source: string;
+            runtimeConversationId: string;
+            updatedAt: string;
+          };
+        };
+        if (!createResponse.ok || !createPayload.conversation) {
+          throw new Error(createPayload.error ?? "No se pudo crear la conversación inicial.");
+        }
+        conversationRows = [createPayload.conversation];
+      }
+
+      const mappedSessions = conversationRows.map((conversation) => ({
+        id: conversation.id,
+        agentId,
+        title: conversation.title,
+        source: conversation.source,
+        runtimeConversationId: conversation.runtimeConversationId,
+        messages: [],
+        attachments: [],
+        updatedAt: conversation.updatedAt,
+      })) satisfies ChatSession[];
+      setSessions(mappedSessions);
+      setSelectedSessionId((current) =>
+        current && mappedSessions.some((session) => session.id === current)
+          ? current
+          : mappedSessions[0]?.id ?? "",
+      );
+    } catch (caughtError) {
+      const fallback = createSession(userId, agentId);
+      setSessions([fallback]);
+      setSelectedSessionId(fallback.id);
+      setError(caughtError instanceof Error ? caughtError.message : "No se pudo cargar el historial de chat.");
+    } finally {
+      setIsSessionsLoading(false);
+    }
+  }
 
   useEffect(() => {
-    if (typeof window === "undefined") {
+    if (!selectedAgent && sortedAgents.length > 0) {
+      setSelectedAgentId(defaultAgentId);
+    }
+  }, [defaultAgentId, selectedAgent, sortedAgents.length]);
+
+  useEffect(() => {
+    if (!selectedAgentId) {
+      setSessions([]);
+      setSelectedSessionId("");
       return;
     }
-
-    const fallbackSession = createSession(userId);
-    const stored = window.localStorage.getItem(storageKey);
-    if (!stored) {
-      setSessions([fallbackSession]);
-      setSelectedSessionId(fallbackSession.id);
-      return;
-    }
-
-    try {
-      const parsed = JSON.parse(stored) as ChatSession[];
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        setSessions(parsed);
-        setSelectedSessionId(parsed[0].id);
-        return;
-      }
-    } catch {
-      // ignore invalid cache
-    }
-
-    setSessions([fallbackSession]);
-    setSelectedSessionId(fallbackSession.id);
-  }, [storageKey, userId]);
+    void loadConversations(selectedAgentId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedAgentId, workspaceSlug, userId]);
 
   useEffect(() => {
     if (typeof window === "undefined" || sessions.length === 0) {
@@ -857,6 +1127,46 @@ export function ChatPanel({
     }
     window.localStorage.setItem(storageKey, JSON.stringify(sessions));
   }, [sessions, storageKey]);
+
+  useEffect(() => {
+    if (!selectedSessionId || sessions.length === 0) {
+      return;
+    }
+    const targetSession = sessions.find((session) => session.id === selectedSessionId);
+    if (!targetSession || targetSession.messages.length > 0) {
+      return;
+    }
+
+    let isCancelled = false;
+    void (async () => {
+      try {
+        const hydrated = await fetchConversationMessages(targetSession.id);
+        if (isCancelled) {
+          return;
+        }
+        setSessions((current) =>
+          current.map((session) =>
+            session.id === targetSession.id
+              ? {
+                  ...session,
+                  messages: hydrated.messages,
+                  attachments: hydrated.attachments,
+                  updatedAt: new Date().toISOString(),
+                }
+              : session,
+          ),
+        );
+      } catch (caughtError) {
+        if (!isCancelled) {
+          setError(caughtError instanceof Error ? caughtError.message : "No se pudo cargar la conversación.");
+        }
+      }
+    })();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [fetchConversationMessages, selectedSessionId, sessions]);
 
   const selectedSession = sessions.find((session) => session.id === selectedSessionId) ?? sessions[0] ?? null;
   const selectedSessionTitle = selectedSession?.title ?? "";
@@ -886,28 +1196,69 @@ export function ChatPanel({
     );
   }
 
-  function createNewChat() {
-    const session = createSession(userId);
-    setSessions((current) => [session, ...current]);
-    setSelectedSessionId(session.id);
-    setInput("");
+  async function createNewChat() {
+    if (!selectedAgent) {
+      return;
+    }
     setError(null);
+    try {
+      const response = await fetch(`/api/workspaces/${workspaceSlug}/conversations`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          agentId: selectedAgent.id,
+        }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        conversation?: {
+          id: string;
+          title: string;
+          source: string;
+          runtimeConversationId: string;
+          updatedAt: string;
+        };
+      };
+      if (!response.ok || !payload.conversation) {
+        throw new Error(payload.error ?? "No se pudo crear un nuevo chat.");
+      }
+      const session = {
+        id: payload.conversation.id,
+        agentId: selectedAgent.id,
+        title: payload.conversation.title,
+        source: payload.conversation.source,
+        runtimeConversationId: payload.conversation.runtimeConversationId,
+        messages: [],
+        attachments: [],
+        updatedAt: payload.conversation.updatedAt,
+      } satisfies ChatSession;
+      setSessions((current) => [session, ...current]);
+      setSelectedSessionId(session.id);
+      setInput("");
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "No se pudo crear un nuevo chat.");
+    }
   }
 
-  function renameSession(sessionId: string, nextTitle: string) {
+  async function renameSession(sessionId: string, nextTitle: string) {
     const trimmed = nextTitle.trim();
     if (!trimmed) {
       return;
     }
-    updateSession(sessionId, (session) => ({
-      ...session,
-      title: trimmed,
-      updatedAt: new Date().toISOString(),
-    }));
+    updateSession(sessionId, (session) => ({ ...session, title: trimmed, updatedAt: new Date().toISOString() }));
+    try {
+      await fetch(`/api/workspaces/${workspaceSlug}/conversations/${sessionId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: trimmed }),
+      });
+    } catch {
+      // Keep optimistic rename in local cache.
+    }
   }
 
   async function uploadDocument(file: File) {
-    if (!selectedSession || isUploading) {
+    if (!selectedSession || !selectedAgent || isUploading) {
       return;
     }
 
@@ -917,7 +1268,10 @@ export function ChatPanel({
     try {
       const formData = new FormData();
       formData.append("file", file);
-      formData.append("conversationId", selectedSession.conversationId);
+      formData.append("sessionTitle", selectedSession.title);
+      formData.append("conversationId", selectedSession.runtimeConversationId);
+      formData.append("workspaceConversationId", selectedSession.id);
+      formData.append("agentId", selectedAgent.id);
 
       const response = await fetch(`/api/workspaces/${workspaceSlug}/documents`, {
         method: "POST",
@@ -958,10 +1312,37 @@ export function ChatPanel({
             role: "assistant",
             content: `Documento subido: ${uploadedDocumentName}. Se agregó al dataset Documents y el workspace se actualizará.`,
             timestamp: currentTimeLabel(),
+            attachments: [
+              {
+                id: uploadedRecordId,
+                fileName: uploadedDocumentName,
+                publicUrl: uploadedPublicUrl,
+                contentType: payload.contentType ?? file.type ?? "application/octet-stream",
+              },
+            ],
           },
         ],
         updatedAt: new Date().toISOString(),
       }));
+      void fetch(`/api/workspaces/${workspaceSlug}/conversations/${selectedSession.id}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          role: "assistant",
+          content: `Documento subido: ${uploadedDocumentName}. Se agregó al dataset Documents y el workspace se actualizará.`,
+          attachments: [
+            {
+              id: uploadedRecordId,
+              fileName: uploadedDocumentName,
+              publicUrl: uploadedPublicUrl,
+              contentType: payload.contentType ?? file.type ?? "application/octet-stream",
+            },
+          ],
+          metadata: {
+            uploaded_via: "chat",
+          },
+        }),
+      });
     } catch (caughtError) {
       const message = caughtError instanceof Error ? caughtError.message : "No se pudo subir el documento.";
       setError(message);
@@ -971,13 +1352,20 @@ export function ChatPanel({
     }
   }
 
-  function deleteSession(sessionId: string) {
+  async function deleteSession(sessionId: string) {
+    try {
+      await fetch(`/api/workspaces/${workspaceSlug}/conversations/${sessionId}`, {
+        method: "DELETE",
+      });
+    } catch {
+      // Ignore network errors and continue local cleanup.
+    }
     setSessions((current) => {
       const next = current.filter((session) => session.id !== sessionId);
       if (next.length > 0) {
         return next;
       }
-      return [createSession(userId)];
+      return selectedAgent ? [createSession(userId, selectedAgent.id)] : [];
     });
     setSelectedSessionId((current) => {
       if (current !== sessionId) {
@@ -987,9 +1375,107 @@ export function ChatPanel({
     });
   }
 
+  async function approveSchemaProposal(messageId: string, proposal: ChatSchemaProposal) {
+    if (!selectedSession || pendingProposalId === proposal.proposalId) {
+      return;
+    }
+
+    setPendingProposalId(proposal.proposalId);
+    setError(null);
+    setActionFeedback(null);
+
+    updateSession(selectedSession.id, (session) => ({
+      ...session,
+      messages: session.messages.map((entry) => {
+        if (entry.id !== messageId) return entry;
+        return {
+          ...entry,
+          blocks: (entry.blocks ?? []).map((block) =>
+            block.kind === "schema_proposal" && block.proposal.proposalId === proposal.proposalId
+              ? { ...block, approvalState: "pending" as const, approvalMessage: "Aplicando esquema..." }
+              : block,
+          ),
+        };
+      }),
+      updatedAt: new Date().toISOString(),
+    }));
+
+    try {
+      const response = await fetch(`/api/workspaces/${workspaceSlug}/actions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "apply-schema-proposal",
+          proposal,
+        }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        result?: { createdObjects?: Array<{ objectName: string; fieldCount: number }> };
+      };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "No se pudo aplicar el esquema.");
+      }
+
+      const createdObjects = payload.result?.createdObjects ?? [];
+      const summary =
+        createdObjects.length > 0
+          ? `Esquema aplicado: ${createdObjects.map((entry) => `${entry.objectName} (${entry.fieldCount} campos)`).join(", ")}.`
+          : "Esquema aplicado correctamente.";
+
+      updateSession(selectedSession.id, (session) => ({
+        ...session,
+        messages: [
+          ...session.messages.map((entry) => {
+            if (entry.id !== messageId) return entry;
+            return {
+              ...entry,
+              blocks: (entry.blocks ?? []).map((block) =>
+                block.kind === "schema_proposal" && block.proposal.proposalId === proposal.proposalId
+                  ? { ...block, approvalState: "approved" as const, approvalMessage: summary }
+                  : block,
+              ),
+            };
+          }),
+          {
+            id: `schema-result-${Date.now()}`,
+            role: "assistant",
+            content: summary,
+            timestamp: currentTimeLabel(),
+          },
+        ],
+        updatedAt: new Date().toISOString(),
+      }));
+
+      setActionFeedback(summary);
+      router.refresh();
+    } catch (caughtError) {
+      const message =
+        caughtError instanceof Error ? caughtError.message : "No se pudo aplicar el esquema.";
+      updateSession(selectedSession.id, (session) => ({
+        ...session,
+        messages: session.messages.map((entry) => {
+          if (entry.id !== messageId) return entry;
+          return {
+            ...entry,
+            blocks: (entry.blocks ?? []).map((block) =>
+              block.kind === "schema_proposal" && block.proposal.proposalId === proposal.proposalId
+                ? { ...block, approvalState: "failed" as const, approvalMessage: message }
+                : block,
+            ),
+          };
+        }),
+        updatedAt: new Date().toISOString(),
+      }));
+      setError(message);
+    } finally {
+      setPendingProposalId(null);
+    }
+  }
+
   async function sendMessage() {
     const trimmed = input.trim();
-    if (!trimmed || !selectedSession || !copilotAgent || isLoading) {
+    if (!trimmed || !selectedSession || !selectedAgent || isLoading) {
       return;
     }
 
@@ -1008,6 +1494,7 @@ export function ChatPanel({
       role: "assistant",
       content: "",
       timestamp: currentTimeLabel(),
+      blocks: [],
     };
 
     const optimisticMessages = [...selectedSession.messages, userMessage, assistantMessage];
@@ -1017,6 +1504,15 @@ export function ChatPanel({
       messages: optimisticMessages,
       updatedAt: new Date().toISOString(),
     }));
+    if (selectedSession.messages.length === 0) {
+      void fetch(`/api/workspaces/${workspaceSlug}/conversations/${selectedSession.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: trimmed.slice(0, 36),
+        }),
+      });
+    }
     setInput("");
 
     try {
@@ -1025,14 +1521,27 @@ export function ChatPanel({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           workspaceId,
-          workspaceContext: contextSummary,
-          agentId: copilotAgent.id,
-          conversationId: selectedSession.conversationId,
+          agentId: selectedAgent.id,
+          conversationId: selectedSession.runtimeConversationId,
+          appContext: {
+            current_tab: contextSummary.activeTab,
+            current_object: contextSummary.activeObjectName ?? null,
+            current_view: contextSummary.activeViewName ?? null,
+            current_record_title: contextSummary.activeRecordName ?? null,
+            queue_preview: contextSummary.queueTitles,
+          },
           message: trimmed,
-          history: selectedSession.messages.map((message) => ({
-            role: message.role,
-            content: message.content,
-          })),
+        }),
+      });
+      void fetch(`/api/workspaces/${workspaceSlug}/conversations/${selectedSession.id}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          role: "user",
+          content: trimmed,
+          metadata: {
+            origin: "workspace_chat",
+          },
         }),
       });
 
@@ -1043,6 +1552,8 @@ export function ChatPanel({
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+      let assistantContent = "";
+      let assistantBlocks: ChatMessageBlock[] = [];
 
       while (true) {
         const { value, done } = await reader.read();
@@ -1051,20 +1562,68 @@ export function ChatPanel({
         }
 
         buffer += decoder.decode(value, { stream: true });
-        const parts = parseSseChunk(buffer);
-        const endedWithBoundary = buffer.endsWith("\n\n");
-        buffer = endedWithBoundary ? "" : buffer.slice(buffer.lastIndexOf("\n\n") + 2);
+        const { remainder, dataLines } = consumeCompleteSseDataLines(buffer);
+        buffer = remainder;
 
-        for (const part of parts) {
-          const payload = JSON.parse(part) as { type: string; content?: string; error?: string };
-          if (payload.type === "delta" && payload.content) {
+        for (const raw of dataLines) {
+          if (raw === "[DONE]") {
+            continue;
+          }
+          let payload: {
+            type: string;
+            content?: string;
+            text?: string;
+            error?: string;
+            proposal?: ChatSchemaProposal;
+          };
+          try {
+            payload = JSON.parse(raw) as typeof payload;
+          } catch {
+            continue;
+          }
+          const deltaPiece =
+            typeof payload.content === "string"
+              ? payload.content
+              : typeof payload.text === "string"
+                ? payload.text
+                : "";
+          if (payload.type === "delta" && deltaPiece) {
+            assistantContent = `${assistantContent}${deltaPiece}`;
             updateSession(selectedSession.id, (session) => ({
               ...session,
               messages: session.messages.map((message) =>
-                message.id === assistantId ? { ...message, content: `${message.content}${payload.content}` } : message,
+                message.id === assistantId ? { ...message, content: `${message.content}${deltaPiece}` } : message,
               ),
               updatedAt: new Date().toISOString(),
             }));
+          }
+
+          if (payload.type === "schema_proposal" && payload.proposal) {
+            updateSession(selectedSession.id, (session) => ({
+              ...session,
+              messages: session.messages.map((message) =>
+                message.id === assistantId
+                  ? {
+                      ...message,
+                      blocks: [
+                        ...(message.blocks ?? []),
+                        {
+                          kind: "schema_proposal",
+                          proposal: payload.proposal!,
+                        },
+                      ],
+                    }
+                  : message,
+              ),
+              updatedAt: new Date().toISOString(),
+            }));
+            assistantBlocks = [
+              ...assistantBlocks,
+              {
+                kind: "schema_proposal",
+                proposal: payload.proposal,
+              },
+            ];
           }
 
           if (payload.type === "error") {
@@ -1072,6 +1631,19 @@ export function ChatPanel({
           }
         }
       }
+
+      void fetch(`/api/workspaces/${workspaceSlug}/conversations/${selectedSession.id}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          role: "assistant",
+          content: assistantContent,
+          blocks: assistantBlocks,
+          metadata: {
+            origin: "workspace_chat",
+          },
+        }),
+      });
     } catch (caughtError) {
       const message = caughtError instanceof Error ? caughtError.message : "Error desconocido";
       setError(message);
@@ -1087,16 +1659,80 @@ export function ChatPanel({
         ),
         updatedAt: new Date().toISOString(),
       }));
+      void fetch(`/api/workspaces/${workspaceSlug}/conversations/${selectedSession.id}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          role: "assistant",
+          content: "No pude responder en este momento. Intenta de nuevo o revisa la configuracion del runtime.",
+          metadata: {
+            origin: "workspace_chat",
+            error: message,
+          },
+        }),
+      });
     } finally {
       setIsLoading(false);
       window.setTimeout(() => { if (typeof window !== "undefined") { router.replace(`${window.location.pathname}${window.location.search}`); router.refresh(); } }, 400);
     }
   }
 
-  async function runWorkspaceAction(action: "bootstrap-crm" | "bootstrap-dashboard", preset?: "operations" | "sales" | "crm" | "custom") {
+  async function runWorkspaceAction(
+    action:
+      | "bootstrap-crm"
+      | "bootstrap-dashboard"
+      | "scenario-close-import"
+      | "scenario-seasonal-analysis"
+      | "scenario-quote-approval"
+      | "scenario-calendar-scheduling",
+    preset?: "operations" | "sales" | "crm" | "custom",
+  ) {
     setError(null);
     setActionFeedback(null);
     try {
+      if (action.startsWith("scenario-")) {
+        const scenarioMap = {
+          "scenario-close-import": {
+            key: "close-import",
+            title: "Ejecutar cierre de importación y validación",
+          },
+          "scenario-seasonal-analysis": {
+            key: "seasonal-analysis",
+            title: "Generar análisis estacional de cartera",
+          },
+          "scenario-quote-approval": {
+            key: "quote-approval",
+            title: "Preparar cotización para aprobación",
+          },
+          "scenario-calendar-scheduling": {
+            key: "calendar-scheduling",
+            title: "Coordinar ventana de agenda con cliente",
+          },
+        } as const;
+        const scenario = scenarioMap[action as keyof typeof scenarioMap];
+        const response = await fetch(`/api/workspaces/${workspaceSlug}/actions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "run-scenario",
+            scenario: {
+              key: scenario.key,
+              title: scenario.title,
+              metadata: {
+                source: "chat_quick_action",
+              },
+            },
+          }),
+        });
+        const data = (await response.json().catch(() => ({}))) as { error?: string; task?: { id: string } };
+        if (!response.ok) {
+          throw new Error(data.error ?? "No se pudo ejecutar el escenario.");
+        }
+        setActionFeedback(`Escenario en cola. Task creada: ${data.task?.id?.slice(0, 8) ?? "n/a"}…`);
+        router.refresh();
+        return;
+      }
+
       const response = await fetch(`/api/workspaces/${workspaceSlug}/actions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1120,18 +1756,42 @@ export function ChatPanel({
     }
   }
 
+  async function setAsPrimaryCeo() {
+    if (!selectedAgent || selectedAgent.type !== "copilot") {
+      return;
+    }
+    setError(null);
+    try {
+      const response = await fetch(`/api/workspaces/${workspaceSlug}/agents/${selectedAgent.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          setAsPrimaryCopilot: true,
+        }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as { error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "No se pudo definir el CEO principal.");
+      }
+      setActionFeedback(`${selectedAgent.name} ahora es el CEO principal del workspace.`);
+      router.refresh();
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "No se pudo definir el CEO principal.");
+    }
+  }
+
   return (
     <div style={stackStyle}>
       <Panel
         eyebrow="Chat"
-        title="Chat con CEO"
-        description="Conversaciones separadas por usuario dentro del workspace."
+        title="Chat con agentes"
+        description="Conversaciones separadas por usuario, con CEO principal por defecto."
       >
-        {!copilotAgent ? (
+        {!selectedAgent ? (
           <EmptyState
             icon={Bot}
-            title="No hay copilot disponible"
-            description="Activa un agente copilot para usar el chat del workspace."
+            title="No hay agentes disponibles"
+            description="Crea o activa un agente para usar el chat del workspace."
           />
         ) : (
           <div style={chatLayoutStyle}>
@@ -1139,14 +1799,38 @@ export function ChatPanel({
               <div style={chatSidebarHeaderStyle}>
                 <div>
                   <p style={eyebrowStyle}>Sesiones</p>
-                  <p style={chatSidebarCopyStyle}>{copilotAgent.name}</p>
+                  <p style={chatSidebarCopyStyle}>{selectedAgent.name}</p>
                 </div>
-                <button type="button" onClick={createNewChat} style={chatActionButtonStyle}>
+                <button type="button" onClick={() => void createNewChat()} style={chatActionButtonStyle}>
                   Nuevo chat
                 </button>
               </div>
 
+              <label style={{ ...chatSidebarCopyStyle, display: "grid", gap: 6 }}>
+                Agente
+                <select
+                  value={selectedAgentId}
+                  onChange={(event) => setSelectedAgentId(event.target.value)}
+                  style={chatRenameInputStyle}
+                >
+                  {sortedAgents.map((agent) => (
+                    <option key={agent.id} value={agent.id}>
+                      {agent.name} · {formatStatusLabel(agent.status)}
+                      {agent.isPrimaryCopilot ? " · CEO" : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {canSetPrimaryAgent && selectedAgent.type === "copilot" && !selectedAgent.isPrimaryCopilot ? (
+                <button type="button" style={chatActionButtonStyle} onClick={() => void setAsPrimaryCeo()}>
+                  Definir como CEO principal
+                </button>
+              ) : null}
+
               <div style={chatSessionListStyle}>
+                {isSessionsLoading ? (
+                  <p style={chatSessionMetaStyle}>Cargando conversaciones...</p>
+                ) : null}
                 {sessions.map((session) => (
                   <div
                     key={session.id}
@@ -1170,7 +1854,7 @@ export function ChatPanel({
                     </button>
                     <button
                       type="button"
-                      onClick={() => deleteSession(session.id)}
+                      onClick={() => void deleteSession(session.id)}
                       style={chatDeleteButtonStyle}
                       aria-label={`Eliminar ${session.title}`}
                     >
@@ -1187,18 +1871,32 @@ export function ChatPanel({
                   <p style={eyebrowStyle}>Conversación actual</p>
                   <h3 style={chatTitleStyle}>{selectedSession?.title ?? "Nuevo chat"}</h3>
                 </div>
-                <StatusPill tone={copilotAgent.status.toLowerCase()}>{copilotAgent.status}</StatusPill>
+                <div style={chatSessionMetaRowStyle}>
+                  <StatusPill tone={selectedAgent.status.toLowerCase()}>{selectedAgent.status}</StatusPill>
+                  <StatusPill tone={selectedAgent.type === "copilot" ? "active" : "neutral"}>
+                    {selectedAgent.type === "copilot"
+                      ? selectedAgent.isPrimaryCopilot
+                        ? "CEO principal"
+                        : "Copilot"
+                      : selectedAgent.type === "channel"
+                        ? "Canal"
+                        : "Worker"}
+                  </StatusPill>
+                  <StatusPill tone={selectedAgent.readinessState === "ready" ? "active" : "pending"}>
+                    {selectedAgent.readinessState === "ready" ? "Listo" : "Draft"}
+                  </StatusPill>
+                </div>
               </div>
 
               <div style={chatRenameRowStyle}>
                 <input
                   value={renameDraft}
                   onChange={(event) => setRenameDraft(event.target.value)}
-                  onBlur={() => selectedSession && renameSession(selectedSession.id, renameDraft)}
+                  onBlur={() => selectedSession && void renameSession(selectedSession.id, renameDraft)}
                   onKeyDown={(event) => {
                     if (event.key === "Enter") {
                       event.preventDefault();
-                      if (selectedSession) renameSession(selectedSession.id, renameDraft);
+                      if (selectedSession) void renameSession(selectedSession.id, renameDraft);
                     }
                   }}
                   style={chatRenameInputStyle}
@@ -1234,6 +1932,93 @@ export function ChatPanel({
                       }}
                     >
                       <p style={{ margin: 0, whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{message.content || "..."}</p>
+                      {message.blocks?.map((block, blockIndex) => {
+                        if (block.kind !== "schema_proposal") {
+                          return null;
+                        }
+                        const isApplying = pendingProposalId === block.proposal.proposalId;
+                        const canApprove =
+                          block.proposal.requiresApproval &&
+                          block.approvalState !== "approved" &&
+                          !isApplying;
+                        return (
+                          <div
+                            key={`${message.id}-proposal-${block.proposal.proposalId}-${blockIndex}`}
+                            style={{
+                              marginTop: 12,
+                              border: "1px solid rgba(51, 92, 255, 0.25)",
+                              borderRadius: 14,
+                              background: "rgba(51, 92, 255, 0.06)",
+                              padding: 12,
+                              display: "grid",
+                              gap: 8,
+                            }}
+                          >
+                            <p style={{ margin: 0, fontWeight: 700 }}>{block.proposal.title}</p>
+                            {block.proposal.rationale ? (
+                              <p style={{ margin: 0, fontSize: 13, color: "var(--workspace-muted)" }}>
+                                {block.proposal.rationale}
+                              </p>
+                            ) : null}
+                            {block.proposal.sourcePrompt ? (
+                              <div
+                                style={{
+                                  border: "1px dashed rgba(15, 23, 42, 0.2)",
+                                  borderRadius: 10,
+                                  padding: "8px 10px",
+                                  background: "rgba(255,255,255,0.75)",
+                                }}
+                              >
+                                <p style={{ margin: 0, fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                                  Evidencia fuente
+                                </p>
+                                <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--workspace-muted)" }}>
+                                  {block.proposal.sourcePrompt}
+                                </p>
+                              </div>
+                            ) : null}
+                            <div style={{ display: "grid", gap: 8 }}>
+                              {block.proposal.objects.map((entry) => (
+                                <div
+                                  key={`${block.proposal.proposalId}-${entry.name}`}
+                                  style={{
+                                    border: "1px solid rgba(15, 23, 42, 0.08)",
+                                    borderRadius: 10,
+                                    padding: 10,
+                                    background: "rgba(255,255,255,0.85)",
+                                    display: "grid",
+                                    gap: 6,
+                                  }}
+                                >
+                                  <p style={{ margin: 0, fontWeight: 600 }}>{entry.name}</p>
+                                  <p style={{ margin: 0, fontSize: 12, color: "var(--workspace-muted)" }}>
+                                    {entry.fields.map((field) => `${field.name} (${field.type})`).join(" · ")}
+                                  </p>
+                                </div>
+                              ))}
+                            </div>
+                            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                              <button
+                                type="button"
+                                style={chatActionButtonStyle}
+                                disabled={!canApprove}
+                                onClick={() => void approveSchemaProposal(message.id, block.proposal)}
+                              >
+                                {isApplying
+                                  ? "Aplicando..."
+                                  : block.approvalState === "approved"
+                                    ? "Aplicado"
+                                    : "Aprobar y crear esquema"}
+                              </button>
+                              {block.approvalMessage ? (
+                                <span style={{ fontSize: 12, color: "var(--workspace-muted)" }}>
+                                  {block.approvalMessage}
+                                </span>
+                              ) : null}
+                            </div>
+                          </div>
+                        );
+                      })}
                       <span style={{ ...chatTimestampStyle, color: message.role === "user" ? "rgba(255,255,255,0.7)" : "var(--workspace-muted)" }}>
                         {message.timestamp}
                       </span>
@@ -1337,7 +2122,7 @@ export function ChatPanel({
                 <textarea
                   value={input}
                   onChange={(event) => setInput(event.target.value)}
-                  placeholder="Escribe una pregunta sobre este workspace..."
+                  placeholder={`Escribe una pregunta para ${selectedAgent.name}...`}
                   rows={4}
                   style={chatTextareaStyle}
                 />
@@ -2297,10 +3082,10 @@ export function AgentsPanel({
   workspaceId,
   currentRole,
   workspaceSlug,
+  currentUserEmail,
   agentLimit,
   agentTemplates,
   agents,
-  activity,
 }: AgentPanelProps) {
   const [localAgents, setLocalAgents] = useState(agents);
   const [selectedAgentId, setSelectedAgentId] = useState<string>(agents[0]?.id ?? "");
@@ -2333,33 +3118,23 @@ export function AgentsPanel({
   const [builderError, setBuilderError] = useState<string>("");
   const [builderSuccess, setBuilderSuccess] = useState<string>("");
   const [isSaving, setIsSaving] = useState(false);
-  const [deploymentDraft, setDeploymentDraft] = useState({
-    apiEndpoint: "",
-    apiKey: "",
-    containerName: "",
-    connectionsText: "",
-  });
-  const [isSavingDeployment, setIsSavingDeployment] = useState(false);
-  const [isCheckingHealth, setIsCheckingHealth] = useState(false);
-  const [deploymentFeedback, setDeploymentFeedback] = useState<string>("");
-  const [lastHealthCheckAt, setLastHealthCheckAt] = useState<string | null>(null);
-  const [lastCronRunAt, setLastCronRunAt] = useState<string | null>(null);
-  const [connectionDraft, setConnectionDraft] = useState<Array<{ key: string; value: string }>>([]);
-  const [isSavingConnections, setIsSavingConnections] = useState(false);
-  const [connectionsFeedback, setConnectionsFeedback] = useState<string>("");
   const [chatInput, setChatInput] = useState("");
   const [chatError, setChatError] = useState<string | null>(null);
   const [isSending, setIsSending] = useState(false);
   const [chatMessages, setChatMessages] = useState<Array<{ role: "user" | "assistant"; content: string }>>([
     {
       role: "assistant",
-      content: "Usa este chat para validar el agente seleccionado sin salir del workspace.",
+      content: "Crea el agente y luego usa este chat para definir su rol, responsabilidades y conexiones.",
     },
   ]);
   const selectedAgent = localAgents.find((agent) => agent.id === selectedAgentId) ?? localAgents[0] ?? null;
-  const selectedActivity = activity.filter((entry) => entry.agentId === selectedAgent?.id).slice(0, 10);
+  const credentialEntries = getCredentialEnvEntries(selectedAgent?.channelConfig);
   const activeAgentCount = localAgents.length;
-  const canManageDeployment = currentRole === "admin";
+  const canManageAdvancedSettings = currentRole === "admin";
+  const normalizedBuilderUser = currentUserEmail?.trim().toLowerCase() || "anonymous";
+  const builderStorageKey = selectedAgentId
+    ? `builder-thread:${workspaceSlug}:${selectedAgentId}:${normalizedBuilderUser}`
+    : "";
 
   useEffect(() => {
     setLocalAgents(agents);
@@ -2377,7 +3152,7 @@ export function AgentsPanel({
     setDraft({
       id: current.id,
       name: current.name,
-      role: mapAgentTypeToRole(current.type),
+      role: current.legacyRole ?? mapAgentTypeToRole(current.type),
       description: current.description ?? "",
       soulMd: current.soulMd ?? "",
       skills: current.tools.join(", "),
@@ -2387,18 +3162,41 @@ export function AgentsPanel({
       cronJobs: JSON.stringify(current.cronJobs ?? [], null, 2),
       isActive: current.status !== "paused",
     });
-    setDeploymentDraft({
-      apiEndpoint: current.apiEndpoint ?? "",
-      apiKey: current.apiKey ?? "",
-      containerName: current.containerName ?? "",
-      connectionsText: "",
-    });
-    const seededConnections = getCredentialEnvEntries(current.channelConfig);
-    setConnectionDraft(seededConnections);
-    setLastCronRunAt(current.lastCronRunAt ?? null);
-    setConnectionsFeedback("");
     setIsCreateMode(false);
   }, [localAgents, selectedAgentId]);
+
+  useEffect(() => {
+    if (!selectedAgentId) {
+      setChatMessages([buildInitialChatMessage()]);
+      return;
+    }
+    try {
+      const raw = window.localStorage.getItem(builderStorageKey);
+      if (!raw) {
+        setChatMessages([buildInitialChatMessage(selectedAgent?.name)]);
+        return;
+      }
+      const parsed = JSON.parse(raw) as Array<{ role: "user" | "assistant"; content: string }>;
+      if (!Array.isArray(parsed) || parsed.length === 0) {
+        setChatMessages([buildInitialChatMessage(selectedAgent?.name)]);
+        return;
+      }
+      setChatMessages(parsed);
+    } catch {
+      setChatMessages([buildInitialChatMessage(selectedAgent?.name)]);
+    }
+  }, [builderStorageKey, selectedAgent?.name, selectedAgentId]);
+
+  useEffect(() => {
+    if (!selectedAgentId) {
+      return;
+    }
+    try {
+      window.localStorage.setItem(builderStorageKey, JSON.stringify(chatMessages));
+    } catch {
+      // Ignore localStorage write errors.
+    }
+  }, [builderStorageKey, chatMessages, selectedAgentId]);
 
   function applyTemplate(templateId: string) {
     const template = agentTemplates.find((entry) => entry.id === templateId);
@@ -2442,252 +3240,17 @@ export function AgentsPanel({
     });
     setBuilderError("");
     setBuilderSuccess("");
+    setChatMessages([buildInitialChatMessage()]);
     setIsCreateMode(true);
   }
 
-  async function saveDeploymentSettings() {
-    if (!selectedAgent || !canManageDeployment || isSavingDeployment) {
-      return;
-    }
-
-    if (!deploymentDraft.apiEndpoint.trim()) {
-      setDeploymentFeedback("El endpoint del agente es obligatorio.");
-      return;
-    }
-
-    if (!deploymentDraft.apiKey.trim()) {
-      setDeploymentFeedback("La API key del agente es obligatoria.");
-      return;
-    }
-
-    if (!deploymentDraft.containerName.trim()) {
-      setDeploymentFeedback("El nombre del contenedor es obligatorio.");
-      return;
-    }
-
-    setIsSavingDeployment(true);
-    setDeploymentFeedback("");
-    try {
-      const response = await fetch(`/api/workspaces/${workspaceSlug}/agents/${selectedAgent.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          apiEndpoint: deploymentDraft.apiEndpoint.trim(),
-          apiKey: deploymentDraft.apiKey.trim(),
-          containerName: deploymentDraft.containerName.trim(),
-        }),
-      });
-      const payload = (await response.json().catch(() => ({}))) as {
-        error?: string;
-        agent?: {
-          id: string;
-          apiEndpoint?: string;
-          containerName?: string;
-          status?: string;
-          lastHealthCheckAt?: string | null;
-        };
-      };
-      if (!response.ok || !payload.agent) {
-        throw new Error(payload.error ?? "No se pudo guardar el despliegue.");
-      }
-
-      setLocalAgents((current) =>
-        current.map((agent) =>
-          agent.id === payload.agent!.id
-            ? {
-                ...agent,
-                apiEndpoint: payload.agent!.apiEndpoint ?? agent.apiEndpoint,
-                containerName: payload.agent!.containerName ?? agent.containerName,
-                status: payload.agent!.status ?? agent.status,
-                lastHealthCheckAt: payload.agent!.lastHealthCheckAt ?? agent.lastHealthCheckAt,
-              }
-            : agent,
-        ),
-      );
-
-      if (payload.agent.lastHealthCheckAt) {
-        setLastHealthCheckAt(payload.agent.lastHealthCheckAt);
-      }
-
-      setDeploymentFeedback("Configuración de despliegue guardada.");
-    } catch (error) {
-      setDeploymentFeedback(error instanceof Error ? error.message : "No se pudo guardar el despliegue.");
-    } finally {
-      setIsSavingDeployment(false);
-    }
-  }
-
-  function ensureConnectionCredential(key: string) {
-    const normalizedKey = key.trim().toUpperCase().replace(/[^A-Z0-9_]/g, "_");
-    if (!normalizedKey) {
-      return;
-    }
-    setConnectionDraft((current) => {
-      if (current.some((entry) => entry.key === normalizedKey)) {
-        return current;
-      }
-      return [...current, { key: normalizedKey, value: "" }];
-    });
-  }
-
-  function updateConnectionCredential(index: number, patch: Partial<{ key: string; value: string }>) {
-    setConnectionDraft((current) =>
-      current.map((entry, currentIndex) =>
-        currentIndex === index
-          ? {
-              key:
-                patch.key !== undefined
-                  ? patch.key.toUpperCase().replace(/[^A-Z0-9_]/g, "_")
-                  : entry.key,
-              value: patch.value !== undefined ? patch.value : entry.value,
-            }
-          : entry,
-      ),
-    );
-  }
-
-  function removeConnectionCredential(index: number) {
-    setConnectionDraft((current) => current.filter((_, currentIndex) => currentIndex !== index));
-  }
-
-  async function saveConnectionCredentials() {
-    if (!selectedAgent || !canManageDeployment || isSavingConnections) {
-      return;
-    }
-
-    const normalizedEntries = connectionDraft
-      .map((entry) => ({
-        key: entry.key.trim(),
-        value: entry.value.trim(),
-      }))
-      .filter((entry) => entry.key.length > 0);
-
-    const duplicateKey = normalizedEntries.find(
-      (entry, index) =>
-        normalizedEntries.findIndex((candidate) => candidate.key.toLowerCase() === entry.key.toLowerCase()) !== index,
-    );
-    if (duplicateKey) {
-      setConnectionsFeedback(`La clave ${duplicateKey.key} está duplicada.`);
-      return;
-    }
-
-    setIsSavingConnections(true);
-    setConnectionsFeedback("");
-    try {
-      const credentialRecord = normalizedEntries.reduce<Record<string, string>>((accumulator, entry) => {
-        accumulator[entry.key] = entry.value;
-        return accumulator;
-      }, {});
-
-      const nextChannelConfig = {
-        ...(selectedAgent.channelConfig ?? {}),
-        apiCredentials: credentialRecord,
-      };
-
-      const response = await fetch(`/api/workspaces/${workspaceSlug}/agents/${selectedAgent.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ channelConfig: nextChannelConfig }),
-      });
-      const payload = (await response.json().catch(() => ({}))) as {
-        error?: string;
-        agent?: {
-          id: string;
-          channelConfig?: Record<string, unknown>;
-        };
-      };
-      if (!response.ok || !payload.agent) {
-        throw new Error(payload.error ?? "No se pudieron guardar las conexiones.");
-      }
-
-      setLocalAgents((current) =>
-        current.map((agent) =>
-          agent.id === payload.agent!.id
-            ? {
-                ...agent,
-                channelConfig: payload.agent!.channelConfig ?? agent.channelConfig ?? {},
-              }
-            : agent,
-        ),
-      );
-      setConnectionsFeedback("Conexiones guardadas.");
-    } catch (error) {
-      setConnectionsFeedback(error instanceof Error ? error.message : "No se pudieron guardar las conexiones.");
-    } finally {
-      setIsSavingConnections(false);
-    }
-  }
-
-  function insertCronVariable(token: "{last_run}" | "{workspace_id}" | "{today}") {
-    setDraft((current) => ({
-      ...current,
-      cronJobs: current.cronJobs.includes(token)
-        ? current.cronJobs
-        : `${current.cronJobs.trim()}\n// variable helper: ${token}`.trim(),
-    }));
-  }
-
-  function resolveCronVariablePreview(token: "{last_run}" | "{workspace_id}" | "{today}") {
-    if (token === "{workspace_id}") {
-      return workspaceId;
-    }
-    if (token === "{today}") {
-      return new Date().toISOString().slice(0, 10);
-    }
-    if (lastCronRunAt) {
-      return lastCronRunAt;
-    }
-    return "sin ejecuciones previas";
-  }
-
-  async function checkAgentHealth() {
-    if (!selectedAgent || !canManageDeployment || isCheckingHealth) {
-      return;
-    }
-
-    setIsCheckingHealth(true);
-    setDeploymentFeedback("");
-    try {
-      const response = await fetch(`/api/workspaces/${workspaceSlug}/agents/${selectedAgent.id}`, {
-        method: "POST",
-      });
-      const payload = (await response.json().catch(() => ({}))) as {
-        error?: string;
-        status?: string;
-        healthy?: boolean;
-        lastHealthCheckAt?: string | null;
-        lastCronRunAt?: string | null;
-      };
-      if (!response.ok) {
-        throw new Error(payload.error ?? "No se pudo verificar conexión.");
-      }
-
-      setLocalAgents((current) =>
-        current.map((agent) =>
-          agent.id === selectedAgent.id
-            ? {
-                ...agent,
-                status: payload.status ?? agent.status,
-                lastHealthCheckAt: payload.lastHealthCheckAt ?? agent.lastHealthCheckAt,
-                lastCronRunAt: payload.lastCronRunAt ?? agent.lastCronRunAt,
-              }
-            : agent,
-        ),
-      );
-
-      if (payload.lastHealthCheckAt) {
-        setLastHealthCheckAt(payload.lastHealthCheckAt);
-      }
-      if (payload.lastCronRunAt) {
-        setLastCronRunAt(payload.lastCronRunAt);
-      }
-
-      setDeploymentFeedback(payload.healthy ? "Agente en línea." : "No se puede conectar con el agente.");
-    } catch (error) {
-      setDeploymentFeedback(error instanceof Error ? error.message : "No se pudo verificar conexión.");
-    } finally {
-      setIsCheckingHealth(false);
-    }
+  function buildInitialChatMessage(agentName?: string) {
+    return {
+      role: "assistant" as const,
+      content: agentName
+        ? `Estoy listo para configurar a ${agentName}. Cuéntame su rol, responsabilidades y conexiones.`
+        : "Crea el agente y luego usa este chat para definir su rol, responsabilidades y conexiones.",
+    };
   }
 
   async function saveAgent() {
@@ -2708,34 +3271,28 @@ export function AgentsPanel({
     try {
       const parsedCronJobs = draft.cronJobs.trim() ? JSON.parse(draft.cronJobs) : [];
       const payload = {
-        id: draft.id,
-        workspaceId,
         name: draft.name,
         role: draft.role,
-        promptPack: {
-          objective: draft.description,
-          soulMd: draft.soulMd,
+        description: draft.description,
+        soulMd: draft.soulMd,
+        skills: parseCsvList(draft.skills),
+        knowledgeScope: {
+          read: parseCsvList(draft.read),
+          write: parseCsvList(draft.write),
+          channels: parseCsvList(draft.channels),
         },
-        toolsConfig: {
-          skills: parseCsvList(draft.skills),
-          knowledgeScope: {
-            read: parseCsvList(draft.read),
-            write: parseCsvList(draft.write),
-            channels: parseCsvList(draft.channels),
-          },
-        },
-        integrationConfig: {
-          knowledgeScope: {
-            read: parseCsvList(draft.read),
-            write: parseCsvList(draft.write),
-            channels: parseCsvList(draft.channels),
-          },
-          cronJobs: Array.isArray(parsedCronJobs) ? parsedCronJobs : [],
-        },
+        cronJobs: Array.isArray(parsedCronJobs) ? parsedCronJobs : [],
         isActive: draft.isActive,
       };
 
-      const response = await fetch("/api/admin/agents", {
+      const targetUrl = isCreateMode
+        ? `/api/workspaces/${workspaceSlug}/agents`
+        : `/api/workspaces/${workspaceSlug}/agents/${draft.id}`;
+      if (!isCreateMode && !draft.id) {
+        throw new Error("No se encontró el agente para actualizar.");
+      }
+
+      const response = await fetch(targetUrl, {
         method: isCreateMode ? "POST" : "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -2745,11 +3302,24 @@ export function AgentsPanel({
         agent?: {
           id: string;
           name: string;
-          role: string;
-          promptPack?: Record<string, unknown>;
-          toolsConfig?: Record<string, unknown>;
-          integrationConfig?: Record<string, unknown>;
-          isActive?: boolean;
+          legacyRole?: string | null;
+          type: string;
+          status: string;
+          description: string | null;
+          tools: string[];
+          read: string[];
+          write: string[];
+          channels: string[];
+          cronJobs: unknown[];
+          memoryLabel: string;
+          soulMd?: string | null;
+          runtimeLabel?: string;
+          apiEndpoint?: string;
+          apiKey?: string;
+          containerName?: string;
+          lastHealthCheckAt?: string | null;
+          lastCronRunAt?: string | null;
+          channelConfig?: Record<string, unknown>;
         };
       };
 
@@ -2757,22 +3327,7 @@ export function AgentsPanel({
         throw new Error(data.error ?? "No se pudo guardar el agente.");
       }
 
-      const mappedAgent = {
-        id: data.agent.id,
-        name: data.agent.name,
-        type: mapRoleToAgentType(data.agent.role),
-        status: data.agent.isActive === false ? "paused" : "active",
-        description:
-          typeof data.agent.promptPack?.objective === "string" ? data.agent.promptPack.objective : draft.description,
-        tools: Array.isArray(data.agent.toolsConfig?.skills) ? (data.agent.toolsConfig?.skills as string[]) : parseCsvList(draft.skills),
-        read: parseCsvList(draft.read),
-        write: parseCsvList(draft.write),
-        channels: parseCsvList(draft.channels),
-        cronJobs: Array.isArray(data.agent.integrationConfig?.cronJobs) ? (data.agent.integrationConfig?.cronJobs as unknown[]) : Array.isArray(parsedCronJobs) ? parsedCronJobs : [],
-        memoryLabel: "Activada",
-        soulMd: typeof data.agent.promptPack?.soulMd === "string" ? data.agent.promptPack.soulMd : draft.soulMd,
-        runtimeLabel: draft.id ? selectedAgent?.runtimeLabel ?? `hermes-${workspaceSlug}-${draft.role}` : `hermes-${workspaceSlug}-${draft.role}`,
-      };
+      const mappedAgent = data.agent;
 
       setLocalAgents((current) => {
         if (isCreateMode) {
@@ -2803,69 +3358,69 @@ export function AgentsPanel({
     setIsSending(true);
 
     try {
-      const response = await fetch("/api/chat", {
+      const response = await fetch(`/api/workspaces/${workspaceSlug}/agents/${selectedAgent.id}/builder-turn`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          workspaceId,
-          agent_id: selectedAgent.id,
           message: trimmed,
-          history: nextMessages.map((message) => ({
-            role: message.role,
-            content: message.content,
-          })),
-          conversation_id: `workspace-agent-${selectedAgent.id}`,
+          apply: true,
         }),
       });
-
-      if (!response.ok || !response.body) {
-        const errorText = await response.text();
-        throw new Error(errorText || "No se pudo contactar al agente seleccionado.");
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        assistantMessage?: string;
+        applied?: boolean;
+        appliedFields?: string[];
+        agent?: {
+          id: string;
+          name: string;
+          legacyRole?: string | null;
+          type: string;
+          status: string;
+          description: string | null;
+          tools: string[];
+          read: string[];
+          write: string[];
+          channels: string[];
+          cronJobs: unknown[];
+          memoryLabel: string;
+          soulMd?: string | null;
+          runtimeLabel?: string;
+          apiEndpoint?: string;
+          apiKey?: string;
+          containerName?: string;
+          lastHealthCheckAt?: string | null;
+          lastCronRunAt?: string | null;
+          channelConfig?: Record<string, unknown>;
+        };
+      };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "No se pudo contactar al builder del agente.");
       }
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) {
-          break;
-        }
-
-        buffer += decoder.decode(value, { stream: true });
-        const events = buffer.split("\n\n");
-        buffer = events.pop() ?? "";
-
-        for (const event of events) {
-          const payloads = event
-            .split("\n")
-            .map((line) => line.trim())
-            .filter((line) => line.startsWith("data:"))
-            .map((line) => line.slice(5).trim())
-            .filter(Boolean);
-
-          for (const raw of payloads) {
-            const parsed = JSON.parse(raw) as { type?: string; content?: string; error?: string };
-            if (parsed.type === "delta" && parsed.content) {
-              setChatMessages((current) => {
-                const updated = [...current];
-                updated[updated.length - 1] = {
-                  role: "assistant",
-                  content: `${updated[updated.length - 1]?.content ?? ""}${parsed.content}`,
-                };
-                return updated;
-              });
-            }
-
-            if (parsed.type === "error") {
-              throw new Error(parsed.error ?? "La solicitud al agente falló.");
-            }
-          }
-        }
+      if (payload.agent) {
+        setLocalAgents((current) =>
+          current.map((agent) => (agent.id === payload.agent!.id ? payload.agent! : agent)),
+        );
       }
+
+      const appliedSummary =
+        payload.applied && Array.isArray(payload.appliedFields) && payload.appliedFields.length > 0
+          ? `\n\nCambios aplicados: ${payload.appliedFields.join(", ")}.`
+          : "";
+      const assistantMessage =
+        payload.assistantMessage?.trim() ||
+        "Listo. Registré tus instrucciones en este agente.";
+      setChatMessages((current) => {
+        const updated = [...current];
+        updated[updated.length - 1] = {
+          role: "assistant",
+          content: `${assistantMessage}${appliedSummary}`,
+        };
+        return updated;
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Error desconocido al contactar al agente.";
       setChatError(message);
@@ -2887,10 +3442,16 @@ export function AgentsPanel({
       <Panel
         eyebrow="Agents"
         title="Agentes"
-        description={`${activeAgentCount} de ${agentLimit} agentes en uso. Crea o edita agentes desde este canvas.`}
+        description={`${activeAgentCount} de ${agentLimit} agentes en uso. Configura responsabilidades desde chat y deja lo técnico en avanzado.`}
       >
         <div style={agentToolbarStyle}>
+          <StatusPill tone={activeAgentCount < agentLimit ? "active" : "pending"}>
+            {activeAgentCount}/{agentLimit} agentes
+          </StatusPill>
           <div style={agentTemplateChooserStyle}>
+            <button type="button" style={chatActionButtonStyle} onClick={startBlankAgent}>
+              Nuevo agente
+            </button>
             <select
               value={selectedTemplateId}
               onChange={(event) => applyTemplate(event.target.value)}
@@ -2905,13 +3466,7 @@ export function AgentsPanel({
             <button type="button" style={chatActionButtonStyle} onClick={() => applyTemplate(selectedTemplateId)}>
               Usar plantilla
             </button>
-            <button type="button" style={chatActionButtonStyle} onClick={startBlankAgent}>
-              Agente en blanco
-            </button>
           </div>
-          <StatusPill tone={activeAgentCount < agentLimit ? "active" : "pending"}>
-            {activeAgentCount}/{agentLimit} agentes
-          </StatusPill>
         </div>
 
         <div style={agentGridStyle}>
@@ -2945,7 +3500,7 @@ export function AgentsPanel({
                 </div>
                 <div style={agentMetaWrapStyle}>
                   <StatusPill tone={resolveAgentTypeTone(agent.type)}>{formatAgentTypeLabel(agent.type)}</StatusPill>
-                  <StatusPill tone="neutral">{agent.tools.length} herramientas</StatusPill>
+                  <StatusPill tone="neutral">{agent.tools.length} skills</StatusPill>
                 </div>
               </button>
             ))}
@@ -2954,10 +3509,10 @@ export function AgentsPanel({
           <div style={agentDetailCardStyle}>
             <div style={agentDetailHeaderStyle}>
               <div>
-                <p style={eyebrowStyle}>{isCreateMode ? "Nuevo agente" : "Canvas"}</p>
+                <p style={eyebrowStyle}>{isCreateMode ? "Nuevo agente" : "Builder"}</p>
                 <h3 style={agentDetailTitleStyle}>{isCreateMode ? "Crear agente" : draft.name || "Editar agente"}</h3>
                 <p style={agentDescriptionStyle}>
-                  Define identidad, instrucciones, permisos y ejecución desde el workspace.
+                  Habla con el builder para ajustar rol, responsabilidades, skills y conexiones.
                 </p>
               </div>
               {!isCreateMode && selectedAgent ? (
@@ -2965,328 +3520,162 @@ export function AgentsPanel({
               ) : null}
             </div>
 
-            <div style={agentCanvasGridStyle}>
-              <label style={fieldStyle}>
-                Nombre
-                <input
-                  value={draft.name}
-                  onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))}
-                  style={inputStyle}
-                />
-              </label>
-              <label style={fieldStyle}>
-                Tipo
-                <select
-                  value={draft.role}
-                  onChange={(event) => setDraft((current) => ({ ...current, role: event.target.value }))}
-                  style={inputStyle}
-                >
-                  <option value="intake_assistant">Copilot</option>
-                  <option value="lead_qualifier">Canal</option>
-                  <option value="crm_updater">CRM monitor</option>
-                  <option value="follow_up">Follow-up</option>
-                  <option value="ops_assistant">Operativo</option>
-                  <option value="custom">Custom</option>
-                </select>
-              </label>
-              <label style={{ ...fieldStyle, gridColumn: "1 / -1" }}>
-                Descripción / responsabilidad
-                <textarea
-                  value={draft.description}
-                  onChange={(event) => setDraft((current) => ({ ...current, description: event.target.value }))}
-                  rows={3}
-                  style={textAreaStyle}
-                />
-              </label>
-              <label style={{ ...fieldStyle, gridColumn: "1 / -1" }}>
-                Instrucciones (SOUL.md)
-                <textarea
-                  value={draft.soulMd}
-                  onChange={(event) => setDraft((current) => ({ ...current, soulMd: event.target.value }))}
-                  rows={8}
-                  style={textAreaStyle}
-                />
-              </label>
-              <label style={fieldStyle}>
-                Skills (CSV)
-                <input
-                  value={draft.skills}
-                  onChange={(event) => setDraft((current) => ({ ...current, skills: event.target.value }))}
-                  style={inputStyle}
-                />
-              </label>
-              <label style={fieldStyle}>
-                Lectura (CSV)
-                <input
-                  value={draft.read}
-                  onChange={(event) => setDraft((current) => ({ ...current, read: event.target.value }))}
-                  style={inputStyle}
-                />
-              </label>
-              <label style={fieldStyle}>
-                Escritura (CSV)
-                <input
-                  value={draft.write}
-                  onChange={(event) => setDraft((current) => ({ ...current, write: event.target.value }))}
-                  style={inputStyle}
-                />
-              </label>
-              <label style={fieldStyle}>
-                Canales (CSV)
-                <input
-                  value={draft.channels}
-                  onChange={(event) => setDraft((current) => ({ ...current, channels: event.target.value }))}
-                  style={inputStyle}
-                />
-              </label>
-              <label style={{ ...fieldStyle, gridColumn: "1 / -1" }}>
-                Cron jobs (JSON array)
-                <textarea
-                  value={draft.cronJobs}
-                  onChange={(event) => setDraft((current) => ({ ...current, cronJobs: event.target.value }))}
-                  rows={4}
-                  style={textAreaStyle}
-                />
-              </label>
-              <div style={{ ...fieldStyle, gridColumn: "1 / -1" }}>
-                Variables de cron
-                <div style={cronVariableRowStyle}>
-                  <button type="button" style={chatActionButtonStyle} onClick={() => insertCronVariable("{last_run}")}>
-                    Insertar {"{last_run}"}
-                  </button>
-                  <button type="button" style={chatActionButtonStyle} onClick={() => insertCronVariable("{workspace_id}")}>
-                    Insertar {"{workspace_id}"}
-                  </button>
-                  <button type="button" style={chatActionButtonStyle} onClick={() => insertCronVariable("{today}")}>
-                    Insertar {"{today}"}
-                  </button>
-                </div>
-                <div style={cronVariablePreviewStyle}>
-                  <p style={detailRailMetaStyle}>{"{last_run}"} → {resolveCronVariablePreview("{last_run}")}</p>
-                  <p style={detailRailMetaStyle}>{"{workspace_id}"} → {resolveCronVariablePreview("{workspace_id}")}</p>
-                  <p style={detailRailMetaStyle}>{"{today}"} → {resolveCronVariablePreview("{today}")}</p>
-                </div>
-              </div>
-              <label style={toggleStyle}>
-                <input
-                  type="checkbox"
-                  checked={draft.isActive}
-                  onChange={(event) => setDraft((current) => ({ ...current, isActive: event.target.checked }))}
-                />
-                Activo
-              </label>
-            </div>
-
-            <div style={actionsStyle}>
-              <button type="button" style={primaryButtonStyle} onClick={saveAgent} disabled={isSaving}>
-                {isSaving ? "Guardando..." : isCreateMode ? "Crear agente" : "Guardar cambios"}
-              </button>
-              {!isCreateMode ? (
-                <button type="button" style={chatActionButtonStyle} onClick={startBlankAgent}>
-                  Nuevo desde cero
-                </button>
-              ) : null}
-              {builderError ? <p style={inlineErrorStyle}>{builderError}</p> : null}
-              {builderSuccess ? <p style={inlineSuccessStyle}>{builderSuccess}</p> : null}
-            </div>
-
-            {selectedAgent ? (
+            {selectedAgent || isCreateMode ? (
               <>
-                <div style={agentFooterGridStyle}>
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "minmax(0, 1.4fr) minmax(280px, 1fr)",
+                    gap: "1rem",
+                    alignItems: "start",
+                  }}
+                >
                   <div style={detailRailStyle}>
-                    <h4 style={detailRailTitleStyle}>Actividad reciente</h4>
-                    {selectedActivity.length ? (
-                      <div style={activityListStyle}>
-                        {selectedActivity.map((entry) => (
-                          <div key={entry.id} style={agentActivityRowStyle}>
-                            <p style={activityActionStyle}>{formatActivityLabel(entry.action)}</p>
-                            <p style={activityDetailStyle}>{formatActivityDetails(entry.details)}</p>
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <p style={detailRailCopyStyle}>Todavía no hay actividad registrada para este agente.</p>
-                    )}
-                  </div>
-
-                  <div style={detailRailStyle}>
-                    <h4 style={detailRailTitleStyle}>Despliegue</h4>
-                    <label style={fieldStyle}>
-                      Endpoint del agente
+                    <h4 style={detailRailTitleStyle}>Builder chat</h4>
+                    <p style={detailRailCopyStyle}>
+                      Describe el rol del agente en lenguaje natural. El builder aplica cambios de configuración automáticamente.
+                    </p>
+                    <div style={agentChatThreadStyle}>
+                      {chatMessages.map((message, index) => (
+                        <div
+                          key={`${message.role}-${index}`}
+                          style={{
+                            ...agentChatBubbleStyle,
+                            justifySelf: message.role === "user" ? "end" : "start",
+                            background:
+                              message.role === "user" ? "rgba(51, 92, 255, 0.12)" : "rgba(15, 23, 42, 0.05)",
+                          }}
+                        >
+                          <strong style={agentChatRoleStyle}>
+                            {message.role === "user" ? "Tu" : selectedAgent?.name ?? "Builder"}
+                          </strong>
+                          <p style={agentChatCopyStyle}>{message.content || (isSending ? "Pensando..." : "")}</p>
+                        </div>
+                      ))}
+                    </div>
+                    <div style={agentChatComposerStyle}>
                       <input
-                        value={deploymentDraft.apiEndpoint}
-                        onChange={(event) =>
-                          setDeploymentDraft((current) => ({ ...current, apiEndpoint: event.target.value }))
+                        value={chatInput}
+                        onChange={(event) => setChatInput(event.target.value)}
+                        placeholder={
+                          selectedAgent
+                            ? `Ejemplo: “Quiero que ${selectedAgent.name} monitoree Close cada hora y cree follow-ups”.`
+                            : "Primero crea el agente para habilitar el chat del builder."
                         }
-                        placeholder="https://hermes-bbc.prisma.com.mx/copilot"
-                        style={inputStyle}
-                        disabled={!canManageDeployment || isSavingDeployment}
+                        style={chatInputStyle}
+                        disabled={!selectedAgent}
                       />
-                    </label>
-                    <label style={fieldStyle}>
-                      API key
-                      <input
-                        type="password"
-                        value={deploymentDraft.apiKey}
-                        onChange={(event) =>
-                          setDeploymentDraft((current) => ({ ...current, apiKey: event.target.value }))
-                        }
-                        placeholder="sk_live_xxx"
-                        style={inputStyle}
-                        disabled={!canManageDeployment || isSavingDeployment}
-                      />
-                    </label>
-                    <label style={fieldStyle}>
-                      Nombre de contenedor
-                      <input
-                        value={deploymentDraft.containerName}
-                        onChange={(event) =>
-                          setDeploymentDraft((current) => ({ ...current, containerName: event.target.value }))
-                        }
-                        placeholder={`hermes-${workspaceSlug}-copilot`}
-                        style={inputStyle}
-                        disabled={!canManageDeployment || isSavingDeployment}
-                      />
-                    </label>
-                    <div style={actionsStyle}>
                       <button
                         type="button"
-                        style={primaryButtonStyle}
-                        onClick={() => void saveDeploymentSettings()}
-                        disabled={!canManageDeployment || isSavingDeployment}
+                        onClick={sendTestMessage}
+                        style={chatButtonStyle}
+                        disabled={isSending || !selectedAgent}
                       >
-                        {isSavingDeployment ? "Guardando..." : "Guardar despliegue"}
-                      </button>
-                      <button
-                        type="button"
-                        style={chatActionButtonStyle}
-                        onClick={() => void checkAgentHealth()}
-                        disabled={!canManageDeployment || isCheckingHealth}
-                      >
-                        {isCheckingHealth ? "Verificando..." : "Verificar conexión"}
+                        {isSending ? "Aplicando..." : "Enviar"}
                       </button>
                     </div>
-                    <p style={detailRailCopyStyle}>
-                      Runtime: {selectedAgent.runtimeLabel ?? `hermes-${workspaceSlug}`}
-                    </p>
-                    <p style={detailRailCopyStyle}>
-                      Estado: {formatStatusLabel(selectedAgent.status)}
-                    </p>
-                    {lastHealthCheckAt ? (
-                      <p style={detailRailMetaStyle}>
-                        Última verificación: {new Date(lastHealthCheckAt).toLocaleString("es-MX")}
-                      </p>
-                    ) : null}
-                    {!canManageDeployment ? (
-                      <p style={detailRailMetaStyle}>Solo administradores pueden editar el despliegue.</p>
-                    ) : null}
-                    {deploymentFeedback ? <p style={inlineSuccessStyle}>{deploymentFeedback}</p> : null}
+                    {chatError ? <p style={agentChatErrorStyle}>{chatError}</p> : null}
                   </div>
-                  <div style={detailRailStyle}>
-                    <h4 style={detailRailTitleStyle}>Conexiones API</h4>
-                    {connectionDraft.length === 0 ? (
-                      <p style={detailRailCopyStyle}>Aún no hay credenciales guardadas para este agente.</p>
-                    ) : (
-                      <div style={connectionListStyle}>
-                        {connectionDraft.map((entry, index) => (
-                          <div key={`${entry.key}-${index}`} style={connectionRowStyle}>
-                            <input
-                              value={entry.key}
-                              onChange={(event) => updateConnectionCredential(index, { key: event.target.value })}
-                              placeholder="CLOSE_API_KEY"
-                              style={inputStyle}
-                              disabled={!canManageDeployment || isSavingConnections}
-                            />
-                            <input
-                              type="password"
-                              value={entry.value}
-                              onChange={(event) => updateConnectionCredential(index, { value: event.target.value })}
-                              placeholder="••••••••"
-                              style={inputStyle}
-                              disabled={!canManageDeployment || isSavingConnections}
-                            />
-                            <button
-                              type="button"
-                              style={dangerButtonStyle}
-                              onClick={() => removeConnectionCredential(index)}
-                              disabled={!canManageDeployment || isSavingConnections}
-                            >
-                              Quitar
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    {canManageDeployment ? (
-                      <div style={actionsStyle}>
-                        <button type="button" style={chatActionButtonStyle} onClick={() => ensureConnectionCredential("CLOSE_API_KEY")}>
-                          + CLOSE_API_KEY
-                        </button>
-                        <button type="button" style={chatActionButtonStyle} onClick={() => ensureConnectionCredential("HUBSPOT_TOKEN")}>
-                          + HUBSPOT_TOKEN
-                        </button>
-                        <button
-                          type="button"
-                          style={primaryButtonStyle}
-                          onClick={() => void saveConnectionCredentials()}
-                          disabled={isSavingConnections}
-                        >
-                          {isSavingConnections ? "Guardando..." : "Guardar conexiones"}
-                        </button>
-                        <button
-                          type="button"
-                          style={chatActionButtonStyle}
-                          onClick={() => setConnectionsFeedback("Archivo .env regenerado. Requiere redeploy manual del agente.")}
-                          disabled={isSavingConnections}
-                        >
-                          Regenerar env
-                        </button>
-                      </div>
-                    ) : null}
-                    <p style={detailRailMetaStyle}>Las claves se muestran por nombre y los valores se guardan enmascarados.</p>
-                    {connectionsFeedback ? <p style={inlineSuccessStyle}>{connectionsFeedback}</p> : null}
-                  </div>
-                </div>
 
-                <div style={detailRailStyle}>
-                  <h4 style={detailRailTitleStyle}>Chat de prueba</h4>
-                  <div style={agentChatThreadStyle}>
-                    {chatMessages.map((message, index) => (
-                      <div
-                        key={`${message.role}-${index}`}
-                        style={{
-                          ...agentChatBubbleStyle,
-                          justifySelf: message.role === "user" ? "end" : "start",
-                          background:
-                            message.role === "user" ? "rgba(51, 92, 255, 0.12)" : "rgba(15, 23, 42, 0.05)",
-                        }}
-                      >
-                        <strong style={agentChatRoleStyle}>
-                          {message.role === "user" ? "Tu" : selectedAgent.name}
-                        </strong>
-                        <p style={agentChatCopyStyle}>{message.content || (isSending ? "Pensando..." : "")}</p>
-                      </div>
-                    ))}
+                  <div style={detailRailStyle}>
+                    <h4 style={detailRailTitleStyle}>Resumen</h4>
+                    <label style={fieldStyle}>
+                      Nombre
+                      <input
+                        value={draft.name}
+                        onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))}
+                        style={inputStyle}
+                      />
+                    </label>
+                    <label style={fieldStyle}>
+                      Responsabilidad principal
+                      <textarea
+                        value={draft.description}
+                        onChange={(event) => setDraft((current) => ({ ...current, description: event.target.value }))}
+                        rows={3}
+                        style={textAreaStyle}
+                      />
+                    </label>
+                    <div style={agentMetaWrapStyle}>
+                      <StatusPill tone={resolveAgentTypeTone(selectedAgent?.type ?? mapRoleToAgentType(draft.role))}>
+                        {formatAgentTypeLabel(selectedAgent?.type ?? mapRoleToAgentType(draft.role))}
+                      </StatusPill>
+                      <StatusPill tone="neutral">{parseCsvList(draft.skills).length} skills</StatusPill>
+                    </div>
+
+                    <div style={agentMetaWrapStyle}>
+                      <StatusPill tone="neutral">
+                        Rol: {draft.role.replace(/_/g, " ")}
+                      </StatusPill>
+                      <StatusPill tone="neutral">
+                        Alcance: {draft.read ? parseCsvList(draft.read).length : 0}/{draft.write ? parseCsvList(draft.write).length : 0}/
+                        {draft.channels ? parseCsvList(draft.channels).length : 0}
+                      </StatusPill>
+                    </div>
+
+                    <div style={{ marginTop: "0.75rem", display: "grid", gap: "0.5rem" }}>
+                      <h4 style={detailRailTitleStyle}>Conexiones API</h4>
+                      {credentialEntries.length === 0 ? (
+                        <p style={detailRailCopyStyle}>
+                          Todavía no hay conexiones. Puedes pedir por chat: “Guarda CLOSE_API_KEY=...”.
+                        </p>
+                      ) : (
+                        <div style={{ display: "grid", gap: "0.6rem" }}>
+                          {credentialEntries.map((entry, index) => {
+                            const providerLabel = inferIntegrationProviderLabel(entry.key);
+                            const docsUrl = inferIntegrationDocsUrl(entry.key);
+                            return (
+                              <div key={`${entry.key}-${index}`} style={connectionRowStyle}>
+                                <div style={{ flex: 1 }}>
+                                  <p style={agentNameStyle}>{providerLabel}</p>
+                                  <p style={detailRailMetaStyle}>{entry.key}</p>
+                                  <p style={detailRailCopyStyle}>{maskConnectionValue(entry.value)}</p>
+                                </div>
+                                {docsUrl ? (
+                                  <a
+                                    href={docsUrl}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    style={{ ...chatActionButtonStyle, textDecoration: "none" }}
+                                  >
+                                    Docs
+                                  </a>
+                                ) : null}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                      {canManageAdvancedSettings && selectedAgent ? (
+                        <a
+                          href={`/admin/agents/${workspaceSlug}/${selectedAgent.id}`}
+                          style={{ ...chatActionButtonStyle, textDecoration: "none", textAlign: "center" }}
+                        >
+                          Abrir configuración avanzada
+                        </a>
+                      ) : null}
+                    </div>
+
+                    <div style={actionsStyle}>
+                      <button type="button" style={primaryButtonStyle} onClick={saveAgent} disabled={isSaving}>
+                        {isSaving ? "Guardando..." : isCreateMode ? "Crear agente" : "Guardar cambios"}
+                      </button>
+                      {!isCreateMode ? (
+                        <button type="button" style={chatActionButtonStyle} onClick={startBlankAgent}>
+                          Nuevo desde cero
+                        </button>
+                      ) : null}
+                    </div>
+                    {builderError ? <p style={inlineErrorStyle}>{builderError}</p> : null}
+                    {builderSuccess ? <p style={inlineSuccessStyle}>{builderSuccess}</p> : null}
                   </div>
-                  <div style={agentChatComposerStyle}>
-                    <input
-                      value={chatInput}
-                      onChange={(event) => setChatInput(event.target.value)}
-                      placeholder={`Escribe a ${selectedAgent.name}`}
-                      style={chatInputStyle}
-                    />
-                    <button type="button" onClick={sendTestMessage} style={chatButtonStyle} disabled={isSending}>
-                      {isSending ? "Enviando..." : "Enviar"}
-                    </button>
-                  </div>
-                  {chatError ? <p style={agentChatErrorStyle}>{chatError}</p> : null}
                 </div>
               </>
             ) : (
               <EmptyState
                 icon={Bot}
                 title="No hay agentes configurados"
-                description="Selecciona una plantilla o crea un agente en blanco para empezar."
+                description="Crea un agente en blanco o usa una plantilla para comenzar."
               />
             )}
           </div>
@@ -3837,6 +4226,26 @@ function getCredentialEnvEntries(channelConfig?: Record<string, unknown>) {
       key,
       value: typeof value === "string" ? value : String(value ?? ""),
     }));
+}
+
+function inferIntegrationProviderLabel(key: string) {
+  const normalized = key.toUpperCase();
+  if (normalized.includes("CLOSE")) return "Close";
+  if (normalized.includes("CALENDLY")) return "Calendly";
+  if (normalized.includes("HUBSPOT")) return "HubSpot";
+  if (normalized.includes("SLACK")) return "Slack";
+  if (normalized.includes("OPENAI")) return "OpenAI";
+  return key;
+}
+
+function inferIntegrationDocsUrl(key: string) {
+  const normalized = key.toUpperCase();
+  if (normalized.includes("CLOSE")) return "https://developer.close.com/";
+  if (normalized.includes("CALENDLY")) return "https://developer.calendly.com/";
+  if (normalized.includes("HUBSPOT")) return "https://developers.hubspot.com/docs/api/overview";
+  if (normalized.includes("SLACK")) return "https://api.slack.com/";
+  if (normalized.includes("OPENAI")) return "https://platform.openai.com/docs/overview";
+  return null;
 }
 
 function mapCronJobPromptVariables(jobs: unknown[], workspaceId: string, lastRunIso: string | null) {
@@ -4839,6 +5248,14 @@ const chatHeaderStyle: React.CSSProperties = {
   alignItems: "flex-start",
   justifyContent: "space-between",
   gap: 14,
+};
+
+const chatSessionMetaRowStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  flexWrap: "wrap",
+  justifyContent: "flex-end",
 };
 
 const chatTitleStyle: React.CSSProperties = {

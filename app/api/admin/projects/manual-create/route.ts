@@ -1,5 +1,4 @@
 import {
-  createAgentDefinition,
   createDeployment,
   createProject,
   createSite,
@@ -7,8 +6,10 @@ import {
   listSites,
   listTemplates,
   listWorkspaces,
+  seedPlaceholderAgents,
   trackUsageEvent,
 } from '@/lib/platformStore'
+import { ensureAdminApiAccess } from '@/lib/auth'
 
 type ManualCreateRequest = {
   workspaceId?: string
@@ -42,6 +43,10 @@ function sanitizeContainerName(input: string) {
 }
 
 export async function POST(request: Request) {
+  const authorizationFailure = await ensureAdminApiAccess()
+  if (authorizationFailure) {
+    return authorizationFailure
+  }
   try {
     const body = (await request.json()) as ManualCreateRequest
     if (!body.projectName?.trim()) {
@@ -119,38 +124,25 @@ export async function POST(request: Request) {
       },
     })
 
-    let agent: Awaited<ReturnType<typeof createAgentDefinition>> | null = null
+    let agents: Awaited<ReturnType<typeof seedPlaceholderAgents>> = []
+    let agent: Awaited<ReturnType<typeof seedPlaceholderAgents>>[number] | null = null
     let deployment: Awaited<ReturnType<typeof createDeployment>> | null = null
 
     if (body.createAgent !== false) {
-      agent = await createAgentDefinition({
-        workspaceId: workspace.id,
-        projectId: project.id,
-        name: body.agentName?.trim() || `${workspace.name} Intake Agent`,
-        role: body.agentRole ?? 'intake_assistant',
-        model: body.agentModel,
-        promptPack: {
-          objective: 'Support lead qualification and CRM operations for this workspace.',
-        },
-        toolsConfig: {
-          crmRead: true,
-          crmWrite: true,
-        },
-        integrationConfig: {
-          runtime: 'hermes',
-          source: 'manual_admin_create',
-        },
-      })
+      agents = await seedPlaceholderAgents(workspace.id, 3)
+      agent = agents[0] ?? null
 
-      deployment = await createDeployment({
-        workspaceId: workspace.id,
-        agentDefinitionId: agent.id,
-        dropletHost: body.dropletHost ?? process.env.HERMES_DROPLET_HOST ?? 'shared-droplet',
-        containerName: sanitizeContainerName(`hermes-${workspace.slug}-${agent.role}`),
-        imageRef: body.imageRef ?? process.env.HERMES_IMAGE_REF ?? 'prisma/hermes:stable',
-        envSecretRef: `secret://${workspace.slug}/hermes`,
-        status: 'pending',
-      })
+      if (agent) {
+        deployment = await createDeployment({
+          workspaceId: workspace.id,
+          agentDefinitionId: agent.id,
+          dropletHost: body.dropletHost ?? process.env.HERMES_DROPLET_HOST ?? 'shared-droplet',
+          containerName: sanitizeContainerName(`hermes-${workspace.slug}-${agent.role}`),
+          imageRef: body.imageRef ?? process.env.HERMES_IMAGE_REF ?? 'prisma/hermes:stable',
+          envSecretRef: `secret://${workspace.slug}/hermes`,
+          status: 'pending',
+        })
+      }
     }
 
     await trackUsageEvent({
@@ -162,6 +154,7 @@ export async function POST(request: Request) {
         templateId: template.id,
         siteId: site.id,
         agentId: agent?.id ?? null,
+        agentIds: agents.map((entry) => entry.id),
         deploymentId: deployment?.id ?? null,
       },
     })
@@ -171,6 +164,7 @@ export async function POST(request: Request) {
         workspace,
         project,
         site,
+        agents,
         agent,
         deployment,
       },

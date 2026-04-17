@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
+import { evaluateAgentReadiness, mergeReadinessIntoKnowledgeScope } from '@/lib/agentReadiness'
 import { getSupabaseAdmin } from '@/lib/supabaseAdmin'
 import type { IntakeSubmission } from '@/lib/intakeStore'
 
@@ -608,8 +609,14 @@ function fromWorkspaceAgentRow(row: Record<string, unknown>): AgentDefinition {
     integrationConfig: {
       runtime: 'hermes',
       endpoint: row.api_endpoint ?? '',
+      apiKey: row.api_key ?? '',
       status: row.status ?? 'deploying',
       type: runtimeType,
+      readinessState:
+        knowledgeScope.readiness_state === 'ready' ? 'ready' : 'draft',
+      readinessIssues: Array.isArray(knowledgeScope.readiness_issues)
+        ? (knowledgeScope.readiness_issues as unknown[]).map((entry) => String(entry))
+        : [],
     },
     isActive: String(row.status ?? 'active') === 'active',
     createdAt: String(row.created_at ?? nowIso()),
@@ -622,12 +629,22 @@ function toWorkspaceAgentRow(agent: AgentDefinition) {
   const configuredSkills = Array.isArray(agent.toolsConfig.skills)
     ? (agent.toolsConfig.skills as string[])
     : []
+  const configuredKnowledgeScope =
+    (agent.integrationConfig.knowledgeScope &&
+    typeof agent.integrationConfig.knowledgeScope === 'object' &&
+    !Array.isArray(agent.integrationConfig.knowledgeScope)
+      ? (agent.integrationConfig.knowledgeScope as Record<string, unknown>)
+      : agent.toolsConfig.knowledgeScope &&
+          typeof agent.toolsConfig.knowledgeScope === 'object' &&
+          !Array.isArray(agent.toolsConfig.knowledgeScope)
+        ? (agent.toolsConfig.knowledgeScope as Record<string, unknown>)
+        : {}) ?? {}
   const endpoint =
     (typeof agent.integrationConfig.endpoint === 'string' && agent.integrationConfig.endpoint) ||
-    'http://localhost:8642'
+    ''
   const apiKey =
     (typeof agent.integrationConfig.apiKey === 'string' && agent.integrationConfig.apiKey) ||
-    'replace-me'
+    ''
   const version =
     (typeof agent.integrationConfig.hermesVersion === 'string' && agent.integrationConfig.hermesVersion) ||
     'v2026.4.1'
@@ -640,6 +657,23 @@ function toWorkspaceAgentRow(agent: AgentDefinition) {
     !Array.isArray(agent.integrationConfig.channelConfig)
       ? (agent.integrationConfig.channelConfig as Record<string, unknown>)
       : {}
+  const configuredContainerName =
+    typeof agent.integrationConfig.containerName === 'string' && agent.integrationConfig.containerName.trim().length > 0
+      ? agent.integrationConfig.containerName.trim()
+      : `hermes-${agent.workspaceId.slice(0, 8)}-${agent.role}`
+  const readiness = evaluateAgentReadiness({
+    apiEndpoint: endpoint,
+    apiKey,
+    soulMd: typeof agent.promptPack.soulMd === 'string' ? agent.promptPack.soulMd : '',
+  })
+  const mergedKnowledgeScope = mergeReadinessIntoKnowledgeScope(
+    {
+      ...configuredKnowledgeScope,
+      legacy_role: agent.role,
+      model: agent.model,
+    },
+    readiness,
+  )
 
   return {
     id: agent.id,
@@ -650,17 +684,14 @@ function toWorkspaceAgentRow(agent: AgentDefinition) {
       typeof agent.promptPack.objective === 'string'
         ? agent.promptPack.objective
         : null,
-    container_name: `hermes-${agent.workspaceId.slice(0, 8)}-${agent.role}`,
+    container_name: configuredContainerName,
     api_endpoint: endpoint,
     api_key: apiKey,
     hermes_version: version,
-    status: agent.isActive ? 'active' : 'paused',
+    status: agent.isActive && readiness.isReady ? 'active' : 'paused',
     soul_md: typeof agent.promptPack.soulMd === 'string' ? agent.promptPack.soulMd : null,
     skills: configuredSkills,
-    knowledge_scope: {
-      legacy_role: agent.role,
-      model: agent.model,
-    },
+    knowledge_scope: mergedKnowledgeScope,
     cron_jobs: configuredCronJobs,
     channel_config: configuredChannelConfig,
     memory_limit_mb: 512,
@@ -1166,7 +1197,62 @@ export async function listAgents(workspaceId?: string) {
   return [...agents].sort((a, b) => (a.createdAt > b.createdAt ? -1 : 1))
 }
 
+function resolveWorkspaceLimitFromMetadata(metadata: Record<string, unknown> | undefined) {
+  if (!metadata) {
+    return 3
+  }
+  const rawLimit =
+    typeof metadata.agent_limit === 'number'
+      ? metadata.agent_limit
+      : typeof metadata.agentLimit === 'number'
+        ? metadata.agentLimit
+        : null
+  if (typeof rawLimit !== 'number' || !Number.isFinite(rawLimit) || rawLimit <= 0) {
+    return 3
+  }
+  return Math.floor(rawLimit)
+}
+
+async function assertWorkspaceAgentCapacity(workspaceId: string) {
+  const supabase = getSupabaseAdmin()
+  if (supabase) {
+    const [{ data: workspaceRow, error: workspaceError }, { count, error: countError }] = await Promise.all([
+      supabase.from('workspaces').select('agent_limit, metadata').eq('id', workspaceId).maybeSingle(),
+      supabase.from('workspace_agents').select('id', { count: 'exact', head: true }).eq('workspace_id', workspaceId),
+    ])
+
+    if (workspaceError) {
+      throw new Error(workspaceError.message)
+    }
+    if (countError) {
+      throw new Error(countError.message)
+    }
+
+    const row = (workspaceRow as Record<string, unknown> | null) ?? null
+    const directLimit = row ? Number(row.agent_limit ?? Number.NaN) : Number.NaN
+    const metadata = row?.metadata as Record<string, unknown> | undefined
+    const limit = Number.isFinite(directLimit) && directLimit > 0
+      ? Math.floor(directLimit)
+      : resolveWorkspaceLimitFromMetadata(metadata)
+    if ((count ?? 0) >= limit) {
+      throw new Error(`This workspace already uses ${count ?? 0} of ${limit} agents.`)
+    }
+    return
+  }
+
+  assertLocalFallbackAllowed('createAgentDefinition')
+  const state = await readState()
+  const workspace = state.workspaces.find((entry) => entry.id === workspaceId)
+  const limit = resolveWorkspaceLimitFromMetadata(workspace?.metadata)
+  const used = state.agents.filter((agent) => agent.workspaceId === workspaceId).length
+  if (used >= limit) {
+    throw new Error(`This workspace already uses ${used} of ${limit} agents.`)
+  }
+}
+
 export async function createAgentDefinition(input: CreateAgentInput) {
+  await assertWorkspaceAgentCapacity(input.workspaceId)
+
   const record: AgentDefinition = withDate({
     id: buildId('agt'),
     workspaceId: input.workspaceId,
@@ -1202,6 +1288,129 @@ export async function createAgentDefinition(input: CreateAgentInput) {
   state.agents.push(record)
   await writeState(state)
   return record
+}
+
+const placeholderAgentBlueprints: Array<{
+  role: AgentRoleType
+  name: string
+  objective: string
+  soulMd: string
+}> = [
+  {
+    role: 'intake_assistant',
+    name: 'Agente 1',
+    objective: 'Define y opera las instrucciones principales del workspace.',
+    soulMd: 'Aún no configurado. Usa el chat del builder para definir responsabilidades.',
+  },
+  {
+    role: 'crm_updater',
+    name: 'Agente 2',
+    objective: 'Gestiona procesos internos y seguimiento operativo.',
+    soulMd: 'Aún no configurado. Usa el chat del builder para definir skills y alcance.',
+  },
+  {
+    role: 'follow_up',
+    name: 'Agente 3',
+    objective: 'Automatiza seguimientos y tareas recurrentes.',
+    soulMd: 'Aún no configurado. Usa el chat del builder para definir canales y cron.',
+  },
+]
+
+function buildUniqueAgentName(base: string, existingNames: Set<string>) {
+  if (!existingNames.has(base.toLowerCase())) {
+    existingNames.add(base.toLowerCase())
+    return base
+  }
+
+  let suffix = 2
+  while (suffix < 100) {
+    const candidate = `${base} ${suffix}`
+    if (!existingNames.has(candidate.toLowerCase())) {
+      existingNames.add(candidate.toLowerCase())
+      return candidate
+    }
+    suffix += 1
+  }
+
+  const fallback = `${base} ${Date.now().toString(36)}`
+  existingNames.add(fallback.toLowerCase())
+  return fallback
+}
+
+export async function seedPlaceholderAgents(workspaceId: string, count = 3) {
+  const targetCount = Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0
+  if (targetCount <= 0) {
+    return []
+  }
+
+  const seeded = await listAgents(workspaceId)
+  if (seeded.length >= targetCount) {
+    return seeded.slice(0, targetCount)
+  }
+
+  const usedRoles = new Set<AgentRoleType>(seeded.map((agent) => agent.role))
+  const usedNames = new Set<string>(seeded.map((agent) => agent.name.toLowerCase()))
+  const roleFallbackOrder: AgentRoleType[] = [
+    'intake_assistant',
+    'crm_updater',
+    'follow_up',
+    'ops_assistant',
+    'lead_qualifier',
+    'custom',
+  ]
+
+  const result = [...seeded]
+
+  for (let slotIndex = seeded.length; slotIndex < targetCount; slotIndex += 1) {
+    const blueprint = placeholderAgentBlueprints[slotIndex % placeholderAgentBlueprints.length]
+    const role =
+      !usedRoles.has(blueprint.role)
+        ? blueprint.role
+        : roleFallbackOrder.find((candidateRole) => !usedRoles.has(candidateRole)) ?? blueprint.role
+    usedRoles.add(role)
+
+    const name = buildUniqueAgentName(blueprint.name, usedNames)
+    const objective = blueprint.objective
+    const soulMd = blueprint.soulMd
+
+    try {
+      const created = await createAgentDefinition({
+        workspaceId,
+        name,
+        role,
+        promptPack: {
+          objective,
+          soulMd,
+        },
+        toolsConfig: {
+          skills: [],
+          knowledgeScope: {
+            read: [],
+            write: [],
+            channels: [],
+          },
+        },
+        integrationConfig: {
+          runtime: 'hermes',
+          source: 'workspace_seed',
+          knowledgeScope: {
+            read: [],
+            write: [],
+            channels: [],
+          },
+          cronJobs: [],
+        },
+      })
+      result.push(created)
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('already uses')) {
+        break
+      }
+      throw error
+    }
+  }
+
+  return result
 }
 
 export async function updateAgentDefinition(agentId: string, input: UpdateAgentInput) {

@@ -331,8 +331,8 @@ export default function Nav() {
 
         {/* Right: Sign in + CTA + mobile menu button */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-          <a
-            href="#"
+          <Link
+            href="/login"
             className="giga-soft-link hide-mobile"
             style={{
               color: '#ffffff',
@@ -343,7 +343,22 @@ export default function Nav() {
             }}
           >
             Sign in
-          </a>
+          </Link>
+          <Link
+            href="/signup"
+            className="giga-soft-link hide-mobile"
+            style={{
+              color: '#ffffff',
+              textDecoration: 'none',
+              fontWeight: 600,
+              fontSize: '0.84rem',
+              padding: '0.45rem 0.78rem',
+              borderRadius: '10px',
+              border: '1px solid rgba(255,255,255,0.24)',
+            }}
+          >
+            Sign up
+          </Link>
           <button
             type="button"
             className="show-mobile"
@@ -426,6 +441,14 @@ export default function Nav() {
                 </Link>
               ))}
             </div>
+          </div>
+          <div style={{ borderTop: '1px solid rgba(255,255,255,0.12)', paddingTop: '0.65rem', display: 'grid', gap: '0.32rem' }}>
+            <Link href="/login" className="giga-soft-link" style={{ color: '#f8fafc', textDecoration: 'none', fontSize: '0.88rem', fontWeight: 600 }}>
+              Sign in
+            </Link>
+            <Link href="/signup" className="giga-soft-link" style={{ color: '#f8fafc', textDecoration: 'none', fontSize: '0.88rem', fontWeight: 600 }}>
+              Sign up
+            </Link>
           </div>
         </div>
       )}

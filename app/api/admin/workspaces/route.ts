@@ -1,4 +1,5 @@
-import { createWorkspace, listProjects, listSites, listWorkspaces } from '@/lib/platformStore'
+import { createWorkspace, listProjects, listSites, listWorkspaces, seedPlaceholderAgents } from '@/lib/platformStore'
+import { ensureAdminApiAccess } from '@/lib/auth'
 
 type CreateWorkspaceRequest = {
   name?: string
@@ -6,6 +7,10 @@ type CreateWorkspaceRequest = {
 }
 
 export async function GET() {
+  const authorizationFailure = await ensureAdminApiAccess()
+  if (authorizationFailure) {
+    return authorizationFailure
+  }
   const [workspaces, projects, sites] = await Promise.all([listWorkspaces(), listProjects(), listSites()])
   const payload = workspaces.map((workspace) => ({
     ...workspace,
@@ -16,6 +21,10 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  const authorizationFailure = await ensureAdminApiAccess()
+  if (authorizationFailure) {
+    return authorizationFailure
+  }
   try {
     const body = (await request.json()) as CreateWorkspaceRequest
     if (!body.name?.trim()) {
@@ -26,8 +35,9 @@ export async function POST(request: Request) {
       name: body.name,
       slug: body.slug,
     })
+    const agents = await seedPlaceholderAgents(workspace.id, 3)
 
-    return Response.json({ workspace }, { status: 201 })
+    return Response.json({ workspace, agents }, { status: 201 })
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unable to create workspace'
     return Response.json({ error: message }, { status: 400 })

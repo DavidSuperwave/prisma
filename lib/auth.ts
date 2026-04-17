@@ -2,6 +2,7 @@
 
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
+import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
 
 const ACCESS_TOKEN_COOKIE = "prisma-access-token";
@@ -128,8 +129,16 @@ export async function getCurrentAppUser(): Promise<AuthenticatedAppUser | null> 
   }
 
   const membershipRows = await listMembershipRows(data.user.id);
+  const appMetadata = data.user.app_metadata;
+  const appMetadataPlatformAdmin =
+    typeof appMetadata === "object" &&
+    appMetadata !== null &&
+    !Array.isArray(appMetadata) &&
+    appMetadata.is_platform_admin === true;
   const isPlatformAdmin =
-    membershipRows.some((entry) => entry.is_platform_admin) || isConfiguredPlatformAdminEmail(data.user.email);
+    appMetadataPlatformAdmin ||
+    membershipRows.some((entry) => entry.is_platform_admin) ||
+    isConfiguredPlatformAdminEmail(data.user.email);
 
   return {
     id: data.user.id,
@@ -143,19 +152,30 @@ export async function getCurrentAppUser(): Promise<AuthenticatedAppUser | null> 
   };
 }
 
-export async function requireAuthenticatedUser(nextPath?: string) {
+export async function requireAuthenticatedUser(nextPath?: string, loginPath = "/login") {
   const user = await getCurrentAppUser();
   if (!user) {
     const nextQuery = nextPath ? `?next=${encodeURIComponent(nextPath)}` : "";
-    redirect(`/login${nextQuery}`);
+    redirect(`${loginPath}${nextQuery}`);
   }
   return user;
 }
 
 export async function requireAdminUser(nextPath?: string) {
-  const user = await requireAuthenticatedUser(nextPath);
+  const user = await requireAuthenticatedUser(nextPath, "/admin/login");
   if (!user.isPlatformAdmin) {
     redirect("/workspaces");
   }
   return user;
+}
+
+export async function ensureAdminApiAccess() {
+  const user = await getCurrentAppUser();
+  if (!user) {
+    return NextResponse.json({ error: "Authentication required." }, { status: 401 });
+  }
+  if (!user.isPlatformAdmin) {
+    return NextResponse.json({ error: "Forbidden." }, { status: 403 });
+  }
+  return null;
 }

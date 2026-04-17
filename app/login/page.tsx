@@ -1,11 +1,16 @@
 import { LoginForm } from "@/components/auth/LoginForm";
+import styles from "@/app/login/login.module.css";
+import Link from "next/link";
 
 type PageProps = {
-  searchParams: Promise<{ next?: string }>;
+  searchParams: Promise<{ next?: string; message?: string }>;
 };
 
 export default async function LoginPage({ searchParams }: PageProps) {
-  const nextPath = (await searchParams).next ?? "/workspaces";
+  const params = await searchParams;
+  const requestedNextPath = params.next ?? "/workspaces";
+  const message = params.message?.trim();
+  const nextPath = requestedNextPath.startsWith("/admin") ? "/workspaces" : requestedNextPath;
   return (
     <main
       style={{
@@ -43,32 +48,42 @@ export default async function LoginPage({ searchParams }: PageProps) {
           >
             Prisma sign in
           </p>
-          <h1 style={{ margin: 0, fontSize: 40, lineHeight: 1.05, fontFamily: "var(--font-display)" }}>
+          <h1 className={styles.prismTitle}>
             Access your workspace
           </h1>
           <p style={{ margin: 0, color: "#667085", lineHeight: 1.65 }}>
-            Use one of the seeded demo accounts or your real workspace user to access the protected product surface.
+            Sign in with your workspace account to access your organization data, agents, and operations.
           </p>
         </div>
 
         <LoginForm nextPath={nextPath} />
+        {message ? (
+          <p
+            style={{
+              margin: 0,
+              borderRadius: 14,
+              padding: "10px 12px",
+              border: "1px solid rgba(5, 96, 58, 0.24)",
+              background: "rgba(5, 96, 58, 0.08)",
+              color: "#05603a",
+              fontSize: 14,
+            }}
+          >
+            {message}
+          </p>
+        ) : null}
 
-        <div
-          style={{
-            borderRadius: 18,
-            background: "rgba(51,92,255,0.06)",
-            border: "1px solid rgba(51,92,255,0.14)",
-            padding: 16,
-            display: "grid",
-            gap: 6,
-          }}
-        >
-          <p style={{ margin: 0, fontWeight: 700 }}>Seeded demo accounts</p>
-          <p style={{ margin: 0, color: "#475467" }}>Admin (George): george@bbc.local</p>
-          <p style={{ margin: 0, color: "#475467" }}>Operator (Maria): maria@bbc.local</p>
-          <p style={{ margin: 0, color: "#475467" }}>Viewer (Carlos): carlos@bbc.local</p>
-          <p style={{ margin: 0, color: "#475467" }}>Password: PrismaDemo!2026</p>
-        </div>
+        <p style={{ margin: 0, color: "#667085", fontSize: 14 }}>
+          Need an account?{" "}
+          <Link href="/signup" style={{ color: "#233876", fontWeight: 600 }}>
+            Create one
+          </Link>
+          . Platform admins should use{" "}
+          <Link href="/admin/login" style={{ color: "#233876", fontWeight: 600 }}>
+            admin login
+          </Link>
+          .
+        </p>
       </div>
     </main>
   );

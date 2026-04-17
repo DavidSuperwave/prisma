@@ -630,19 +630,33 @@ button {
 
 .workspace-user-menu__link,
 .workspace-user-menu__button {
-  border: 1px solid rgba(17, 24, 39, 0.08);
+  border: 1px solid rgba(17, 24, 39, 0.18);
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.88);
-  color: #111827;
+  background: rgba(255, 255, 255, 0.96);
+  color: #0f172a;
   padding: 10px 12px;
   font-size: 13px;
   font-weight: 600;
   text-align: left;
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
 }
 
 .workspace-user-menu__button {
   width: 100%;
   cursor: pointer;
+}
+
+.workspace-user-menu__link:hover,
+.workspace-user-menu__button:hover {
+  background: #ffffff;
+  border-color: rgba(17, 24, 39, 0.32);
+  color: #020617;
+}
+
+.workspace-user-menu__link:focus-visible,
+.workspace-user-menu__button:focus-visible {
+  outline: 2px solid rgba(51, 92, 255, 0.45);
+  outline-offset: 2px;
 }
 
 .workspace-button {

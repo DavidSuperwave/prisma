@@ -4,6 +4,7 @@ import {
   listAgentTemplates,
   updateAgentTemplate,
 } from '@/lib/platformStore'
+import { ensureAdminApiAccess } from '@/lib/auth'
 
 type CreateTemplateRequest = {
   name?: string
@@ -21,11 +22,19 @@ type CreateTemplateRequest = {
 }
 
 export async function GET() {
+  const authorizationFailure = await ensureAdminApiAccess()
+  if (authorizationFailure) {
+    return authorizationFailure
+  }
   const templates = await listAgentTemplates()
   return Response.json({ templates })
 }
 
 export async function POST(request: Request) {
+  const authorizationFailure = await ensureAdminApiAccess()
+  if (authorizationFailure) {
+    return authorizationFailure
+  }
   try {
     const body = (await request.json()) as CreateTemplateRequest
     if (!body.name?.trim() || !body.type) {
@@ -55,6 +64,10 @@ export async function POST(request: Request) {
 }
 
 export async function PATCH(request: Request) {
+  const authorizationFailure = await ensureAdminApiAccess()
+  if (authorizationFailure) {
+    return authorizationFailure
+  }
   try {
     const body = (await request.json()) as CreateTemplateRequest & { id?: string }
     if (!body.id) {
@@ -88,6 +101,10 @@ export async function PATCH(request: Request) {
 }
 
 export async function DELETE(request: Request) {
+  const authorizationFailure = await ensureAdminApiAccess()
+  if (authorizationFailure) {
+    return authorizationFailure
+  }
   const { searchParams } = new URL(request.url)
   const templateId = searchParams.get('id')
   if (!templateId) {

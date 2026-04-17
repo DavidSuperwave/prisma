@@ -1,0 +1,43 @@
+.prismTitle {
+  margin: 0;
+  font-size: 40px;
+  line-height: 1.05;
+  font-family: var(--font-display);
+  background-image: repeating-linear-gradient(
+    112deg,
+    #2f3544 0%,
+    #7f5af0 7%,
+    #4f8cff 14%,
+    #87d7ff 21%,
+    #d7dce6 28%,
+    #8be49d 35%,
+    #ffd86f 42%,
+    #ff9d6c 49%,
+    #f786c4 56%,
+    #2f3544 63%
+  );
+  background-size: 220% 100%;
+  background-position: -110% 56%;
+  animation: prismSweep 12s linear infinite;
+  animation-delay: -6s;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+
+@keyframes prismSweep {
+  0% {
+    background-position: 0% 44%;
+  }
+  100% {
+    background-position: -220% 56%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .prismTitle {
+    animation: none;
+    background-position: 35% 50%;
+  }
+}

@@ -6,7 +6,8 @@ import { createAuthSession } from "@/lib/auth";
 export async function loginAction(_: { error?: string } | undefined, formData: FormData) {
   const email = String(formData.get("email") ?? "").trim();
   const password = String(formData.get("password") ?? "");
-  const nextPath = String(formData.get("next") ?? "/workspaces");
+  const requestedNextPath = String(formData.get("next") ?? "/workspaces");
+  const nextPath = requestedNextPath.startsWith("/admin") ? "/workspaces" : requestedNextPath;
 
   if (!email || !password) {
     return { error: "Email and password are required." };

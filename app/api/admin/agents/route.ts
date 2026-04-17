@@ -1,4 +1,5 @@
 import { createAgentDefinition, listAgents, updateAgentDefinition } from '@/lib/platformStore'
+import { ensureAdminApiAccess } from '@/lib/auth'
 
 type CreateAgentRequest = {
   workspaceId?: string
@@ -16,6 +17,10 @@ type UpdateAgentRequest = CreateAgentRequest & {
 }
 
 export async function GET(request: Request) {
+  const authorizationFailure = await ensureAdminApiAccess()
+  if (authorizationFailure) {
+    return authorizationFailure
+  }
   const { searchParams } = new URL(request.url)
   const workspaceId = searchParams.get('workspaceId') ?? undefined
   const agents = await listAgents(workspaceId)
@@ -23,6 +28,10 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  const authorizationFailure = await ensureAdminApiAccess()
+  if (authorizationFailure) {
+    return authorizationFailure
+  }
   try {
     const body = (await request.json()) as CreateAgentRequest
     if (!body.workspaceId || !body.name?.trim() || !body.role) {
@@ -48,6 +57,10 @@ export async function POST(request: Request) {
 }
 
 export async function PATCH(request: Request) {
+  const authorizationFailure = await ensureAdminApiAccess()
+  if (authorizationFailure) {
+    return authorizationFailure
+  }
   try {
     const body = (await request.json()) as UpdateAgentRequest
     if (!body.id || !body.workspaceId) {

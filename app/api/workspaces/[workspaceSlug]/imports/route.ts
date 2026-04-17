@@ -159,11 +159,70 @@ export async function POST(request: Request, context: Context) {
       throw new Error(historyError.message);
     }
 
+    let followUpTaskId: string | null = null;
+    if (imported > 0) {
+      const { data: createdTask, error: taskError } = await supabase
+        .from("workspace_tasks")
+        .insert({
+          workspace_id: membership.workspaceId,
+          source_object_id: objectId,
+          type: "close_import_review",
+          title: `Revisar importación: ${fileName}`,
+          status: "pending",
+          priority: "high",
+          approval_required: false,
+          approval_status: "not_required",
+          metadata: {
+            file_name: fileName,
+            rows_imported: imported,
+            rows_skipped: skipped,
+          },
+          created_by: user.id,
+        })
+        .select("id")
+        .single();
+
+      if (taskError) {
+        if (!taskError.message.includes("workspace_tasks")) {
+          throw new Error(taskError.message);
+        }
+      } else {
+        followUpTaskId = String(createdTask.id);
+      }
+
+      if (followUpTaskId) {
+        const { data: activityAgent } = await supabase
+          .from("workspace_agents")
+          .select("id")
+          .eq("workspace_id", membership.workspaceId)
+          .in("type", ["worker", "copilot"])
+          .order("created_at", { ascending: true })
+          .limit(1)
+          .maybeSingle();
+
+        if (activityAgent?.id) {
+          await supabase.from("agent_activity").insert({
+            workspace_id: membership.workspaceId,
+            agent_id: String(activityAgent.id),
+            action: "scenario.close_import.completed",
+            details: {
+              file_name: fileName,
+              object_id: objectId,
+              rows_imported: imported,
+              rows_skipped: skipped,
+              task_id: followUpTaskId,
+            },
+          });
+        }
+      }
+    }
+
     return Response.json({
       import: {
         rowsTotal: rows.length,
         rowsImported: imported,
         rowsSkipped: skipped,
+        followUpTaskId,
       },
     });
   } catch (error) {

@@ -4,9 +4,11 @@ import {
   listAgents,
   listDeployments,
   listProjects,
+  seedPlaceholderAgents,
   listWorkspaces,
   trackUsageEvent,
 } from '@/lib/platformStore'
+import { ensureAdminApiAccess } from '@/lib/auth'
 
 type Context = {
   params: Promise<{ workspaceId: string }>
@@ -22,6 +24,10 @@ function sanitizeContainerName(input: string) {
 }
 
 export async function POST(request: Request, context: Context) {
+  const authorizationFailure = await ensureAdminApiAccess()
+  if (authorizationFailure) {
+    return authorizationFailure
+  }
   const { workspaceId } = await context.params
   const body = (await request.json().catch(() => ({}))) as BootstrapRequest
 
@@ -33,7 +39,10 @@ export async function POST(request: Request, context: Context) {
 
   const projects = await listProjects(workspaceId)
   const projectId = projects[0]?.id
-  const existingAgents = await listAgents(workspaceId)
+  let existingAgents = await listAgents(workspaceId)
+  if (existingAgents.length < 3) {
+    existingAgents = await seedPlaceholderAgents(workspaceId, 3)
+  }
   const existingDeployments = await listDeployments(workspaceId)
 
   let agent = existingAgents.find((entry) => entry.role === 'intake_assistant')

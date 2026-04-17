@@ -1,4 +1,9 @@
 import { getCurrentAppUser } from "@/lib/auth";
+import {
+  deriveReadinessFromKnowledgeScope,
+  evaluateAgentReadiness,
+  executionBlockReason,
+} from "@/lib/agentReadiness";
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
 import { listWorkspaceMembershipsForUser } from "@/lib/workspaceStore";
 
@@ -41,6 +46,32 @@ type ChatRequest = {
 
 type ChatProvider = "hermes" | "openrouter";
 
+type SchemaProposalField = {
+  name: string;
+  key: string;
+  type: string;
+  required?: boolean;
+};
+
+type SchemaProposalObject = {
+  name: string;
+  singularName: string;
+  pluralName: string;
+  description: string;
+  icon: string;
+  fields: SchemaProposalField[];
+};
+
+type SchemaProposalPayload = {
+  proposalId: string;
+  title: string;
+  rationale: string;
+  requiresApproval: boolean;
+  sourcePrompt: string;
+  objects: SchemaProposalObject[];
+  suggestedNextAction: string;
+};
+
 type AgentRuntimeRecord = {
   id: string;
   workspace_id: string;
@@ -48,6 +79,8 @@ type AgentRuntimeRecord = {
   api_endpoint: string;
   api_key: string;
   status: string;
+  soul_md: string | null;
+  knowledge_scope: Record<string, unknown> | null;
 };
 
 const sseHeaders = {
@@ -55,6 +88,10 @@ const sseHeaders = {
   "Cache-Control": "no-cache, no-transform",
   Connection: "keep-alive",
 };
+
+const PUBLIC_CHAT_WINDOW_MS = 60_000;
+const PUBLIC_CHAT_LIMIT = 20;
+const publicChatCounters = new Map<string, { count: number; windowStart: number }>();
 
 function formatSse(data: unknown) {
   return `data: ${JSON.stringify(data)}\n\n`;
@@ -72,16 +109,271 @@ function resolveProvider() {
   return process.env.HERMES_API_BASE_URL && process.env.HERMES_API_KEY ? "hermes" : "openrouter";
 }
 
+function getClientFingerprint(request: Request) {
+  const forwardedFor = request.headers.get("x-forwarded-for") ?? "";
+  const ip = forwardedFor.split(",")[0]?.trim() || "unknown";
+  const userAgent = request.headers.get("user-agent") ?? "unknown";
+  return `${ip}:${userAgent.slice(0, 120)}`;
+}
+
+function enforcePublicChatRateLimit(request: Request, payload: ChatRequest) {
+  const isScoped = Boolean(payload.workspace_id ?? payload.workspaceId ?? payload.agent_id ?? payload.agentId);
+  if (isScoped) {
+    return null;
+  }
+
+  const key = getClientFingerprint(request);
+  const now = Date.now();
+  const existing = publicChatCounters.get(key);
+  if (!existing || now - existing.windowStart >= PUBLIC_CHAT_WINDOW_MS) {
+    publicChatCounters.set(key, { count: 1, windowStart: now });
+    return null;
+  }
+
+  if (existing.count >= PUBLIC_CHAT_LIMIT) {
+    const retryAfter = Math.max(1, Math.ceil((PUBLIC_CHAT_WINDOW_MS - (now - existing.windowStart)) / 1000));
+    return Response.json(
+      { error: "Too many requests. Please wait a moment before sending another message." },
+      { status: 429, headers: { "Retry-After": String(retryAfter) } },
+    );
+  }
+
+  existing.count += 1;
+  publicChatCounters.set(key, existing);
+  return null;
+}
+
+function slugifyFieldKey(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function normalizeObjectName(value: string) {
+  const trimmed = value.trim().replace(/\s+/g, " ");
+  return trimmed.length > 0
+    ? trimmed.slice(0, 1).toUpperCase() + trimmed.slice(1)
+    : "Records";
+}
+
+function inferSchemaObjectsFromMessage(message: string): SchemaProposalObject[] {
+  const lower = message.toLowerCase();
+  const crmIntent =
+    lower.includes("crm") ||
+    lower.includes("pipeline") ||
+    lower.includes("ventas") ||
+    lower.includes("clientes");
+  const receivablesIntent =
+    lower.includes("cobranza") || lower.includes("cartera") || lower.includes("factura");
+  const operationsIntent =
+    lower.includes("operacion") || lower.includes("workflow") || lower.includes("proceso");
+
+  if (crmIntent) {
+    return [
+      {
+        name: "Companies",
+        singularName: "Company",
+        pluralName: "Companies",
+        description: "Cuentas principales y su estado comercial.",
+        icon: "building-2",
+        fields: [
+          { name: "Name", key: "name", type: "text", required: true },
+          { name: "Industry", key: "industry", type: "text" },
+          { name: "Status", key: "status", type: "status", required: true },
+          { name: "Owner", key: "owner", type: "text" },
+          { name: "Priority", key: "priority", type: "select" },
+        ],
+      },
+      {
+        name: "Leads",
+        singularName: "Lead",
+        pluralName: "Leads",
+        description: "Pipeline comercial para calificación y seguimiento.",
+        icon: "users",
+        fields: [
+          { name: "Full Name", key: "full_name", type: "text", required: true },
+          { name: "Email", key: "email", type: "text" },
+          { name: "Phone", key: "phone", type: "text" },
+          { name: "Stage", key: "stage", type: "status", required: true },
+          { name: "Next Action", key: "next_action", type: "text" },
+          { name: "Due Date", key: "due_date", type: "date" },
+        ],
+      },
+    ];
+  }
+
+  if (receivablesIntent) {
+    return [
+      {
+        name: "Receivables",
+        singularName: "Receivable",
+        pluralName: "Receivables",
+        description: "Control de cobranza y seguimiento de cuentas por cobrar.",
+        icon: "wallet-cards",
+        fields: [
+          { name: "Debtor", key: "debtor", type: "text", required: true },
+          { name: "Invoice Number", key: "invoice_number", type: "text", required: true },
+          { name: "Amount", key: "amount", type: "currency", required: true },
+          { name: "Status", key: "status", type: "status", required: true },
+          { name: "Due Date", key: "due_date", type: "date", required: true },
+          { name: "Assigned Collector", key: "assigned_collector", type: "text" },
+        ],
+      },
+    ];
+  }
+
+  const guessedName = operationsIntent ? "Operations Queue" : "Core Records";
+  const normalizedName = normalizeObjectName(guessedName);
+  return [
+    {
+      name: normalizedName,
+      singularName: normalizedName.endsWith("s") ? normalizedName.slice(0, -1) : normalizedName,
+      pluralName: normalizedName.endsWith("s") ? normalizedName : `${normalizedName}s`,
+      description: "Estructura inicial para operar el flujo solicitado desde chat.",
+      icon: "file-stack",
+      fields: [
+        { name: "Title", key: "title", type: "text", required: true },
+        { name: "Status", key: "status", type: "status", required: true },
+        { name: "Owner", key: "owner", type: "text" },
+        { name: "Priority", key: "priority", type: "select" },
+        { name: "Due Date", key: "due_date", type: "date" },
+      ],
+    },
+  ];
+}
+
+function shouldProposeSchema(message: string, hasWorkspaceContext: boolean) {
+  if (!hasWorkspaceContext) {
+    return false;
+  }
+  const lower = message.toLowerCase();
+  return (
+    lower.includes("crear tabla") ||
+    lower.includes("crear base") ||
+    lower.includes("database") ||
+    lower.includes("crm") ||
+    lower.includes("schema") ||
+    lower.includes("esquema") ||
+    lower.includes("twin")
+  );
+}
+
+function buildSchemaProposal(message: string): SchemaProposalPayload {
+  const objects = inferSchemaObjectsFromMessage(message).map((objectDef) => ({
+    ...objectDef,
+    fields: objectDef.fields.map((field) => ({
+      ...field,
+      key: slugifyFieldKey(field.key || field.name),
+    })),
+  }));
+  const title =
+    objects.length > 1
+      ? `Propuesta inicial (${objects.length} objetos)`
+      : `Propuesta para ${objects[0]?.name ?? "workspace"}`;
+  return {
+    proposalId: `proposal-${Date.now()}`,
+    title,
+    rationale:
+      "Inferí la estructura mínima para operar tu flujo primero en datos y luego en automatización.",
+    requiresApproval: true,
+    sourcePrompt: message,
+    objects,
+    suggestedNextAction:
+      "Si confirmas esta propuesta, crearé objetos y campos en el workspace y dejaré trazabilidad en actividad.",
+  };
+}
+
+function streamSchemaProposalResponse(proposal: SchemaProposalPayload) {
+  const stream = new ReadableStream({
+    start(controller) {
+      const encoder = new TextEncoder();
+      controller.enqueue(
+        encoder.encode(
+          formatSse({
+            type: "delta",
+            content:
+              "Preparé una propuesta de esquema concreta para arrancar en modo database-first.",
+          }),
+        ),
+      );
+      controller.enqueue(encoder.encode(formatSse({ type: "schema_proposal", proposal })));
+      controller.enqueue(encoder.encode(formatSse({ type: "done" })));
+      controller.close();
+    },
+  });
+  return new Response(stream, { headers: sseHeaders });
+}
+
+async function logSchemaProposalActivity(
+  workspaceId: string,
+  agentId: string | null,
+  proposal: SchemaProposalPayload,
+) {
+  const supabase = getSupabaseAdmin();
+  if (!supabase || !agentId || !workspaceId) {
+    return;
+  }
+
+  await supabase.from("agent_activity").insert({
+    workspace_id: workspaceId,
+    agent_id: agentId,
+    action: "schema.proposed",
+    details: {
+      proposal_id: proposal.proposalId,
+      title: proposal.title,
+      objects: proposal.objects.map((entry) => ({
+        name: entry.name,
+        fields: entry.fields.length,
+      })),
+      source_prompt: proposal.sourcePrompt,
+    },
+  });
+}
+
 function extractDeltaText(parsed: Record<string, unknown>) {
-  const choices = parsed.choices as Array<{ delta?: { content?: string } }> | undefined;
+  const choices = parsed.choices as
+    | Array<{ delta?: { content?: string | unknown[] | null; reasoning?: string | null } }>
+    | undefined;
   const messageChoices = parsed.choices as Array<{ message?: { content?: string } }> | undefined;
-  const delta = choices?.[0]?.delta?.content;
-  if (typeof delta === "string" && delta.length > 0) {
-    return delta;
+  const d0 = choices?.[0]?.delta;
+  const deltaContent = d0?.content;
+  if (typeof deltaContent === "string" && deltaContent.length > 0) {
+    return deltaContent;
+  }
+  if (Array.isArray(deltaContent)) {
+    const joined = deltaContent
+      .map((item) => {
+        if (typeof item === "string") {
+          return item;
+        }
+        if (item && typeof item === "object" && "text" in item && typeof (item as { text?: string }).text === "string") {
+          return (item as { text: string }).text;
+        }
+        return "";
+      })
+      .join("");
+    if (joined.length > 0) {
+      return joined;
+    }
+  }
+  const reasoning = d0?.reasoning;
+  if (typeof reasoning === "string" && reasoning.length > 0) {
+    return reasoning;
   }
 
   if (typeof parsed.delta === "string" && parsed.delta.length > 0) {
     return parsed.delta;
+  }
+
+  const deltaObj = parsed.delta;
+  if (deltaObj && typeof deltaObj === "object") {
+    const rec = deltaObj as Record<string, unknown>;
+    const nested = rec.text ?? rec.content;
+    if (typeof nested === "string" && nested.length > 0) {
+      return nested;
+    }
   }
 
   if (typeof parsed.output_text === "string" && parsed.output_text.length > 0) {
@@ -231,19 +523,6 @@ async function streamFromJsonUpstream(upstream: Response) {
   return new Response(stream, { headers: sseHeaders });
 }
 
-function buildHermesInput(message: string, history: ChatHistoryMessage[]) {
-  if (!history.length) {
-    return message.trim();
-  }
-
-  const transcript = history
-    .slice(-10)
-    .map((item) => `${item.role === "assistant" ? "Assistant" : "User"}: ${item.content}`)
-    .join("\n");
-
-  return `${transcript}\nUser: ${message.trim()}`;
-}
-
 async function resolveWorkspaceContext(workspaceIdentifier?: string | null) {
   const supabase = getSupabaseAdmin();
   if (!supabase || !workspaceIdentifier) {
@@ -335,7 +614,7 @@ async function resolveAgentRuntime(payload: ChatRequest) {
 
   let query = supabase
     .from("workspace_agents")
-    .select("id, workspace_id, name, api_endpoint, api_key, status")
+    .select("id, workspace_id, name, api_endpoint, api_key, status, soul_md, knowledge_scope")
     .eq("id", requestedAgentId)
     .limit(1);
 
@@ -384,30 +663,6 @@ async function proxyToHermes({
     (agent ? `${agent.workspace_id}:${agent.id}` : process.env.HERMES_DEFAULT_CONVERSATION) ??
     undefined;
 
-  const requestBody: Record<string, unknown> = {
-    input: buildHermesInput(
-      workspaceContext
-        ? [
-            `Workspace context: ${workspaceContext.workspaceName} (${workspaceContext.workspaceSlug})`,
-            `Workspace ID: ${workspaceContext.workspaceId}`,
-            `Objects: ${workspaceContext.objectNames.join(", ") || "none"}`,
-            `Agents: ${workspaceContext.agentNames.join(", ") || "none"}`,
-            `Recent activity: ${workspaceContext.recentActions.join(", ") || "none"}`,
-            "",
-            payload.message,
-          ].join("\n")
-        : payload.message,
-      payload.history ?? [],
-    ),
-    conversation: conversationId,
-    stream: true,
-    store: true,
-    metadata: {
-      ...(agent ? { agent_id: agent.id, workspace_id: agent.workspace_id, agent_name: agent.name } : {}),
-      ...(payload.agent_id || payload.agentId ? { requested_agent_id: payload.agent_id ?? payload.agentId } : {}),
-    },
-  };
-
   const appContextLines =
     appContext
       ? [
@@ -419,28 +674,33 @@ async function proxyToHermes({
         ]
       : [];
 
+  const inputLines = [
+    ...(workspaceContext
+      ? [
+          `Workspace context: ${workspaceContext.workspaceName} (${workspaceContext.workspaceSlug})`,
+          `Workspace ID: ${workspaceContext.workspaceId}`,
+          `Objects: ${workspaceContext.objectNames.join(", ") || "none"}`,
+          `Agents: ${workspaceContext.agentNames.join(", ") || "none"}`,
+          `Recent activity: ${workspaceContext.recentActions.join(", ") || "none"}`,
+        ]
+      : []),
+    ...appContextLines,
+    payload.message.trim(),
+  ].filter((line) => line.length > 0);
+
+  const requestBody: Record<string, unknown> = {
+    input: inputLines.join("\n"),
+    conversation: conversationId,
+    stream: true,
+    store: true,
+    metadata: {
+      ...(agent ? { agent_id: agent.id, workspace_id: agent.workspace_id, agent_name: agent.name } : {}),
+      ...(payload.agent_id || payload.agentId ? { requested_agent_id: payload.agent_id ?? payload.agentId } : {}),
+    },
+  };
+
   if (model) {
     requestBody.model = model;
-  }
-
-  if (workspaceContext || appContextLines.length > 0) {
-    requestBody.input = buildHermesInput(
-      [
-        ...(workspaceContext
-          ? [
-              `Workspace context: ${workspaceContext.workspaceName} (${workspaceContext.workspaceSlug})`,
-              `Workspace ID: ${workspaceContext.workspaceId}`,
-              `Objects: ${workspaceContext.objectNames.join(", ") || "none"}`,
-              `Agents: ${workspaceContext.agentNames.join(", ") || "none"}`,
-              `Recent activity: ${workspaceContext.recentActions.join(", ") || "none"}`,
-            ]
-          : []),
-        ...appContextLines,
-        "",
-        payload.message,
-      ].join("\n"),
-      payload.history ?? [],
-    );
   }
 
   const hermesResponse = await fetch(`${baseUrl.replace(/\/$/, "")}/v1/responses`, {
@@ -467,8 +727,26 @@ async function proxyToHermes({
 
 async function callHermes(payload: ChatRequest & { message: string }) {
   const agent = await resolveAgentRuntime(payload);
-  if (agent && agent.status !== "active") {
-    return Response.json({ error: "Selected agent is not active." }, { status: 409 });
+  if (agent) {
+    const computedReadiness = evaluateAgentReadiness({
+      apiEndpoint: agent.api_endpoint,
+      apiKey: agent.api_key,
+      soulMd: agent.soul_md,
+    });
+    const readiness = deriveReadinessFromKnowledgeScope(agent.knowledge_scope, computedReadiness);
+    const blockReason = executionBlockReason(agent.status, readiness);
+    if (blockReason) {
+      return Response.json(
+        {
+          error: blockReason,
+          readiness: {
+            state: readiness.state,
+            issues: readiness.issues,
+          },
+        },
+        { status: 409 },
+      );
+    }
   }
 
   const workspaceContext = await resolveWorkspaceContext(payload.workspace_id ?? payload.workspaceId ?? null);
@@ -588,9 +866,31 @@ export async function POST(request: Request) {
     return Response.json({ error: "Message is required" }, { status: 400 });
   }
 
+  const publicRateLimitFailure = enforcePublicChatRateLimit(request, payload);
+  if (publicRateLimitFailure) {
+    return publicRateLimitFailure;
+  }
+
   const authorizationFailure = await authorizeWorkspaceRequest(payload);
   if (authorizationFailure) {
     return authorizationFailure;
+  }
+
+  const workspaceIdentifier = payload.workspace_id ?? payload.workspaceId ?? null;
+  if (shouldProposeSchema(message, Boolean(workspaceIdentifier))) {
+    const proposal = buildSchemaProposal(message);
+    const workspaceContext = await resolveWorkspaceContext(workspaceIdentifier);
+    await logSchemaProposalActivity(
+      workspaceContext?.workspaceId ?? "",
+      payload.agent_id ?? payload.agentId ?? null,
+      proposal,
+    );
+    return streamSchemaProposalResponse(proposal);
+  }
+
+  const isWorkspaceScoped = Boolean(payload.workspace_id ?? payload.workspaceId ?? payload.agent_id ?? payload.agentId);
+  if (isWorkspaceScoped) {
+    return callHermes({ ...payload, message });
   }
 
   const provider = resolveProvider();

@@ -1,3 +1,4 @@
+import Link from 'next/link'
 import { listAgents, listWorkspaces } from '@/lib/platformStore'
 
 export default async function AdminAgentsPage() {
@@ -23,6 +24,13 @@ export default async function AdminAgentsPage() {
                   <p style={{ margin: 0, color: 'var(--giga-muted)' }}>{agent.role.replace(/_/g, ' ')}</p>
                   <p style={{ margin: 0, color: 'var(--giga-muted)' }}>{agent.isActive ? 'active' : 'paused'}</p>
                   <p style={{ margin: 0, color: 'var(--giga-muted)' }}>{workspace?.name ?? agent.workspaceId}</p>
+                  {workspace?.slug ? (
+                    <Link href={`/admin/agents/${workspace.slug}/${agent.id}`} style={linkStyle}>
+                      Advanced
+                    </Link>
+                  ) : (
+                    <span style={{ color: 'var(--giga-muted)' }}>No workspace slug</span>
+                  )}
                 </li>
               )
             })}
@@ -54,7 +62,16 @@ const rowStyle: React.CSSProperties = {
   borderRadius: 10,
   padding: 12,
   display: 'grid',
-  gridTemplateColumns: '2fr 1.2fr 1.5fr 1.5fr',
+  gridTemplateColumns: '2fr 1.2fr 1.1fr 1.5fr auto',
   gap: 10,
   alignItems: 'center',
+}
+
+const linkStyle: React.CSSProperties = {
+  textDecoration: 'none',
+  border: '1px solid var(--giga-border)',
+  borderRadius: 8,
+  padding: '6px 10px',
+  color: 'var(--giga-text)',
+  fontSize: 13,
 }

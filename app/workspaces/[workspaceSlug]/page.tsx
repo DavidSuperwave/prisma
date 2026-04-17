@@ -8,25 +8,31 @@ import { listAgentTemplates, listDashboardCardsForWorkspace } from "@/lib/platfo
 import { listDirectThreadsForUser, listMessagesForScope, listWorkspaceChannelsForUser } from "@/lib/teamChatStore";
 import { WorkspaceShell } from "@/components/workspace/WorkspaceShell";
 import {
+  ActivityPanel,
   AgentOverviewPanel,
+  ChannelsPanel,
   ChatPanel,
   DatasetPanel,
+  FieldsPanel,
   HomeOverviewPanel,
+  ImportPanel,
   QueuePanel,
   RecordDetailPanel,
   TeamChatPanel,
-} from "@/components/workspace/WorkspacePanels";
-import {
-  ActivityPanel,
-  ChannelsPanel,
-  FieldsPanel,
-  ImportPanel,
-} from "@/components/workspace/Stage2Panels";
+} from "@/components/workspace/panels";
 import { requireAuthenticatedUser } from "@/lib/auth";
 
 type PageProps = {
   params: Promise<{ workspaceSlug: string }>;
-  searchParams: Promise<{ object?: string; view?: string; record?: string; tab?: string; ask?: string; prompt?: string }>;
+  searchParams: Promise<{
+    object?: string;
+    view?: string;
+    record?: string;
+    tab?: string;
+    ask?: string;
+    prompt?: string;
+    agent?: string;
+  }>;
 };
 
 function formatAgentSummary(agents: Array<{
@@ -48,6 +54,10 @@ function formatAgentSummary(agents: Array<{
   return agents.map((agent) => ({
     id: agent.id,
     name: agent.name,
+    legacyRole:
+      typeof agent.knowledgeScope.legacy_role === "string"
+        ? agent.knowledgeScope.legacy_role
+        : null,
     type: agent.type,
     status: agent.status,
     description: agent.description,
@@ -64,7 +74,7 @@ function formatAgentSummary(agents: Array<{
     soulMd: agent.soulMd,
     runtimeLabel: agent.containerName,
     apiEndpoint: agent.apiEndpoint,
-    apiKey: agent.apiKey,
+    apiKey: "",
     containerName: agent.containerName,
     lastHealthCheckAt:
       typeof agent.knowledgeScope.last_health_check_at === "string"
@@ -201,7 +211,7 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
   const metrics = [
     {
       label: "Pendientes",
-      value: String(deriveQueueItems(snapshot.objects, snapshot.records).length),
+      value: String(deriveQueueItems(snapshot.objects, snapshot.records, snapshot.tasks).length),
       caption: "Items que requieren atencion hoy.",
     },
     {
@@ -221,7 +231,7 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
     },
   ];
 
-  const queueItems = deriveQueueItems(snapshot.objects, snapshot.records);
+  const queueItems = deriveQueueItems(snapshot.objects, snapshot.records, snapshot.tasks);
   const selectedTab = query.tab ?? "home";
   const objectNameCounts = snapshot.objects.reduce<Map<string, number>>((counts, object) => {
     counts.set(object.name, (counts.get(object.name) ?? 0) + 1);
@@ -248,10 +258,39 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
     };
   });
   const copilot =
-    snapshot.agents.find((agent) => agent.type === "copilot" && agent.status === "active") ??
-    snapshot.agents.find((agent) => agent.type === "copilot") ??
-    snapshot.agents[0] ??
-    null;
+    (() => {
+      const metadata =
+        snapshot.workspace.metadata &&
+        typeof snapshot.workspace.metadata === "object" &&
+        !Array.isArray(snapshot.workspace.metadata)
+          ? snapshot.workspace.metadata
+          : {};
+      const primaryCopilotId =
+        typeof metadata.primary_copilot_agent_id === "string"
+          ? metadata.primary_copilot_agent_id
+          : null;
+      const queryAgentId = typeof query.agent === "string" ? query.agent.trim() : "";
+      const selectedFromQuery =
+        queryAgentId.length > 0
+          ? snapshot.agents.find((agent) => agent.id === queryAgentId) ?? null
+          : null;
+
+      if (selectedFromQuery) {
+        return selectedFromQuery;
+      }
+      if (primaryCopilotId) {
+        const primaryCopilot = snapshot.agents.find((agent) => agent.id === primaryCopilotId) ?? null;
+        if (primaryCopilot) {
+          return primaryCopilot;
+        }
+      }
+      return (
+        snapshot.agents.find((agent) => agent.type === "copilot" && agent.status === "active") ??
+        snapshot.agents.find((agent) => agent.type === "copilot") ??
+        snapshot.agents[0] ??
+        null
+      );
+    })();
   const askPrompt =
     typeof query.prompt === "string" && query.prompt.trim().length > 0
       ? query.prompt.trim()
@@ -380,6 +419,22 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
             label: "Crear agente",
             href: `/workspaces/${snapshot.workspace.subdomain}?tab=agents`,
           },
+          {
+            label: "Escenario: Close import",
+            action: "scenario-close-import",
+          },
+          {
+            label: "Escenario: análisis estacional",
+            action: "scenario-seasonal-analysis",
+          },
+          {
+            label: "Escenario: cotización",
+            action: "scenario-quote-approval",
+          },
+          {
+            label: "Escenario: agenda",
+            action: "scenario-calendar-scheduling",
+          },
         ]}
         suggestedPrompts={[
           queueItems.length
@@ -409,16 +464,46 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
           queueTitles: queueItems.slice(0, 5).map((item) => `${item.title} (${item.status})`),
         }}
         askPrompt={askPrompt}
-        copilotAgent={
-          copilot
-            ? {
-                id: copilot.id,
-                name: copilot.name,
-                status: copilot.status,
-                description: copilot.description,
-              }
-            : null
+        chatAgents={snapshot.agents.map((agent) => ({
+          ...(() => {
+            const explicitReadinessState =
+              agent.knowledgeScope.readiness_state === "ready" || agent.knowledgeScope.readiness_state === "draft"
+                ? (agent.knowledgeScope.readiness_state as "ready" | "draft")
+                : null;
+            const fallbackReady =
+              Boolean(agent.apiEndpoint?.trim()) &&
+              Boolean(agent.apiKey?.trim()) &&
+              Boolean(agent.soulMd?.trim()) &&
+              !agent.soulMd?.toLowerCase().includes("aún no configurado") &&
+              !agent.soulMd?.toLowerCase().includes("aun no configurado");
+            const readinessState = explicitReadinessState ?? (fallbackReady ? "ready" : "draft");
+            const readinessIssues = Array.isArray(agent.knowledgeScope.readiness_issues)
+              ? (agent.knowledgeScope.readiness_issues as string[])
+              : fallbackReady
+                ? []
+                : ["configuration_incomplete"];
+            return {
+              readinessState,
+              readinessIssues,
+              isReadyForExecution:
+                agent.status === "active" && readinessState === "ready" && readinessIssues.length === 0,
+            };
+          })(),
+          id: agent.id,
+          name: agent.name,
+          type: agent.type,
+          status: agent.status,
+          description: agent.description,
+          isPrimaryCopilot:
+            typeof snapshot.workspace.metadata?.primary_copilot_agent_id === "string" &&
+            snapshot.workspace.metadata.primary_copilot_agent_id === agent.id,
+        }))}
+        primaryAgentId={
+          typeof snapshot.workspace.metadata?.primary_copilot_agent_id === "string"
+            ? snapshot.workspace.metadata.primary_copilot_agent_id
+            : copilot?.id ?? null
         }
+        canSetPrimaryAgent={membership.role === "admin" || user.isPlatformAdmin}
       />
     );
   }
@@ -469,6 +554,7 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
         workspaceId={snapshot.workspace.id}
         workspaceSlug={snapshot.workspace.subdomain}
         currentRole={membership.role}
+        currentUserEmail={user.email}
         agentLimit={snapshot.workspace.agentLimit}
         agentTemplates={agentTemplates}
         agents={formatAgentSummary(snapshot.agents)}
@@ -510,7 +596,7 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
           id: "chat",
           label: "Chat",
           href: `/workspaces/${snapshot.workspace.subdomain}?tab=chat`,
-          meta: "Conversaciones con el CEO",
+          meta: "Conversaciones con agentes",
           active: selectedTab === "chat",
         },
         {

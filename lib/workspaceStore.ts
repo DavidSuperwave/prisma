@@ -100,12 +100,35 @@ export type PrismaWorkspaceImportHistory = {
   createdAt: string;
 };
 
+export type PrismaWorkspaceTask = {
+  id: string;
+  workspaceId: string;
+  sourceRecordId: string | null;
+  sourceObjectId: string | null;
+  type: string;
+  title: string;
+  ownerUserId: string | null;
+  ownerAgentId: string | null;
+  status: string;
+  priority: string;
+  dueAt: string | null;
+  approvalRequired: boolean;
+  approvalStatus: string;
+  blockingReason: string | null;
+  metadata: Record<string, unknown>;
+  completedAt: string | null;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type WorkspaceSnapshot = {
   workspace: PrismaWorkspace;
   objects: PrismaWorkspaceObject[];
   fields: PrismaWorkspaceField[];
   views: PrismaWorkspaceView[];
   records: PrismaWorkspaceRecord[];
+  tasks: PrismaWorkspaceTask[];
   agents: PrismaWorkspaceAgent[];
   activity: PrismaWorkspaceActivity[];
 };
@@ -343,6 +366,30 @@ function mapImportHistory(row: Record<string, unknown>): PrismaWorkspaceImportHi
   };
 }
 
+function mapTask(row: Record<string, unknown>): PrismaWorkspaceTask {
+  return {
+    id: String(row.id),
+    workspaceId: String(row.workspace_id),
+    sourceRecordId: row.source_record_id ? String(row.source_record_id) : null,
+    sourceObjectId: row.source_object_id ? String(row.source_object_id) : null,
+    type: String(row.type ?? "follow_up"),
+    title: String(row.title ?? "Task"),
+    ownerUserId: row.owner_user_id ? String(row.owner_user_id) : null,
+    ownerAgentId: row.owner_agent_id ? String(row.owner_agent_id) : null,
+    status: String(row.status ?? "pending"),
+    priority: String(row.priority ?? "normal"),
+    dueAt: row.due_at ? String(row.due_at) : null,
+    approvalRequired: Boolean(row.approval_required),
+    approvalStatus: String(row.approval_status ?? "not_required"),
+    blockingReason: row.blocking_reason ? String(row.blocking_reason) : null,
+    metadata: (row.metadata as Record<string, unknown>) ?? {},
+    completedAt: row.completed_at ? String(row.completed_at) : null,
+    createdBy: row.created_by ? String(row.created_by) : null,
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
 function normalizeText(value: unknown) {
   if (value === null || value === undefined) {
     return "";
@@ -405,14 +452,46 @@ export function applyViewToRecords(records: PrismaWorkspaceRecord[], view?: Pris
 export function deriveQueueItems(
   objects: PrismaWorkspaceObject[],
   records: PrismaWorkspaceRecord[],
+  tasks: PrismaWorkspaceTask[] = [],
 ): Array<{
   id: string;
+  recordId?: string;
   title: string;
   subtitle: string;
   status: string;
   objectId: string;
 }> {
   const objectMap = new Map(objects.map((object) => [object.id, object]));
+  const recordMap = new Map(records.map((record) => [record.id, record]));
+  if (tasks.length > 0) {
+    const activeStatuses = new Set([
+      "pending",
+      "needs_review",
+      "pending_docs",
+      "follow_up",
+      "blocked",
+      "awaiting_approval",
+      "in_progress",
+    ]);
+    return tasks
+      .filter((task) => activeStatuses.has(task.status.toLowerCase()))
+      .map((task) => {
+        const linkedRecord = task.sourceRecordId ? recordMap.get(task.sourceRecordId) : null;
+        const resolvedObjectId = task.sourceObjectId ?? linkedRecord?.objectId ?? "";
+        return {
+          id: task.id,
+          recordId: task.sourceRecordId ?? undefined,
+          title: task.title,
+          subtitle:
+            resolvedObjectId && objectMap.has(resolvedObjectId)
+              ? `${objectMap.get(resolvedObjectId)?.name} · ${task.type}`
+              : `Task · ${task.type}`,
+          status: task.status,
+          objectId: resolvedObjectId,
+        };
+      })
+      .slice(0, 24);
+  }
 
   return records
     .map((record) => {
@@ -651,39 +730,29 @@ export async function listWorkspaceRecords(workspaceId: string, objectId?: strin
 }
 
 export async function listWorkspaceAgents(workspaceId: string) {
-  const supabase = requireSupabaseAdmin();
-  const { data, error } = await supabase
-    .from("workspace_agents")
-    .select(
-      "id, workspace_id, name, type, description, api_endpoint, api_key, container_name, status, soul_md, skills, knowledge_scope, cron_jobs, channel_config, memory_limit_mb, cpu_limit, created_at",
-    )
-    .eq("workspace_id", workspaceId)
-    .order("created_at", { ascending: true });
+  const supabase = getSupabaseAdmin();
+  if (supabase) {
+    const { data, error } = await supabase
+      .from("workspace_agents")
+      .select(
+        "id, workspace_id, name, type, description, api_endpoint, api_key, container_name, status, soul_md, skills, knowledge_scope, cron_jobs, channel_config, memory_limit_mb, cpu_limit, created_at",
+      )
+      .eq("workspace_id", workspaceId)
+      .order("created_at", { ascending: true });
 
-  if (error) {
-    throw new Error(error.message);
+    if (error) {
+      throw new Error(error.message);
+    }
+
+    return (data ?? []).map((row) => mapAgent(row as Record<string, unknown>));
   }
-  const supabaseAgents = (data ?? []).map((row) => mapAgent(row as Record<string, unknown>));
+
   const fallbackState = await readPlatformState();
   const fallbackAgents = (fallbackState.agents ?? [])
     .filter((agent) => agent.workspaceId === workspaceId)
     .map((agent) => mapPlatformStateAgent(agent));
 
-  if (fallbackAgents.length === 0) {
-    return supabaseAgents;
-  }
-
-  const merged = new Map<string, PrismaWorkspaceAgent>();
-  for (const agent of supabaseAgents) {
-    merged.set(agent.id, agent);
-  }
-  for (const agent of fallbackAgents) {
-    if (!merged.has(agent.id)) {
-      merged.set(agent.id, agent);
-    }
-  }
-
-  return Array.from(merged.values()).sort((left, right) => (left.createdAt > right.createdAt ? 1 : -1));
+  return fallbackAgents.sort((left, right) => (left.createdAt > right.createdAt ? 1 : -1));
 }
 
 export async function getWorkspaceAgent(workspaceId: string, agentId: string) {
@@ -736,22 +805,42 @@ export async function listWorkspaceImportHistory(workspaceId: string, limit = 20
   return (data ?? []).map((row) => mapImportHistory(row as Record<string, unknown>));
 }
 
+export async function listWorkspaceTasks(workspaceId: string, limit = 120) {
+  const supabase = requireSupabaseAdmin();
+  const { data, error } = await supabase
+    .from("workspace_tasks")
+    .select("id, workspace_id, source_record_id, source_object_id, type, title, owner_user_id, owner_agent_id, status, priority, due_at, approval_required, approval_status, blocking_reason, metadata, completed_at, created_by, created_at, updated_at")
+    .eq("workspace_id", workspaceId)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  if (error) {
+    if (error.message.includes("workspace_tasks")) {
+      return [];
+    }
+    throw new Error(error.message);
+  }
+
+  return (data ?? []).map((row) => mapTask(row as Record<string, unknown>));
+}
+
 export async function getWorkspaceSnapshot(workspaceSlug: string): Promise<WorkspaceSnapshot | null> {
   const workspace = await getWorkspaceBySlug(workspaceSlug);
   if (!workspace) {
     return null;
   }
 
-  const [objects, fields, views, records, agents, activity] = await Promise.all([
+  const [objects, fields, views, records, tasks, agents, activity] = await Promise.all([
     listWorkspaceObjects(workspace.id),
     listWorkspaceFields(workspace.id),
     listWorkspaceViews(workspace.id),
     listWorkspaceRecords(workspace.id),
+    listWorkspaceTasks(workspace.id),
     listWorkspaceAgents(workspace.id),
     listWorkspaceActivity(workspace.id),
   ]);
 
-  return { workspace, objects, fields, views, records, agents, activity };
+  return { workspace, objects, fields, views, records, tasks, agents, activity };
 }
 
 export async function getWorkspaceSnapshotForUser(workspaceSlug: string, userId: string, isPlatformAdmin = false) {
@@ -762,11 +851,12 @@ export async function getWorkspaceSnapshotForUser(workspaceSlug: string, userId:
     return null;
   }
 
-  const [objects, fields, views, records, agents, activity] = await Promise.all([
+  const [objects, fields, views, records, tasks, agents, activity] = await Promise.all([
     listWorkspaceObjects(membership.workspaceId),
     listWorkspaceFields(membership.workspaceId),
     listWorkspaceViews(membership.workspaceId),
     listWorkspaceRecords(membership.workspaceId),
+    listWorkspaceTasks(membership.workspaceId),
     listWorkspaceAgents(membership.workspaceId),
     listWorkspaceActivity(membership.workspaceId),
   ]);
@@ -779,6 +869,7 @@ export async function getWorkspaceSnapshotForUser(workspaceSlug: string, userId:
       fields,
       views,
       records,
+      tasks,
       agents,
       activity,
     } satisfies WorkspaceSnapshot,

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Download, FileStack, MessageSquare, Upload } from "lucide-react";
 import * as XLSX from "xlsx";
 import type {
@@ -908,9 +908,92 @@ export function ChannelsPanel({ workspaceSlug, currentRole, agents }: ChannelsPa
   const [isSaving, setIsSaving] = useState(false);
   const [isChecking, setIsChecking] = useState(false);
   const [error, setError] = useState("");
+  const [runtimeState, setRuntimeState] = useState<"reachable" | "unreachable" | "missing_endpoint" | "missing_api_key" | "unknown">("unknown");
+  const [runtimeMessage, setRuntimeMessage] = useState<string>("Aún no se ha validado el runtime.");
+  const [conversations, setConversations] = useState<Array<{
+    id: string;
+    title: string;
+    messageCount: number;
+    lastMessageAt: string | null;
+  }>>([]);
+  const [selectedConversationId, setSelectedConversationId] = useState<string>("");
+  const [conversationMessages, setConversationMessages] = useState<Array<{
+    id: string;
+    role: string;
+    content: string;
+    createdAt: string;
+  }>>([]);
+  const [isLoadingConversations, setIsLoadingConversations] = useState(false);
+  const [isLoadingMessages, setIsLoadingMessages] = useState(false);
 
   const selectedAgent = channelAgents.find((agent) => agent.id === selectedAgentId) ?? channelAgents[0] ?? null;
   const canManage = currentRole === "admin";
+
+  const loadConversationThread = useCallback(async (conversationId: string) => {
+    setIsLoadingMessages(true);
+    try {
+      const response = await fetch(
+        `/api/workspaces/${workspaceSlug}/conversations/${conversationId}/messages?includeShared=true&limit=120`,
+      );
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        messages?: Array<{
+          id: string;
+          role: string;
+          content: string;
+          createdAt: string;
+        }>;
+      };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "No se pudo cargar el transcript.");
+      }
+      setConversationMessages(payload.messages ?? []);
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "No se pudo cargar el transcript.");
+      setConversationMessages([]);
+    } finally {
+      setIsLoadingMessages(false);
+    }
+  }, [workspaceSlug]);
+
+  const loadChannelConversations = useCallback(async (agentId: string) => {
+    setIsLoadingConversations(true);
+    try {
+      const response = await fetch(
+        `/api/workspaces/${workspaceSlug}/conversations?agentId=${encodeURIComponent(agentId)}&includeShared=true&limit=30`,
+      );
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        conversations?: Array<{
+          id: string;
+          title: string;
+          messageCount: number;
+          lastMessageAt: string | null;
+        }>;
+      };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "No se pudieron cargar las conversaciones de canal.");
+      }
+      const nextConversations = payload.conversations ?? [];
+      setConversations(nextConversations);
+      setSelectedConversationId((current) => {
+        if (current && nextConversations.some((conversation) => conversation.id === current)) {
+          return current;
+        }
+        return nextConversations[0]?.id ?? "";
+      });
+      if (nextConversations.length === 0) {
+        setConversationMessages([]);
+      }
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "No se pudieron cargar las conversaciones.");
+      setConversations([]);
+      setConversationMessages([]);
+      setSelectedConversationId("");
+    } finally {
+      setIsLoadingConversations(false);
+    }
+  }, [workspaceSlug]);
 
   function defaultChannelConfig(agentName: string) {
     return {
@@ -920,8 +1003,7 @@ export function ChannelsPanel({ workspaceSlug, currentRole, agents }: ChannelsPa
     };
   }
 
-  async function loadAgentChannelStatus(agentId: string) {
-    const fallbackName = selectedAgent?.name ?? "Canal";
+  const loadAgentChannelStatus = useCallback(async (agentId: string, fallbackName: string) => {
     try {
       const response = await fetch(
         `/api/workspaces/${workspaceSlug}/agents/${agentId}?channelStatus=true`,
@@ -938,6 +1020,10 @@ export function ChannelsPanel({ workspaceSlug, currentRole, agents }: ChannelsPa
             qr?: string | null;
             lastSeen?: string | null;
           } | null;
+          runtimeDiagnostics?: {
+            runtimeState?: "reachable" | "unreachable" | "missing_endpoint" | "missing_api_key";
+            message?: string;
+          };
         };
       };
       if (!response.ok || !payload.agent) {
@@ -969,18 +1055,31 @@ export function ChannelsPanel({ workspaceSlug, currentRole, agents }: ChannelsPa
           lastSeen: payload.agent.lastHealthCheckAt ?? null,
         });
       }
+      const diagnostics = payload.agent.runtimeDiagnostics;
+      setRuntimeState(diagnostics?.runtimeState ?? "unknown");
+      setRuntimeMessage(diagnostics?.message ?? "No se recibieron diagnósticos del runtime.");
     } catch {
       setChannelConfigDraft(JSON.stringify(defaultChannelConfig(fallbackName), null, 2));
       setGatewayStatus(null);
+      setRuntimeState("unknown");
+      setRuntimeMessage("No fue posible cargar el estado del runtime.");
     }
-  }
+  }, [workspaceSlug]);
 
   useEffect(() => {
     if (!selectedAgent) return;
     setStatusMessage("");
     setError("");
-    void loadAgentChannelStatus(selectedAgent.id);
-  }, [workspaceSlug, selectedAgent?.id]);
+    void loadAgentChannelStatus(selectedAgent.id, selectedAgent.name ?? "Canal");
+    void loadChannelConversations(selectedAgent.id);
+  }, [loadAgentChannelStatus, loadChannelConversations, selectedAgent]);
+
+  useEffect(() => {
+    if (!selectedConversationId) {
+      return;
+    }
+    void loadConversationThread(selectedConversationId);
+  }, [loadConversationThread, selectedConversationId]);
 
   async function saveChannelConfig() {
     if (!selectedAgent || !canManage || isSaving) return;
@@ -1004,7 +1103,8 @@ export function ChannelsPanel({ workspaceSlug, currentRole, agents }: ChannelsPa
       const payload = (await response.json().catch(() => ({}))) as { error?: string };
       if (!response.ok) throw new Error(payload.error ?? "No se pudo guardar la configuración de canal.");
       setStatusMessage("Configuración de canal guardada.");
-      await loadAgentChannelStatus(selectedAgent.id);
+      await loadAgentChannelStatus(selectedAgent.id, selectedAgent.name ?? "Canal");
+      await loadChannelConversations(selectedAgent.id);
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "No se pudo guardar.");
     } finally {
@@ -1024,22 +1124,35 @@ export function ChannelsPanel({ workspaceSlug, currentRole, agents }: ChannelsPa
       const payload = (await response.json().catch(() => ({}))) as {
         error?: string;
         health?: { ok?: boolean };
+        channelStatus?: {
+          status?: string;
+          paired?: boolean;
+          qr?: string | null;
+          lastSeen?: string | null;
+        } | null;
         cron?: { configured?: number; registered?: boolean; error?: string };
       };
       if (!response.ok) throw new Error(payload.error ?? "No se pudo verificar.");
       setGatewayStatus({
-        status: payload.health?.ok ? "conectado" : "desconectado",
-        paired: Boolean(payload.health?.ok),
-        qr: null,
-        lastSeen: new Date().toISOString(),
+        status: payload.channelStatus?.status ?? (payload.health?.ok ? "conectado" : "desconectado"),
+        paired:
+          payload.channelStatus?.paired === true ||
+          payload.health?.ok === true,
+        qr: payload.channelStatus?.qr ?? null,
+        lastSeen: payload.channelStatus?.lastSeen ?? new Date().toISOString(),
       });
+      setRuntimeState(payload.health?.ok ? "reachable" : "unreachable");
+      setRuntimeMessage(payload.health?.ok ? "Hermes reachable." : "Hermes unreachable o API key inválida.");
       if (payload.cron?.error) {
         setStatusMessage(`Salud OK, cron con advertencia: ${payload.cron.error}`);
       } else {
         setStatusMessage(payload.health?.ok ? "Canal conectado y saludable." : "Canal sin conexión.");
       }
+      await loadChannelConversations(selectedAgent.id);
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "No se pudo verificar.");
+      setRuntimeState("unreachable");
+      setRuntimeMessage("No se logró contactar el runtime.");
     } finally {
       setIsChecking(false);
     }
@@ -1086,6 +1199,22 @@ export function ChannelsPanel({ workspaceSlug, currentRole, agents }: ChannelsPa
 
         {error ? <p style={inlineErrorStyle}>{error}</p> : null}
         {statusMessage ? <p style={inlineSuccessStyle}>{statusMessage}</p> : null}
+        <div style={statusRowStyle}>
+          <StatusPill
+            tone={
+              runtimeState === "reachable"
+                ? "success"
+                : runtimeState === "missing_endpoint" || runtimeState === "missing_api_key"
+                  ? "warning"
+                  : runtimeState === "unreachable"
+                    ? "danger"
+                    : "neutral"
+            }
+          >
+            Runtime: {runtimeState.replace(/_/g, " ")}
+          </StatusPill>
+          <p style={{ ...panelDescriptionStyle, margin: 0 }}>{runtimeMessage}</p>
+        </div>
 
         <div style={channelsGridStyle}>
           <div style={channelCardStyle}>
@@ -1131,6 +1260,81 @@ export function ChannelsPanel({ workspaceSlug, currentRole, agents }: ChannelsPa
               />
             )}
           </div>
+        </div>
+
+        <div style={channelCardStyle}>
+          <h4 style={channelCardTitleStyle}>Transcript del canal</h4>
+          <p style={channelCardCopyStyle}>
+            Conversaciones recientes vinculadas a este agente de canal.
+          </p>
+          {isLoadingConversations ? <p style={panelDescriptionStyle}>Cargando conversaciones...</p> : null}
+          {conversations.length > 0 ? (
+            <div style={{ display: "grid", gap: 10 }}>
+              <div style={{ display: "grid", gap: 8 }}>
+                {conversations.map((conversation) => (
+                  <button
+                    key={conversation.id}
+                    type="button"
+                    onClick={() => setSelectedConversationId(conversation.id)}
+                    style={{
+                      ...actionButtonStyle,
+                      justifyContent: "space-between",
+                      borderColor:
+                        selectedConversationId === conversation.id
+                          ? "rgba(51, 92, 255, 0.26)"
+                          : "var(--workspace-border)",
+                      background:
+                        selectedConversationId === conversation.id
+                          ? "rgba(51, 92, 255, 0.08)"
+                          : "var(--workspace-panel)",
+                    }}
+                  >
+                    <span>{conversation.title}</span>
+                    <span style={{ fontSize: 12, color: "var(--workspace-muted)" }}>
+                      {conversation.messageCount} mensajes
+                    </span>
+                  </button>
+                ))}
+              </div>
+              <div style={tableWrapStyle}>
+                <div style={{ display: "grid", gap: 8, padding: 12, maxHeight: 300, overflowY: "auto" }}>
+                  {isLoadingMessages ? <p style={panelDescriptionStyle}>Cargando transcript...</p> : null}
+                  {!isLoadingMessages && conversationMessages.length === 0 ? (
+                    <p style={panelDescriptionStyle}>No hay mensajes para esta conversación.</p>
+                  ) : null}
+                  {conversationMessages.map((message) => (
+                    <div
+                      key={message.id}
+                      style={{
+                        border: "1px solid var(--workspace-border)",
+                        borderRadius: 12,
+                        background:
+                          message.role === "user"
+                            ? "rgba(51, 92, 255, 0.08)"
+                            : "var(--workspace-panel)",
+                        padding: "10px 12px",
+                        display: "grid",
+                        gap: 6,
+                      }}
+                    >
+                      <p style={{ margin: 0, fontWeight: 700, fontSize: 12, color: "var(--workspace-muted)" }}>
+                        {message.role === "user" ? "Usuario" : "Agente"} · {new Date(message.createdAt).toLocaleString("es-MX")}
+                      </p>
+                      <p style={{ margin: 0, fontSize: 14, color: "var(--workspace-text)", lineHeight: 1.5 }}>
+                        {message.content}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <EmptyState
+              icon={MessageSquare}
+              title="Sin transcript todavía"
+              description="Cuando este canal reciba o envíe mensajes, aparecerán aquí."
+            />
+          )}
         </div>
       </Panel>
     </div>

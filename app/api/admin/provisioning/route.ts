@@ -1,6 +1,11 @@
 import { listProvisioningJobs } from '@/lib/platformStore'
+import { ensureAdminApiAccess } from '@/lib/auth'
 
 export async function GET(request: Request) {
+  const authorizationFailure = await ensureAdminApiAccess()
+  if (authorizationFailure) {
+    return authorizationFailure
+  }
   const { searchParams } = new URL(request.url)
   const limitParam = searchParams.get('limit')
   const limit = limitParam ? Number(limitParam) : 50

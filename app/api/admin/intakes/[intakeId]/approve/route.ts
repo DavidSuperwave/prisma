@@ -1,11 +1,16 @@
 import { getIntakeSubmissionById, updateIntakeProvisioningStatus } from '@/lib/intakeStore'
 import { listSites, trackUsageEvent, updateSitePublishStatus } from '@/lib/platformStore'
+import { ensureAdminApiAccess } from '@/lib/auth'
 
 type Context = {
   params: Promise<{ intakeId: string }>
 }
 
 export async function POST(_: Request, context: Context) {
+  const authorizationFailure = await ensureAdminApiAccess()
+  if (authorizationFailure) {
+    return authorizationFailure
+  }
   const { intakeId } = await context.params
   const intake = await getIntakeSubmissionById(intakeId)
 

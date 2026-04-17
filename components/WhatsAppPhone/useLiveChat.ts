@@ -1,25 +1,13 @@
 "use client";
 
 import { useCallback, useState } from "react";
+import { consumeCompleteSseDataLines } from "@/lib/chatSseClient";
 import type { ChatMessage } from "./types";
 
 type ApiHistoryMessage = {
   role: "user" | "assistant";
   content: string;
 };
-
-function parseSseChunk(chunk: string) {
-  return chunk
-    .split("\n\n")
-    .map((part) => part.trim())
-    .filter(Boolean)
-    .flatMap((part) =>
-      part
-        .split("\n")
-        .filter((line) => line.startsWith("data: "))
-        .map((line) => line.slice(6)),
-    );
-}
 
 function currentTimeLabel() {
   return new Intl.DateTimeFormat("es-MX", {
@@ -102,18 +90,30 @@ export function useLiveChat(isActive: boolean) {
         }
 
         buffer += decoder.decode(value, { stream: true });
-        const parts = parseSseChunk(buffer);
-        const endedWithBoundary = buffer.endsWith("\n\n");
-        buffer = endedWithBoundary ? "" : buffer.slice(buffer.lastIndexOf("\n\n") + 2);
+        const { remainder, dataLines } = consumeCompleteSseDataLines(buffer);
+        buffer = remainder;
 
-        for (const part of parts) {
-          const payload = JSON.parse(part) as { type: string; content?: string; error?: string };
-
-          if (payload.type === "delta" && payload.content) {
+        for (const raw of dataLines) {
+          if (raw === "[DONE]") {
+            continue;
+          }
+          let payload: { type: string; content?: string; text?: string; error?: string };
+          try {
+            payload = JSON.parse(raw) as typeof payload;
+          } catch {
+            continue;
+          }
+          const deltaPiece =
+            typeof payload.content === "string"
+              ? payload.content
+              : typeof payload.text === "string"
+                ? payload.text
+                : "";
+          if (payload.type === "delta" && deltaPiece) {
             setMessages((current) =>
               current.map((message) =>
                 message.id === assistantId
-                  ? { ...message, content: `${message.content}${payload.content}` }
+                  ? { ...message, content: `${message.content}${deltaPiece}` }
                   : message,
               ),
             );

@@ -1,4 +1,5 @@
 import { createDeployment, listDeployments } from '@/lib/platformStore'
+import { ensureAdminApiAccess } from '@/lib/auth'
 
 type CreateDeploymentRequest = {
   workspaceId?: string
@@ -10,6 +11,10 @@ type CreateDeploymentRequest = {
 }
 
 export async function GET(request: Request) {
+  const authorizationFailure = await ensureAdminApiAccess()
+  if (authorizationFailure) {
+    return authorizationFailure
+  }
   const { searchParams } = new URL(request.url)
   const workspaceId = searchParams.get('workspaceId') ?? undefined
   const deployments = await listDeployments(workspaceId)
@@ -17,6 +22,10 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  const authorizationFailure = await ensureAdminApiAccess()
+  if (authorizationFailure) {
+    return authorizationFailure
+  }
   try {
     const body = (await request.json()) as CreateDeploymentRequest
     if (!body.workspaceId || !body.agentDefinitionId || !body.dropletHost || !body.containerName || !body.imageRef) {

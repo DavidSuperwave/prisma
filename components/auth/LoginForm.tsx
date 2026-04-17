@@ -12,34 +12,37 @@ export function LoginForm({ nextPath }: { nextPath: string }) {
     <form action={formAction} style={{ display: "grid", gap: 16 }}>
       <input type="hidden" name="next" value={nextPath} />
 
-      <label style={{ display: "grid", gap: 8, fontSize: 14 }}>
+      <label style={{ display: "grid", gap: 8, fontSize: 14, color: "#111827" }}>
         Email
         <input
           name="email"
           type="email"
           required
-          defaultValue="george@bbc.local"
+          autoComplete="email"
+          placeholder="you@company.com"
           style={{
             borderRadius: 14,
             border: "1px solid rgba(17,24,39,0.12)",
             padding: "12px 14px",
             font: "inherit",
+            color: "#111827",
           }}
         />
       </label>
 
-      <label style={{ display: "grid", gap: 8, fontSize: 14 }}>
+      <label style={{ display: "grid", gap: 8, fontSize: 14, color: "#111827" }}>
         Password
         <input
           name="password"
           type="password"
           required
-          defaultValue="PrismaDemo!2026"
+          autoComplete="current-password"
           style={{
             borderRadius: 14,
             border: "1px solid rgba(17,24,39,0.12)",
             padding: "12px 14px",
             font: "inherit",
+            color: "#111827",
           }}
         />
       </label>

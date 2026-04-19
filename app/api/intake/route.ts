@@ -5,6 +5,9 @@ import { createIntakeSubmission, type IntakeAsset } from '@/lib/intakeStore'
 import { notifyOps } from '@/lib/opsNotify'
 import { queueProvisioningFromIntake } from '@/lib/platformStore'
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 const MAX_FILES = 6
 const MAX_FILE_BYTES = 10 * 1024 * 1024
 

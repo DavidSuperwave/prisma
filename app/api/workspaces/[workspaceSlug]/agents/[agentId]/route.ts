@@ -3,7 +3,12 @@ import {
   evaluateAgentReadiness,
   mergeReadinessIntoKnowledgeScope,
 } from "@/lib/agentReadiness";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
+import { fetchWhatsappChannelStatus } from "@/lib/whatsappSidecar";
 import { listWorkspaceMembershipsForUser } from "@/lib/workspaceStore";
 
 type Context = {
@@ -182,60 +187,12 @@ async function authorizeWorkspaceAdmin(workspaceSlug: string) {
   return { user, membership };
 }
 
-async function fetchChannelStatus(endpoint: string, apiKey: string) {
-  const normalizedEndpoint = endpoint.trim().replace(/\/$/, "");
-  if (!normalizedEndpoint || !apiKey) {
-    return null;
-  }
-
-  const candidates = [
-    `${normalizedEndpoint}/v1/channels/whatsapp/status`,
-    `${normalizedEndpoint}/channels/whatsapp/status`,
-    `${normalizedEndpoint}/whatsapp/status`,
-  ];
-  for (const url of candidates) {
-    try {
-      const response = await fetch(url, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "x-api-key": apiKey,
-        },
-      });
-      if (!response.ok) {
-        continue;
-      }
-      const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
-      if (!payload) {
-        continue;
-      }
-      return {
-        status:
-          typeof payload.status === "string"
-            ? payload.status
-            : typeof payload.state === "string"
-              ? payload.state
-              : "unknown",
-        paired:
-          payload.paired === true || payload.connected === true || payload.ready === true,
-        qr:
-          typeof payload.qr === "string"
-            ? payload.qr
-            : typeof payload.qr_code === "string"
-              ? payload.qr_code
-              : null,
-        lastSeen:
-          typeof payload.last_seen === "string"
-            ? payload.last_seen
-            : typeof payload.lastSeen === "string"
-              ? payload.lastSeen
-              : null,
-      };
-    } catch {
-      // Try next status endpoint candidate.
-    }
-  }
-  return null;
+async function fetchChannelStatus(
+  endpoint: string,
+  apiKey: string,
+  channelConfig: Record<string, unknown> | null | undefined,
+) {
+  return fetchWhatsappChannelStatus(endpoint, apiKey, channelConfig ?? null);
 }
 
 export async function GET(request: Request, context: Context) {
@@ -277,7 +234,7 @@ export async function GET(request: Request, context: Context) {
     const apiKey = String(typedRow.api_key ?? "").trim();
     const channelStatus =
       shouldLoadChannelStatus && apiEndpoint && apiKey
-        ? await fetchChannelStatus(apiEndpoint, apiKey)
+        ? await fetchChannelStatus(apiEndpoint, apiKey, typedRow.channel_config)
         : null;
     const readiness = evaluateAgentReadiness({
       apiEndpoint: apiEndpoint,
@@ -611,7 +568,7 @@ export async function POST(_request: Request, context: Context) {
     const supabase = requireSupabaseAdmin();
     const { data: agentRow, error: agentError } = await supabase
       .from("workspace_agents")
-      .select("id, workspace_id, api_endpoint, api_key, status, soul_md, knowledge_scope, cron_jobs")
+      .select("id, workspace_id, api_endpoint, api_key, status, soul_md, knowledge_scope, cron_jobs, channel_config")
       .eq("id", agentId)
       .eq("workspace_id", authorization.membership.workspaceId)
       .maybeSingle();
@@ -728,7 +685,9 @@ export async function POST(_request: Request, context: Context) {
       throw new Error(updateError.message);
     }
 
-    const channelStatus = healthy ? await fetchChannelStatus(endpoint, apiKey) : null;
+    const channelStatus = healthy
+      ? await fetchChannelStatus(endpoint, apiKey, agentRow.channel_config)
+      : null;
 
     return Response.json({
       health: {

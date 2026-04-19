@@ -3,6 +3,9 @@ import { getIntakeSubmissionById, markIntakeAsPaid, updateIntakeProvisioningStat
 import { notifyOps } from '@/lib/opsNotify'
 import { provisionWorkspaceFromIntake } from '@/lib/platformStore'
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 function getStripe() {
   const secretKey = process.env.STRIPE_SECRET_KEY
   if (!secretKey) {

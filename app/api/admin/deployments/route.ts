@@ -1,6 +1,9 @@
 import { createDeployment, listDeployments } from '@/lib/platformStore'
 import { ensureAdminApiAccess } from '@/lib/auth'
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 type CreateDeploymentRequest = {
   workspaceId?: string
   agentDefinitionId?: string

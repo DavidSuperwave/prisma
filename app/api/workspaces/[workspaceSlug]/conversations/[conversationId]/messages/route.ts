@@ -5,6 +5,12 @@ import {
   type ConversationRow,
 } from "@/app/api/workspaces/[workspaceSlug]/conversations/_shared";
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+import { scrubAndStoreSecrets } from "@/lib/secretScrubber";
+import { stripInlineToolCallsFromText } from "@/lib/stripInlineToolCalls";
+
 type Context = {
   params: Promise<{ workspaceSlug: string; conversationId: string }>;
 };
@@ -25,7 +31,7 @@ async function loadConversation(workspaceId: string, conversationId: string) {
   const supabase = requireSupabaseAdmin();
   const { data, error } = await supabase
     .from("workspace_conversations")
-    .select("id, workspace_id, agent_id, title, source, runtime_conversation_id, channel_type, channel_identity, metadata, message_count, last_message_at, created_by, created_at, updated_at")
+    .select("id, workspace_id, agent_id, title, source, runtime_conversation_id, channel_type, channel_identity, metadata, agent_paused, message_count, last_message_at, created_by, created_at, updated_at")
     .eq("workspace_id", workspaceId)
     .eq("id", conversationId)
     .maybeSingle();
@@ -36,13 +42,19 @@ async function loadConversation(workspaceId: string, conversationId: string) {
 }
 
 function mapMessage(row: Record<string, unknown>) {
+  const role = String(row.role);
+  const rawContent = String(row.content ?? "");
+  // Sanitize historical assistant messages that were persisted before the
+  // chat pipeline learned to strip inline tool_call envelopes. Without this
+  // refreshing the thread re-renders raw `{"type":"toolcall",...}` JSON.
+  const content = role === "assistant" ? stripInlineToolCallsFromText(rawContent) : rawContent;
   return {
     id: String(row.id),
     conversationId: String(row.conversation_id),
     workspaceId: String(row.workspace_id),
     agentId: row.agent_id ? String(row.agent_id) : null,
-    role: String(row.role),
-    content: String(row.content ?? ""),
+    role,
+    content,
     blocks: Array.isArray(row.blocks) ? row.blocks : [],
     attachments: Array.isArray(row.attachments) ? row.attachments : [],
     metadata: (row.metadata as Record<string, unknown>) ?? {},
@@ -118,9 +130,24 @@ export async function POST(request: Request, context: Context) {
     if (!role || !["user", "assistant", "system", "tool"].includes(role)) {
       return Response.json({ error: "role is required." }, { status: 400 });
     }
-    const content = typeof payload.content === "string" ? payload.content : "";
+    let content = typeof payload.content === "string" ? payload.content : "";
     if (!content.trim() && !Array.isArray(payload.blocks) && !Array.isArray(payload.attachments)) {
       return Response.json({ error: "content, blocks, or attachments are required." }, { status: 400 });
+    }
+    const scrubMetadata: Record<string, unknown> = isRecord(payload.metadata) ? { ...payload.metadata } : {};
+    if (role === "user" && content) {
+      try {
+        const scrubbed = await scrubAndStoreSecrets(content, {
+          workspaceId: workspaceContext.workspaceId,
+          createdBy: workspaceContext.user.id,
+        });
+        if (scrubbed.detected) {
+          content = scrubbed.scrubbedContent;
+          scrubMetadata.redactedSecrets = scrubbed.createdIntegrations;
+        }
+      } catch (error) {
+        console.error("secretScrubber (messages POST) failed", error);
+      }
     }
 
     const supabase = requireSupabaseAdmin();
@@ -134,7 +161,7 @@ export async function POST(request: Request, context: Context) {
         content,
         blocks: Array.isArray(payload.blocks) ? payload.blocks : [],
         attachments: Array.isArray(payload.attachments) ? payload.attachments : [],
-        metadata: isRecord(payload.metadata) ? payload.metadata : {},
+        metadata: scrubMetadata,
         created_by: workspaceContext.user.id,
       })
       .select("id, conversation_id, workspace_id, agent_id, role, content, blocks, attachments, metadata, created_by, created_at")

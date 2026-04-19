@@ -9,6 +9,9 @@ import {
   listWorkspaceChannelsForUser,
 } from "@/lib/teamChatStore";
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 type Context = {
   params: Promise<{ workspaceSlug: string }>;
 };

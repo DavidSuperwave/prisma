@@ -2,6 +2,9 @@ import { updateIntakeProvisioningStatus } from '@/lib/intakeStore'
 import { getSiteById, listProjects, trackUsageEvent, updateSitePublishStatus } from '@/lib/platformStore'
 import { ensureAdminApiAccess } from '@/lib/auth'
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 type Context = {
   params: Promise<{ siteId: string }>
 }

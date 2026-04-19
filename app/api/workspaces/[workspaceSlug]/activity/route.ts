@@ -2,6 +2,9 @@ import { getCurrentAppUser } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
 import { listWorkspaceMembershipsForUser } from "@/lib/workspaceStore";
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 type Context = {
   params: Promise<{ workspaceSlug: string }>;
 };
@@ -14,76 +17,69 @@ function requireSupabaseAdmin() {
   return supabase;
 }
 
-function parseDateRange(value: string | null, fallback: Date) {
-  if (!value) {
-    return fallback;
+async function authorize(workspaceSlug: string) {
+  const user = await getCurrentAppUser();
+  if (!user) {
+    return { error: Response.json({ error: "Authentication required." }, { status: 401 }) };
   }
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? fallback : parsed;
+  const memberships = await listWorkspaceMembershipsForUser(user.id, user.isPlatformAdmin);
+  const membership = memberships.find((entry) => entry.workspace.subdomain === workspaceSlug);
+  if (!membership) {
+    return { error: Response.json({ error: "You do not have access to this workspace." }, { status: 403 }) };
+  }
+  return { user, membership };
 }
 
 export async function GET(request: Request, context: Context) {
   try {
-    const user = await getCurrentAppUser();
-    if (!user) {
-      return Response.json({ error: "Authentication required." }, { status: 401 });
-    }
-
     const { workspaceSlug } = await context.params;
-    const memberships = await listWorkspaceMembershipsForUser(user.id, user.isPlatformAdmin);
-    const membership = memberships.find((entry) => entry.workspace.subdomain === workspaceSlug);
-    if (!membership) {
-      return Response.json({ error: "You do not have access to this workspace." }, { status: 403 });
-    }
+    const auth = await authorize(workspaceSlug);
+    if ("error" in auth) return auth.error;
 
-    const searchParams = new URL(request.url).searchParams;
-    const agentId = searchParams.get("agentId")?.trim() || null;
-    const actionFilters = (searchParams.get("actions") ?? "")
-      .split(",")
-      .map((entry) => entry.trim())
-      .filter(Boolean);
-
-    const now = new Date();
-    const defaultFrom = new Date(now.getTime() - 1000 * 60 * 60 * 24 * 14);
-    const fromDate = parseDateRange(searchParams.get("from"), defaultFrom);
-    const toDate = parseDateRange(searchParams.get("to"), now);
-    const limitRaw = Number(searchParams.get("limit") ?? "80");
-    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 200) : 80;
+    const url = new URL(request.url);
+    const taskId = url.searchParams.get("taskId");
+    const recordId = url.searchParams.get("recordId");
+    const objectId = url.searchParams.get("objectId");
+    const limit = Math.max(1, Math.min(100, Number(url.searchParams.get("limit") ?? 25)));
 
     const supabase = requireSupabaseAdmin();
     let query = supabase
-      .from("agent_activity")
-      .select("id, workspace_id, agent_id, action, details, created_at")
-      .eq("workspace_id", membership.workspaceId)
-      .gte("created_at", fromDate.toISOString())
-      .lte("created_at", toDate.toISOString())
+      .from("agent_events")
+      .select("id, event_type, payload, created_at, source_agent_id")
+      .eq("workspace_id", auth.membership.workspaceId)
       .order("created_at", { ascending: false })
       .limit(limit);
 
-    if (agentId) {
-      query = query.eq("agent_id", agentId);
-    }
-    if (actionFilters.length > 0) {
-      query = query.in("action", actionFilters);
+    if (taskId) {
+      query = query.contains("payload", { taskId });
+    } else if (recordId) {
+      // Legacy callers use camelCase; newer writes use snake_case. Match either.
+      query = query.or(
+        `payload->>recordId.eq.${recordId},payload->>record_id.eq.${recordId}`,
+      );
+    } else if (objectId) {
+      query = query.eq("payload->>object_id", objectId);
     }
 
     const { data, error } = await query;
     if (error) {
-      throw new Error(error.message);
+      return Response.json({ events: [] }, { status: 200 });
     }
 
-    return Response.json({
-      activity: (data ?? []).map((row) => ({
-        id: Number(row.id),
-        workspaceId: String(row.workspace_id),
-        agentId: String(row.agent_id),
-        action: String(row.action),
-        details: (row.details as Record<string, unknown>) ?? {},
-        createdAt: String(row.created_at),
-      })),
-    });
+    const events = (data ?? []).map((row) => ({
+      id: Number(row.id),
+      event_type: String(row.event_type),
+      payload: (row.payload as Record<string, unknown>) ?? {},
+      created_at: String(row.created_at),
+      source_agent_id: row.source_agent_id ? String(row.source_agent_id) : null,
+    }));
+
+    return Response.json({ events });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Unable to list activity.";
-    return Response.json({ error: message }, { status: 400 });
+    console.error("/activity GET", error);
+    return Response.json(
+      { error: error instanceof Error ? error.message : "Unexpected error." },
+      { status: 500 },
+    );
   }
 }

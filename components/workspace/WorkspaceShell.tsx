@@ -7,6 +7,7 @@ import {
   FolderOpen,
   Home,
   Inbox,
+  Layers,
   MessageSquare,
   Upload,
   Users,
@@ -17,10 +18,12 @@ type NavItem = {
   label: string;
   href: string;
   meta?: string;
+  metaTitle?: string;
   active?: boolean;
   badge?: number;
   hidden?: boolean;
   disabled?: boolean;
+  children?: NavItem[];
 };
 
 type Props = {
@@ -32,12 +35,6 @@ type Props = {
   currentRole?: string | null;
   currentUserEmail?: string | null;
   children: React.ReactNode;
-};
-
-type NavItemGroup = {
-  primary: NavItem[];
-  dataItems: NavItem[];
-  trailing: NavItem[];
 };
 
 function truncateEmail(email: string) {
@@ -60,16 +57,9 @@ function formatRole(role?: string | null) {
   return "Miembro del espacio";
 }
 
-function splitNavItems(items: NavItem[]): NavItemGroup {
-  const primaryIds = new Set(["home", "chat", "inbox", "agents", "queue", "documents", "fields", "channels", "activity", "team-chat"]);
-  const dataItems = items.filter((item) => item.id.startsWith("object-"));
-  const primary = items.filter((item) => primaryIds.has(item.id) && !item.id.startsWith("object-"));
-  const trailing = items.filter((item) => !primaryIds.has(item.id) && !item.id.startsWith("object-"));
-  return { primary, dataItems, trailing };
-}
-
 function getNavIcon(itemId: string) {
-  if (itemId.startsWith("object-")) return Database;
+  if (itemId === "datos") return Database;
+  if (itemId.startsWith("object-")) return Layers;
   if (itemId === "home") return Home;
   if (itemId === "chat") return MessageSquare;
   if (itemId === "inbox") return Inbox;
@@ -78,6 +68,7 @@ function getNavIcon(itemId: string) {
   if (itemId === "documents") return FolderOpen;
   if (itemId === "team-chat") return Users;
   if (itemId === "import") return Upload;
+  if (itemId === "crm" || itemId.startsWith("crm-")) return Users;
   return Database;
 }
 
@@ -91,13 +82,22 @@ export function WorkspaceShell({
   currentUserEmail,
   children,
 }: Props) {
-  const visibleItems = navItems.filter((item) => !item.hidden);
-  const { primary, dataItems, trailing } = splitNavItems(visibleItems);
-  const hasActiveDataItem = dataItems.some((item) => item.active);
-  const topLevelPrimary = primary.slice(0, 6);
+  function filterVisible(items: NavItem[]): NavItem[] {
+    return items
+      .filter((item) => !item.hidden)
+      .map((item) =>
+        item.children
+          ? { ...item, children: filterVisible(item.children) }
+          : item,
+      );
+  }
+  const visibleItems = filterVisible(navItems);
   const userInitial = (currentUserEmail ?? workspaceName).slice(0, 1).toUpperCase();
 
   function renderNavItem(item: NavItem, nested = false) {
+    if (item.children && item.children.length > 0) {
+      return renderNavGroup(item);
+    }
     const Icon = getNavIcon(item.id);
     const className = `workspace-nav__item ${nested ? "workspace-nav__item--nested" : ""} ${item.active ? "workspace-nav__item--active" : ""} ${item.disabled ? "workspace-nav__item--disabled" : ""}`.trim();
     const content = (
@@ -108,7 +108,7 @@ export function WorkspaceShell({
         <div className="workspace-nav__item-text">
           <span className="workspace-nav__title">{item.label}</span>
           {item.meta ? (
-            <span className="workspace-nav__meta" title={item.meta}>
+            <span className="workspace-nav__meta" title={item.metaTitle ?? item.meta}>
               {item.meta}
             </span>
           ) : null}
@@ -131,6 +131,38 @@ export function WorkspaceShell({
       <Link key={item.id} href={item.href} className={`workspace-link ${className}`}>
         {content}
       </Link>
+    );
+  }
+
+  function renderNavGroup(item: NavItem) {
+    const Icon = getNavIcon(item.id);
+    const hasActiveChild =
+      item.active || (item.children?.some((child) => child.active) ?? false);
+    const summaryClassName = `workspace-nav__item workspace-nav__toggle ${hasActiveChild ? "workspace-nav__item--active" : ""}`.trim();
+    return (
+      <details key={item.id} className="workspace-nav__details" open={hasActiveChild}>
+        <summary className={summaryClassName}>
+          <span className="workspace-nav__icon" aria-hidden="true">
+            <Icon size={14} />
+          </span>
+          <div className="workspace-nav__item-text">
+            <span className="workspace-nav__title">{item.label}</span>
+            {item.meta ? (
+              <span className="workspace-nav__meta" title={item.metaTitle ?? item.meta}>
+                {item.meta}
+              </span>
+            ) : null}
+          </div>
+          <ChevronDown size={14} className="workspace-nav__toggle-icon" />
+        </summary>
+        <ul className="workspace-nav__subgroup">
+          {item.children?.map((child) => (
+            <li key={child.id} className="workspace-nav__subgroup-item">
+              {renderNavItem(child, true)}
+            </li>
+          ))}
+        </ul>
+      </details>
     );
   }
 
@@ -182,22 +214,7 @@ export function WorkspaceShell({
           <nav className="workspace-nav workspace-nav--rail">
             <div className="workspace-nav__group">
               <p className="workspace-nav__label">Navegación</p>
-              {topLevelPrimary.map((item) => renderNavItem(item))}
-
-              <details className="workspace-nav__details" open={hasActiveDataItem}>
-                <summary className={`workspace-nav__item workspace-nav__toggle ${hasActiveDataItem ? "workspace-nav__item--active" : ""}`}>
-                  <div className="workspace-nav__item-text">
-                    <span className="workspace-nav__title">Datos</span>
-                    <span className="workspace-nav__meta">{dataItems.length} objetos</span>
-                  </div>
-                  <ChevronDown size={14} className="workspace-nav__toggle-icon" />
-                </summary>
-                <div className="workspace-nav__subgroup">
-                  {dataItems.map((item) => renderNavItem(item, true))}
-                </div>
-              </details>
-
-              {trailing.map((item) => renderNavItem(item))}
+              {visibleItems.map((item) => renderNavItem(item))}
             </div>
           </nav>
 

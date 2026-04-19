@@ -1,6 +1,9 @@
-import { getCurrentAppUser } from "@/lib/auth";
+import { resolveWorkspaceRequestContext } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
-import { listWorkspaceMembershipsForUser } from "@/lib/workspaceStore";
+import { computeFieldDiff, logRecordHistory } from "@/lib/recordHistory";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 type Context = {
   params: Promise<{ workspaceSlug: string }>;
@@ -32,17 +35,10 @@ function mapRecordRow(row: Record<string, unknown>) {
 
 export async function POST(request: Request, context: Context) {
   try {
-    const user = await getCurrentAppUser();
-    if (!user) {
-      return Response.json({ error: "Authentication required." }, { status: 401 });
-    }
-
     const { workspaceSlug } = await context.params;
-    const memberships = await listWorkspaceMembershipsForUser(user.id, user.isPlatformAdmin);
-    const membership = memberships.find((entry) => entry.workspace.subdomain === workspaceSlug);
-    if (!membership) {
-      return Response.json({ error: "You do not have access to this workspace." }, { status: 403 });
-    }
+    const resolved = await resolveWorkspaceRequestContext(workspaceSlug);
+    if (resolved instanceof Response) return resolved;
+    const { user, membership } = resolved;
     if (!membership.isPlatformAdmin && membership.role === "viewer") {
       return Response.json({ error: "You do not have permission to modify records." }, { status: 403 });
     }
@@ -87,6 +83,21 @@ export async function POST(request: Request, context: Context) {
     if (createError) {
       throw new Error(createError.message);
     }
+
+    const createdData =
+      created.data && typeof created.data === "object" && !Array.isArray(created.data)
+        ? (created.data as Record<string, unknown>)
+        : {};
+
+    await logRecordHistory({
+      supabase,
+      workspaceId: membership.workspaceId,
+      objectId,
+      recordId: String(created.id),
+      actor: { userId: user.id },
+      type: "record.created",
+      diff: computeFieldDiff({}, createdData),
+    });
 
     return Response.json({ record: mapRecordRow(created as Record<string, unknown>) }, { status: 201 });
   } catch (error) {

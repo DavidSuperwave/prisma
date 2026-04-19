@@ -1,6 +1,6 @@
 import { getCurrentAppUser } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
-import { listWorkspaceMembershipsForUser } from "@/lib/workspaceStore";
+import { getWorkspaceMembershipForSlug } from "@/lib/workspaceStore";
 
 type WorkspaceMembershipRole = "admin" | "operator" | "viewer";
 
@@ -24,6 +24,7 @@ export type ConversationRow = {
   channel_type: string | null;
   channel_identity: string | null;
   metadata: Record<string, unknown> | null;
+  agent_paused: boolean | null;
   message_count: number | null;
   last_message_at: string | null;
   created_by: string | null;
@@ -45,8 +46,11 @@ export async function authorizeWorkspaceMember(workspaceSlug: string) {
     return { error: Response.json({ error: "Authentication required." }, { status: 401 }) };
   }
 
-  const memberships = await listWorkspaceMembershipsForUser(user.id, user.isPlatformAdmin);
-  const membership = memberships.find((entry) => entry.workspace.subdomain === workspaceSlug);
+  const membership = await getWorkspaceMembershipForSlug(
+    user.id,
+    workspaceSlug,
+    user.isPlatformAdmin,
+  );
   if (!membership) {
     return { error: Response.json({ error: "You do not have access to this workspace." }, { status: 403 }) };
   }
@@ -91,6 +95,7 @@ export function mapConversation(row: ConversationRow) {
     channelType: row.channel_type ? String(row.channel_type) : null,
     channelIdentity: row.channel_identity ? String(row.channel_identity) : null,
     metadata: (row.metadata as Record<string, unknown>) ?? {},
+    agentPaused: Boolean(row.agent_paused),
     messageCount: Number(row.message_count ?? 0),
     lastMessageAt: row.last_message_at ? String(row.last_message_at) : null,
     createdBy: row.created_by ? String(row.created_by) : null,

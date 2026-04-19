@@ -1,15 +1,24 @@
 /**
  * Incremental SSE parser for /api/chat (text/event-stream).
- * Buffers until a blank line (\n\n) separates complete events — do not slice the
- * buffer when no delimiter exists (avoids corrupting partial `data:` lines).
+ * Supports LF and CRLF event delimiters so partial buffers are emitted as soon as
+ * a complete SSE event arrives.
  */
 export function consumeCompleteSseDataLines(buffer: string): { remainder: string; dataLines: string[] } {
-  const segments = buffer.split("\n\n");
-  const remainder = segments.pop() ?? "";
+  const delimiterPattern = /\r?\n\r?\n/g;
+  const segments: string[] = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = delimiterPattern.exec(buffer)) !== null) {
+    segments.push(buffer.slice(lastIndex, match.index));
+    lastIndex = match.index + match[0].length;
+  }
+
+  const remainder = buffer.slice(lastIndex);
   const dataLines: string[] = [];
 
   for (const segment of segments) {
-    for (const line of segment.split("\n")) {
+    for (const line of segment.split(/\r?\n/)) {
       const trimmed = line.trim();
       if (!trimmed.startsWith("data:")) {
         continue;

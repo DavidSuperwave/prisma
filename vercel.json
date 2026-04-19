@@ -1,0 +1,21 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "crons": [
+    {
+      "path": "/api/cron/workflow-tick",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/sequence-tick",
+      "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/cron/lead-score-refresh",
+      "schedule": "0 */6 * * *"
+    },
+    {
+      "path": "/api/cron/tasks-recurring",
+      "schedule": "*/10 * * * *"
+    }
+  ]
+}

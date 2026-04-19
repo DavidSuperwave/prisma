@@ -2,6 +2,7 @@
 
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
 import { listDashboardCardsForWorkspace } from "@/lib/platformStore";
+import { generateUniqueObjectSlug } from "@/lib/objectSlug";
 
 type FieldDefinition = {
   name: string;
@@ -115,24 +116,36 @@ async function ensureObject(workspaceId: string, objectDef: { name: string; sing
     return String(existing.id);
   }
 
-  const { data, error } = await supabase
+  const slug = await generateUniqueObjectSlug(workspaceId, objectDef.name);
+  const payload: Record<string, unknown> = {
+    workspace_id: workspaceId,
+    name: objectDef.name,
+    singular_name: objectDef.singularName,
+    plural_name: objectDef.pluralName,
+    description: objectDef.description,
+    icon: objectDef.icon,
+    slug,
+  };
+  let attempt = await supabase
     .from("workspace_objects")
-    .insert({
-      workspace_id: workspaceId,
-      name: objectDef.name,
-      singular_name: objectDef.singularName,
-      plural_name: objectDef.pluralName,
-      description: objectDef.description,
-      icon: objectDef.icon,
-    })
+    .insert(payload)
     .select("id")
     .single();
 
-  if (error) {
-    throw error;
+  if (attempt.error && attempt.error.message.includes("slug")) {
+    delete payload.slug;
+    attempt = await supabase
+      .from("workspace_objects")
+      .insert(payload)
+      .select("id")
+      .single();
   }
 
-  return String(data.id);
+  if (attempt.error) {
+    throw attempt.error;
+  }
+
+  return String(attempt.data.id);
 }
 
 async function ensureFields(workspaceId: string, objectId: string, fields: FieldDefinition[]) {
@@ -358,7 +371,7 @@ export async function applyWorkspaceSchemaProposal(
   proposal: WorkspaceSchemaProposal,
   actorUserId?: string | null,
 ) {
-  const createdObjects: Array<{ objectName: string; fieldCount: number }> = [];
+  const createdObjects: Array<{ objectName: string; objectId: string; fieldCount: number; fieldKeys: string[] }> = [];
 
   for (const objectProposal of proposal.objects) {
     const objectName = objectProposal.name.trim();
@@ -388,7 +401,9 @@ export async function applyWorkspaceSchemaProposal(
 
     createdObjects.push({
       objectName,
+      objectId,
       fieldCount: normalizedFields.length,
+      fieldKeys: normalizedFields.map((field) => field.key),
     });
   }
 

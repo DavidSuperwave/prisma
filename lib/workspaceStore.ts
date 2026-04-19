@@ -12,14 +12,20 @@ export type PrismaWorkspace = {
   createdAt: string;
 };
 
+export type PrismaCrmKind = "crm_people" | "crm_companies" | "crm_deals";
+export type PrismaObjectKind = PrismaCrmKind | "tasks";
+
 export type PrismaWorkspaceObject = {
   id: string;
   workspaceId: string;
   name: string;
+  slug: string | null;
   singularName: string | null;
   pluralName: string | null;
   description: string | null;
   icon: string | null;
+  kind: PrismaObjectKind | null;
+  isSystem: boolean;
   createdAt: string;
 };
 
@@ -34,7 +40,59 @@ export type PrismaWorkspaceField = {
   options: Record<string, unknown>;
   defaultValue: string | null;
   sortOrder: number;
+  isLocked: boolean;
 };
+
+export type PrismaPipeline = {
+  id: string;
+  workspaceId: string;
+  name: string;
+  description: string | null;
+  isDefault: boolean;
+  sortOrder: number;
+  createdAt: string;
+};
+
+export type PrismaPipelineStage = {
+  id: string;
+  workspaceId: string;
+  pipelineId: string;
+  name: string;
+  stageType: "active" | "won" | "lost";
+  sortOrder: number;
+  probability: number;
+  color: string | null;
+};
+
+export type PrismaActivityType = {
+  id: string;
+  workspaceId: string;
+  key: string;
+  name: string;
+  icon: string | null;
+  customFields: unknown[];
+  isSystem: boolean;
+};
+
+export type PrismaRecordActivity = {
+  id: string;
+  workspaceId: string;
+  recordId: string;
+  objectId: string;
+  type: string;
+  activityTypeId: string | null;
+  authorUserId: string | null;
+  authorAgentId: string | null;
+  subject: string | null;
+  body: string | null;
+  data: Record<string, unknown>;
+  isPinned: boolean;
+  occurredAt: string;
+  createdAt: string;
+};
+
+export type SmartViewScope = "private" | "team" | "org";
+export type SmartViewMode = "table" | "board" | "kpi" | "pipeline";
 
 export type PrismaWorkspaceView = {
   id: string;
@@ -46,6 +104,13 @@ export type PrismaWorkspaceView = {
   sortOrder: "asc" | "desc" | null;
   columns: string[];
   groupByFieldId: string | null;
+  scope: SmartViewScope;
+  filterDsl: Record<string, unknown>;
+  sortConfig: unknown[];
+  columnConfig: unknown[];
+  isPinned: boolean;
+  viewMode: SmartViewMode;
+  createdByUserId: string | null;
 };
 
 export type PrismaWorkspaceRecord = {
@@ -53,6 +118,32 @@ export type PrismaWorkspaceRecord = {
   workspaceId: string;
   objectId: string;
   data: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type PrismaWorkspaceDocumentPreviewSheet = {
+  name: string;
+  headers: string[];
+  sampleRows: Array<Record<string, unknown>>;
+  rowCount: number;
+};
+
+export type PrismaWorkspaceDocumentPreview = {
+  kind: "spreadsheet" | "pdf" | "image" | "other";
+  sheets: PrismaWorkspaceDocumentPreviewSheet[];
+};
+
+export type PrismaWorkspaceDocument = {
+  id: string;
+  workspaceId: string;
+  fileName: string;
+  mimeType: string;
+  fileKind: PrismaWorkspaceDocumentPreview["kind"];
+  storagePath: string;
+  publicUrl: string;
+  sizeBytes: number | null;
+  preview: PrismaWorkspaceDocumentPreview | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -105,21 +196,53 @@ export type PrismaWorkspaceTask = {
   workspaceId: string;
   sourceRecordId: string | null;
   sourceObjectId: string | null;
+  recordId: string | null;
+  listId: string | null;
+  parentTaskId: string | null;
   type: string;
   title: string;
+  description: string | null;
   ownerUserId: string | null;
   ownerAgentId: string | null;
+  assignedToUserId: string | null;
   status: string;
   priority: string;
   dueAt: string | null;
+  reminderAt: string | null;
   approvalRequired: boolean;
   approvalStatus: string;
   blockingReason: string | null;
   metadata: Record<string, unknown>;
+  customData: Record<string, unknown>;
+  sortOrder: number;
   completedAt: string | null;
   createdBy: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+export type PrismaTaskList = {
+  id: string;
+  workspaceId: string;
+  name: string;
+  description: string | null;
+  icon: string | null;
+  color: string | null;
+  isDefault: boolean;
+  sortOrder: number;
+  createdAt: string;
+};
+
+export type PrismaTaskStatus = {
+  id: string;
+  workspaceId: string;
+  listId: string | null;
+  key: string;
+  label: string;
+  color: string | null;
+  category: "todo" | "in_progress" | "done" | "blocked";
+  sortOrder: number;
+  isSystem: boolean;
 };
 
 export type WorkspaceSnapshot = {
@@ -213,14 +336,26 @@ function mapWorkspace(row: Record<string, unknown>): PrismaWorkspace {
 }
 
 function mapObject(row: Record<string, unknown>): PrismaWorkspaceObject {
+  const kindValue = typeof row.kind === "string" ? row.kind : null;
+  const kind: PrismaObjectKind | null =
+    kindValue === "crm_people" ||
+    kindValue === "crm_companies" ||
+    kindValue === "crm_deals" ||
+    kindValue === "tasks"
+      ? (kindValue as PrismaObjectKind)
+      : null;
+  const rawSlug = typeof row.slug === "string" ? row.slug.trim() : "";
   return {
     id: String(row.id),
     workspaceId: String(row.workspace_id),
     name: String(row.name),
+    slug: rawSlug.length > 0 ? rawSlug : null,
     singularName: row.singular_name ? String(row.singular_name) : null,
     pluralName: row.plural_name ? String(row.plural_name) : null,
     description: row.description ? String(row.description) : null,
     icon: row.icon ? String(row.icon) : null,
+    kind,
+    isSystem: Boolean(row.is_system),
     createdAt: String(row.created_at),
   };
 }
@@ -237,10 +372,83 @@ function mapField(row: Record<string, unknown>): PrismaWorkspaceField {
     options: (row.options as Record<string, unknown>) ?? {},
     defaultValue: row.default_value ? String(row.default_value) : null,
     sortOrder: Number(row.sort_order ?? 0),
+    isLocked: Boolean(row.is_locked),
+  };
+}
+
+function mapPipeline(row: Record<string, unknown>): PrismaPipeline {
+  return {
+    id: String(row.id),
+    workspaceId: String(row.workspace_id),
+    name: String(row.name),
+    description: row.description ? String(row.description) : null,
+    isDefault: Boolean(row.is_default),
+    sortOrder: Number(row.sort_order ?? 0),
+    createdAt: String(row.created_at),
+  };
+}
+
+function mapPipelineStage(row: Record<string, unknown>): PrismaPipelineStage {
+  const rawType = typeof row.stage_type === "string" ? row.stage_type : "active";
+  const stageType: PrismaPipelineStage["stageType"] =
+    rawType === "won" || rawType === "lost" ? rawType : "active";
+  return {
+    id: String(row.id),
+    workspaceId: String(row.workspace_id),
+    pipelineId: String(row.pipeline_id),
+    name: String(row.name),
+    stageType,
+    sortOrder: Number(row.sort_order ?? 0),
+    probability: Number(row.probability ?? 0),
+    color: row.color ? String(row.color) : null,
+  };
+}
+
+function mapActivityType(row: Record<string, unknown>): PrismaActivityType {
+  return {
+    id: String(row.id),
+    workspaceId: String(row.workspace_id),
+    key: String(row.key),
+    name: String(row.name),
+    icon: row.icon ? String(row.icon) : null,
+    customFields: Array.isArray(row.custom_fields) ? (row.custom_fields as unknown[]) : [],
+    isSystem: Boolean(row.is_system),
+  };
+}
+
+function mapRecordActivity(row: Record<string, unknown>): PrismaRecordActivity {
+  return {
+    id: String(row.id),
+    workspaceId: String(row.workspace_id),
+    recordId: String(row.record_id),
+    objectId: String(row.object_id),
+    type: String(row.type),
+    activityTypeId: row.activity_type_id ? String(row.activity_type_id) : null,
+    authorUserId: row.author_user_id ? String(row.author_user_id) : null,
+    authorAgentId: row.author_agent_id ? String(row.author_agent_id) : null,
+    subject: row.subject ? String(row.subject) : null,
+    body: row.body ? String(row.body) : null,
+    data: (row.data as Record<string, unknown>) ?? {},
+    isPinned: Boolean(row.is_pinned),
+    occurredAt: String(row.occurred_at ?? row.created_at),
+    createdAt: String(row.created_at),
   };
 }
 
 function mapView(row: Record<string, unknown>): PrismaWorkspaceView {
+  const scopeRaw = typeof row.scope === "string" ? row.scope : "private";
+  const scope: SmartViewScope =
+    scopeRaw === "team" || scopeRaw === "org" ? (scopeRaw as SmartViewScope) : "private";
+  const viewModeRaw = typeof row.view_mode === "string" ? row.view_mode : "table";
+  const viewMode: SmartViewMode =
+    viewModeRaw === "board" || viewModeRaw === "kpi" || viewModeRaw === "pipeline"
+      ? (viewModeRaw as SmartViewMode)
+      : "table";
+  const filterDslRaw = row.filter_dsl;
+  const filterDsl =
+    filterDslRaw && typeof filterDslRaw === "object" && !Array.isArray(filterDslRaw)
+      ? (filterDslRaw as Record<string, unknown>)
+      : {};
   return {
     id: String(row.id),
     workspaceId: String(row.workspace_id),
@@ -251,6 +459,13 @@ function mapView(row: Record<string, unknown>): PrismaWorkspaceView {
     sortOrder: row.sort_order === "desc" ? "desc" : row.sort_order === "asc" ? "asc" : null,
     columns: Array.isArray(row.columns) ? (row.columns as string[]) : [],
     groupByFieldId: row.group_by_field_id ? String(row.group_by_field_id) : null,
+    scope,
+    filterDsl,
+    sortConfig: Array.isArray(row.sort_config) ? (row.sort_config as unknown[]) : [],
+    columnConfig: Array.isArray(row.column_config) ? (row.column_config as unknown[]) : [],
+    isPinned: Boolean(row.is_pinned),
+    viewMode,
+    createdByUserId: row.created_by_user_id ? String(row.created_by_user_id) : null,
   };
 }
 
@@ -372,21 +587,58 @@ function mapTask(row: Record<string, unknown>): PrismaWorkspaceTask {
     workspaceId: String(row.workspace_id),
     sourceRecordId: row.source_record_id ? String(row.source_record_id) : null,
     sourceObjectId: row.source_object_id ? String(row.source_object_id) : null,
+    recordId: row.record_id ? String(row.record_id) : null,
+    listId: row.list_id ? String(row.list_id) : null,
+    parentTaskId: row.parent_task_id ? String(row.parent_task_id) : null,
     type: String(row.type ?? "follow_up"),
     title: String(row.title ?? "Task"),
+    description: row.description ? String(row.description) : null,
     ownerUserId: row.owner_user_id ? String(row.owner_user_id) : null,
     ownerAgentId: row.owner_agent_id ? String(row.owner_agent_id) : null,
+    assignedToUserId: row.assigned_to_user_id ? String(row.assigned_to_user_id) : null,
     status: String(row.status ?? "pending"),
     priority: String(row.priority ?? "normal"),
     dueAt: row.due_at ? String(row.due_at) : null,
+    reminderAt: row.reminder_at ? String(row.reminder_at) : null,
     approvalRequired: Boolean(row.approval_required),
     approvalStatus: String(row.approval_status ?? "not_required"),
     blockingReason: row.blocking_reason ? String(row.blocking_reason) : null,
     metadata: (row.metadata as Record<string, unknown>) ?? {},
+    customData: (row.custom_data as Record<string, unknown>) ?? {},
+    sortOrder: Number(row.sort_order ?? 0),
     completedAt: row.completed_at ? String(row.completed_at) : null,
     createdBy: row.created_by ? String(row.created_by) : null,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
+  };
+}
+
+function mapTaskList(row: Record<string, unknown>): PrismaTaskList {
+  return {
+    id: String(row.id),
+    workspaceId: String(row.workspace_id),
+    name: String(row.name ?? "List"),
+    description: row.description ? String(row.description) : null,
+    icon: row.icon ? String(row.icon) : null,
+    color: row.color ? String(row.color) : null,
+    isDefault: Boolean(row.is_default),
+    sortOrder: Number(row.sort_order ?? 0),
+    createdAt: String(row.created_at),
+  };
+}
+
+function mapTaskStatus(row: Record<string, unknown>): PrismaTaskStatus {
+  const category = String(row.category ?? "todo") as PrismaTaskStatus["category"];
+  return {
+    id: String(row.id),
+    workspaceId: String(row.workspace_id),
+    listId: row.list_id ? String(row.list_id) : null,
+    key: String(row.key),
+    label: String(row.label ?? row.key),
+    color: row.color ? String(row.color) : null,
+    category: ["todo", "in_progress", "done", "blocked"].includes(category) ? category : "todo",
+    sortOrder: Number(row.sort_order ?? 0),
+    isSystem: Boolean(row.is_system),
   };
 }
 
@@ -460,6 +712,10 @@ export function deriveQueueItems(
   subtitle: string;
   status: string;
   objectId: string;
+  priority?: string;
+  dueAt?: string | null;
+  assignedToUserId?: string | null;
+  listId?: string | null;
 }> {
   const objectMap = new Map(objects.map((object) => [object.id, object]));
   const recordMap = new Map(records.map((record) => [record.id, record]));
@@ -488,6 +744,10 @@ export function deriveQueueItems(
               : `Task · ${task.type}`,
           status: task.status,
           objectId: resolvedObjectId,
+          priority: task.priority,
+          dueAt: task.dueAt,
+          assignedToUserId: task.assignedToUserId,
+          listId: task.listId,
         };
       })
       .slice(0, 24);
@@ -610,6 +870,74 @@ export async function listWorkspaceSummariesForUser(userId: string, isPlatformAd
   return memberships.map((membership) => membership.workspace);
 }
 
+/**
+ * Resolve the user's membership for a single workspace (by slug) in a single
+ * Postgres round-trip. This is the preferred call for API routes that only
+ * care about one workspace — it avoids fetching and materialising the user's
+ * entire membership list on every request.
+ *
+ * For platform admins we still grant synthetic admin access to any workspace
+ * that exists, to match the semantics of `listWorkspaceMembershipsForUser`.
+ */
+export async function getWorkspaceMembershipForSlug(
+  userId: string,
+  workspaceSlug: string,
+  isPlatformAdmin = false,
+): Promise<WorkspaceMembership | null> {
+  const supabase = requireSupabaseAdmin();
+  const withPlatformFlag = await supabase
+    .from("workspace_members")
+    .select(
+      "workspace_id, role, is_platform_admin, workspaces!inner(id, name, subdomain, logo_url, primary_color, agent_limit, plan_tier, metadata, created_at)",
+    )
+    .eq("user_id", userId)
+    .eq("workspaces.subdomain", workspaceSlug)
+    .maybeSingle();
+
+  let row: Record<string, unknown> | null = null;
+  if (!withPlatformFlag.error) {
+    row = (withPlatformFlag.data ?? null) as Record<string, unknown> | null;
+  } else {
+    const fallback = await supabase
+      .from("workspace_members")
+      .select(
+        "workspace_id, role, workspaces!inner(id, name, subdomain, logo_url, primary_color, metadata, created_at)",
+      )
+      .eq("user_id", userId)
+      .eq("workspaces.subdomain", workspaceSlug)
+      .maybeSingle();
+    if (fallback.error) {
+      throw new Error(fallback.error.message);
+    }
+    row = (fallback.data ?? null) as Record<string, unknown> | null;
+  }
+
+  if (row) {
+    return {
+      workspaceId: String(row.workspace_id),
+      role: row.role as "admin" | "operator" | "viewer",
+      isPlatformAdmin: Boolean(row.is_platform_admin) || isPlatformAdmin,
+      workspace: mapWorkspace(
+        (row.workspaces as Record<string, unknown>) ?? ({} as Record<string, unknown>),
+      ),
+    };
+  }
+
+  if (!isPlatformAdmin) return null;
+
+  // Platform admins get synthetic admin access to any workspace — match the
+  // existing semantics of listWorkspaceMembershipsForUser without loading the
+  // full workspace list.
+  const workspace = await getWorkspaceBySlug(workspaceSlug);
+  if (!workspace) return null;
+  return {
+    workspaceId: workspace.id,
+    role: "admin",
+    isPlatformAdmin: true,
+    workspace,
+  };
+}
+
 export async function getWorkspaceBySlug(workspaceSlug: string) {
   const supabase = requireSupabaseAdmin();
   const withPlanFields = await supabase
@@ -637,32 +965,185 @@ export async function getWorkspaceBySlug(workspaceSlug: string) {
 
 export async function listWorkspaceObjects(workspaceId: string) {
   const supabase = requireSupabaseAdmin();
-  const { data, error } = await supabase
+  const preferredSelect =
+    "id, workspace_id, name, slug, singular_name, plural_name, description, icon, kind, is_system, created_at";
+  const withoutSlugSelect =
+    "id, workspace_id, name, singular_name, plural_name, description, icon, kind, is_system, created_at";
+  const fallbackSelect = "id, workspace_id, name, singular_name, plural_name, description, icon, created_at";
+
+  const preferred = await supabase
     .from("workspace_objects")
-    .select("id, workspace_id, name, singular_name, plural_name, description, icon, created_at")
+    .select(preferredSelect)
     .eq("workspace_id", workspaceId)
     .order("created_at", { ascending: true });
 
-  if (error) {
-    throw new Error(error.message);
+  if (!preferred.error) {
+    return (preferred.data ?? []).map((row) => mapObject(row as Record<string, unknown>));
   }
 
-  return (data ?? []).map((row) => mapObject(row as Record<string, unknown>));
+  // Slug column not yet migrated — fall back to the previous selects.
+  if (preferred.error.message.includes("slug")) {
+    const withoutSlug = await supabase
+      .from("workspace_objects")
+      .select(withoutSlugSelect)
+      .eq("workspace_id", workspaceId)
+      .order("created_at", { ascending: true });
+    if (!withoutSlug.error) {
+      return (withoutSlug.data ?? []).map((row) => mapObject(row as Record<string, unknown>));
+    }
+    if (!withoutSlug.error.message.includes("kind") && !withoutSlug.error.message.includes("is_system")) {
+      throw new Error(withoutSlug.error.message);
+    }
+  } else if (!preferred.error.message.includes("kind") && !preferred.error.message.includes("is_system")) {
+    throw new Error(preferred.error.message);
+  }
+
+  const fallback = await supabase
+    .from("workspace_objects")
+    .select(fallbackSelect)
+    .eq("workspace_id", workspaceId)
+    .order("created_at", { ascending: true });
+
+  if (fallback.error) {
+    throw new Error(fallback.error.message);
+  }
+
+  return (fallback.data ?? []).map((row) => mapObject(row as Record<string, unknown>));
 }
 
 export async function listWorkspaceFields(workspaceId: string) {
   const supabase = requireSupabaseAdmin();
-  const { data, error } = await supabase
+  const preferredSelect =
+    "id, workspace_id, object_id, name, key, type, required, options, default_value, sort_order, is_locked";
+  const fallbackSelect = "id, workspace_id, object_id, name, key, type, required, options, default_value, sort_order";
+
+  const preferred = await supabase
     .from("workspace_fields")
-    .select("id, workspace_id, object_id, name, key, type, required, options, default_value, sort_order")
+    .select(preferredSelect)
+    .eq("workspace_id", workspaceId)
+    .order("sort_order", { ascending: true });
+
+  if (!preferred.error) {
+    return (preferred.data ?? []).map((row) => mapField(row as Record<string, unknown>));
+  }
+
+  if (!preferred.error.message.includes("is_locked")) {
+    throw new Error(preferred.error.message);
+  }
+
+  const fallback = await supabase
+    .from("workspace_fields")
+    .select(fallbackSelect)
+    .eq("workspace_id", workspaceId)
+    .order("sort_order", { ascending: true });
+
+  if (fallback.error) {
+    throw new Error(fallback.error.message);
+  }
+
+  return (fallback.data ?? []).map((row) => mapField(row as Record<string, unknown>));
+}
+
+export async function getCrmObject(workspaceId: string, kind: PrismaCrmKind) {
+  const objects = await listWorkspaceObjects(workspaceId);
+  return objects.find((object) => object.kind === kind) ?? null;
+}
+
+export async function findCrmObjectByKind(workspaceId: string, kind: PrismaCrmKind) {
+  return getCrmObject(workspaceId, kind);
+}
+
+export async function listPipelines(workspaceId: string) {
+  const supabase = requireSupabaseAdmin();
+  const { data, error } = await supabase
+    .from("workspace_pipelines")
+    .select("id, workspace_id, name, description, is_default, sort_order, created_at")
     .eq("workspace_id", workspaceId)
     .order("sort_order", { ascending: true });
 
   if (error) {
+    if (error.message.includes("workspace_pipelines")) {
+      return [];
+    }
     throw new Error(error.message);
   }
 
-  return (data ?? []).map((row) => mapField(row as Record<string, unknown>));
+  return (data ?? []).map((row) => mapPipeline(row as Record<string, unknown>));
+}
+
+export async function listPipelineStages(workspaceId: string, pipelineId?: string) {
+  const supabase = requireSupabaseAdmin();
+  let query = supabase
+    .from("workspace_pipeline_stages")
+    .select("id, workspace_id, pipeline_id, name, stage_type, sort_order, probability, color")
+    .eq("workspace_id", workspaceId)
+    .order("sort_order", { ascending: true });
+
+  if (pipelineId) {
+    query = query.eq("pipeline_id", pipelineId);
+  }
+
+  const { data, error } = await query;
+  if (error) {
+    if (error.message.includes("workspace_pipeline_stages")) {
+      return [];
+    }
+    throw new Error(error.message);
+  }
+
+  return (data ?? []).map((row) => mapPipelineStage(row as Record<string, unknown>));
+}
+
+export async function listActivityTypes(workspaceId: string) {
+  const supabase = requireSupabaseAdmin();
+  const { data, error } = await supabase
+    .from("workspace_activity_types")
+    .select("id, workspace_id, key, name, icon, custom_fields, is_system")
+    .eq("workspace_id", workspaceId)
+    .order("name", { ascending: true });
+
+  if (error) {
+    if (error.message.includes("workspace_activity_types")) {
+      return [];
+    }
+    throw new Error(error.message);
+  }
+
+  return (data ?? []).map((row) => mapActivityType(row as Record<string, unknown>));
+}
+
+export async function listRecordActivities(
+  workspaceId: string,
+  options: { recordId?: string; limit?: number; type?: string } = {},
+) {
+  const supabase = requireSupabaseAdmin();
+  const limit = Math.min(Math.max(options.limit ?? 100, 1), 500);
+  let query = supabase
+    .from("record_activities")
+    .select(
+      "id, workspace_id, record_id, object_id, type, activity_type_id, author_user_id, author_agent_id, subject, body, data, is_pinned, occurred_at, created_at",
+    )
+    .eq("workspace_id", workspaceId)
+    .is("deleted_at", null)
+    .order("occurred_at", { ascending: false })
+    .limit(limit);
+
+  if (options.recordId) {
+    query = query.eq("record_id", options.recordId);
+  }
+  if (options.type) {
+    query = query.eq("type", options.type);
+  }
+
+  const { data, error } = await query;
+  if (error) {
+    if (error.message.includes("record_activities")) {
+      return [];
+    }
+    throw new Error(error.message);
+  }
+
+  return (data ?? []).map((row) => mapRecordActivity(row as Record<string, unknown>));
 }
 
 export async function listWorkspaceViews(workspaceId: string, objectId?: string) {
@@ -681,16 +1162,38 @@ export async function listWorkspaceViews(workspaceId: string, objectId?: string)
     return query;
   };
 
-  const preferredSelect = "id, workspace_id, object_id, name, filters, sort_by, sort_order, columns, group_by_field_id";
+  const smartSelect =
+    "id, workspace_id, object_id, name, filters, sort_by, sort_order, columns, group_by_field_id, scope, filter_dsl, sort_config, column_config, is_pinned, view_mode, created_by_user_id";
+  const groupBySelect = "id, workspace_id, object_id, name, filters, sort_by, sort_order, columns, group_by_field_id";
   const fallbackSelect = "id, workspace_id, object_id, name, filters, sort_by, sort_order, columns";
 
-  const withGroupBy = await buildQuery(preferredSelect);
+  const smartAttempt = await buildQuery(smartSelect);
+  if (!smartAttempt.error) {
+    const rows = Array.isArray(smartAttempt.data) ? smartAttempt.data : [];
+    return rows.map((row) => mapView(row as unknown as Record<string, unknown>));
+  }
+
+  // Backward-compat: older envs without M10 smart view columns.
+  const message = smartAttempt.error.message;
+  const missingSmartColumn =
+    message.includes("scope") ||
+    message.includes("filter_dsl") ||
+    message.includes("sort_config") ||
+    message.includes("column_config") ||
+    message.includes("is_pinned") ||
+    message.includes("view_mode") ||
+    message.includes("created_by_user_id");
+
+  if (!missingSmartColumn && !message.includes("group_by_field_id")) {
+    throw new Error(message);
+  }
+
+  const withGroupBy = await buildQuery(groupBySelect);
   if (!withGroupBy.error) {
     const rows = Array.isArray(withGroupBy.data) ? withGroupBy.data : [];
     return rows.map((row) => mapView(row as unknown as Record<string, unknown>));
   }
 
-  // Backward-compatibility for environments where the M15 migration has not run yet.
   if (!withGroupBy.error.message.includes("group_by_field_id")) {
     throw new Error(withGroupBy.error.message);
   }
@@ -713,8 +1216,9 @@ export async function listWorkspaceRecords(workspaceId: string, objectId?: strin
   const supabase = requireSupabaseAdmin();
   let query = supabase
     .from("records")
-    .select("id, workspace_id, object_id, data, created_at, updated_at")
+    .select("id, workspace_id, object_id, data, created_at, updated_at, deleted_at")
     .eq("workspace_id", workspaceId)
+    .is("deleted_at", null)
     .order("updated_at", { ascending: false });
 
   if (objectId) {
@@ -727,6 +1231,91 @@ export async function listWorkspaceRecords(workspaceId: string, objectId?: strin
   }
 
   return (data ?? []).map((row) => mapRecord(row as Record<string, unknown>));
+}
+
+function normalizeDocumentKind(value: unknown): PrismaWorkspaceDocumentPreview["kind"] {
+  if (value === "spreadsheet" || value === "pdf" || value === "image") {
+    return value;
+  }
+  return "other";
+}
+
+function normalizeDocumentPreview(value: unknown): PrismaWorkspaceDocumentPreview | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  const kind = normalizeDocumentKind(record.kind);
+  const rawSheets = Array.isArray(record.sheets) ? record.sheets : [];
+  const sheets: PrismaWorkspaceDocumentPreviewSheet[] = rawSheets.map((sheet) => {
+    const sheetRecord = (sheet ?? {}) as Record<string, unknown>;
+    const name = typeof sheetRecord.name === "string" ? sheetRecord.name : "Sheet1";
+    const headers = Array.isArray(sheetRecord.headers)
+      ? sheetRecord.headers.filter((entry): entry is string => typeof entry === "string")
+      : [];
+    const sampleRows = Array.isArray(sheetRecord.sampleRows)
+      ? sheetRecord.sampleRows.filter(
+          (entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null,
+        )
+      : [];
+    const rowCount = typeof sheetRecord.rowCount === "number" ? sheetRecord.rowCount : sampleRows.length;
+    return { name, headers, sampleRows, rowCount };
+  });
+  return { kind, sheets };
+}
+
+export async function listWorkspaceDocuments(
+  workspaceId: string,
+  options: { limit?: number; query?: string } = {},
+): Promise<PrismaWorkspaceDocument[]> {
+  const supabase = requireSupabaseAdmin();
+  const { data: documentsObject } = await supabase
+    .from("workspace_objects")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("name", "Documents")
+    .maybeSingle();
+  if (!documentsObject) {
+    return [];
+  }
+
+  const limit = Math.min(Math.max(options.limit ?? 50, 1), 200);
+  const query = (options.query ?? "").trim().toLowerCase();
+
+  const { data: rows, error } = await supabase
+    .from("records")
+    .select("id, workspace_id, data, created_at, updated_at")
+    .eq("workspace_id", workspaceId)
+    .eq("object_id", documentsObject.id)
+    .is("deleted_at", null)
+    .order("created_at", { ascending: false })
+    .limit(Math.max(limit * 3, 50));
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return (rows ?? [])
+    .map((row) => {
+      const data = (row.data as Record<string, unknown>) ?? {};
+      const fileName = typeof data.document_name === "string" ? data.document_name : "archivo";
+      const publicUrl = typeof data.public_url === "string" ? data.public_url : "";
+      const storagePath = typeof data.storage_path === "string" ? data.storage_path : "";
+      const mimeType = typeof data.mime_type === "string" ? data.mime_type : "application/octet-stream";
+      const sizeBytes = typeof data.size_bytes === "number" ? data.size_bytes : null;
+      return {
+        id: String(row.id),
+        workspaceId: String(row.workspace_id),
+        fileName,
+        mimeType,
+        fileKind: normalizeDocumentKind(data.kind),
+        storagePath,
+        publicUrl,
+        sizeBytes,
+        preview: normalizeDocumentPreview(data.preview),
+        createdAt: String(row.created_at),
+        updatedAt: String(row.updated_at ?? row.created_at),
+      } satisfies PrismaWorkspaceDocument;
+    })
+    .filter((doc) => (query ? doc.fileName.toLowerCase().includes(query) : true))
+    .slice(0, limit);
 }
 
 export async function listWorkspaceAgents(workspaceId: string) {
@@ -805,14 +1394,35 @@ export async function listWorkspaceImportHistory(workspaceId: string, limit = 20
   return (data ?? []).map((row) => mapImportHistory(row as Record<string, unknown>));
 }
 
+const TASK_SELECT_FULL =
+  "id, workspace_id, source_record_id, source_object_id, record_id, list_id, parent_task_id, type, title, description, owner_user_id, owner_agent_id, assigned_to_user_id, status, priority, due_at, reminder_at, approval_required, approval_status, blocking_reason, metadata, custom_data, sort_order, completed_at, created_by, created_at, updated_at";
+
+const TASK_SELECT_LEGACY =
+  "id, workspace_id, source_record_id, source_object_id, type, title, owner_user_id, owner_agent_id, status, priority, due_at, approval_required, approval_status, blocking_reason, metadata, completed_at, created_by, created_at, updated_at";
+
 export async function listWorkspaceTasks(workspaceId: string, limit = 120) {
   const supabase = requireSupabaseAdmin();
-  const { data, error } = await supabase
+  const primary = await supabase
     .from("workspace_tasks")
-    .select("id, workspace_id, source_record_id, source_object_id, type, title, owner_user_id, owner_agent_id, status, priority, due_at, approval_required, approval_status, blocking_reason, metadata, completed_at, created_by, created_at, updated_at")
+    .select(TASK_SELECT_FULL)
     .eq("workspace_id", workspaceId)
     .order("created_at", { ascending: false })
     .limit(limit);
+
+  let data: Array<Record<string, unknown>> | null =
+    (primary.data as unknown as Array<Record<string, unknown>>) ?? null;
+  let error = primary.error;
+
+  if (error && /(record_id|list_id|parent_task_id|custom_data|sort_order|reminder_at|assigned_to_user_id|description)/.test(error.message)) {
+    const legacy = await supabase
+      .from("workspace_tasks")
+      .select(TASK_SELECT_LEGACY)
+      .eq("workspace_id", workspaceId)
+      .order("created_at", { ascending: false })
+      .limit(limit);
+    data = (legacy.data as unknown as Array<Record<string, unknown>>) ?? null;
+    error = legacy.error;
+  }
 
   if (error) {
     if (error.message.includes("workspace_tasks")) {
@@ -822,6 +1432,107 @@ export async function listWorkspaceTasks(workspaceId: string, limit = 120) {
   }
 
   return (data ?? []).map((row) => mapTask(row as Record<string, unknown>));
+}
+
+export async function listTaskLists(workspaceId: string): Promise<PrismaTaskList[]> {
+  const supabase = requireSupabaseAdmin();
+  const { data, error } = await supabase
+    .from("workspace_task_lists")
+    .select("id, workspace_id, name, description, icon, color, is_default, sort_order, created_at")
+    .eq("workspace_id", workspaceId)
+    .order("sort_order", { ascending: true });
+
+  if (error) {
+    if (/workspace_task_lists/.test(error.message)) return [];
+    throw new Error(error.message);
+  }
+  return (data ?? []).map((row) => mapTaskList(row as Record<string, unknown>));
+}
+
+export async function listTaskStatuses(workspaceId: string): Promise<PrismaTaskStatus[]> {
+  const supabase = requireSupabaseAdmin();
+  const { data, error } = await supabase
+    .from("workspace_task_statuses")
+    .select("id, workspace_id, list_id, key, label, color, category, sort_order, is_system")
+    .eq("workspace_id", workspaceId)
+    .order("sort_order", { ascending: true });
+
+  if (error) {
+    if (/workspace_task_statuses/.test(error.message)) return [];
+    throw new Error(error.message);
+  }
+  return (data ?? []).map((row) => mapTaskStatus(row as Record<string, unknown>));
+}
+
+export type TasksWorkspaceBundle = {
+  tasks: PrismaWorkspaceTask[];
+  lists: PrismaTaskList[];
+  statuses: PrismaTaskStatus[];
+  tasksObject: PrismaWorkspaceObject | null;
+  tasksFields: PrismaWorkspaceField[];
+  tasksViews: PrismaWorkspaceView[];
+};
+
+export async function listTasksWithCustom(workspaceId: string): Promise<TasksWorkspaceBundle> {
+  const [objects, fields, views, tasks, lists, statuses] = await Promise.all([
+    listWorkspaceObjects(workspaceId),
+    listWorkspaceFields(workspaceId),
+    listWorkspaceViews(workspaceId),
+    listWorkspaceTasks(workspaceId, 500),
+    listTaskLists(workspaceId),
+    listTaskStatuses(workspaceId),
+  ]);
+
+  const tasksObject = objects.find((object) => object.kind === "tasks") ?? null;
+  const tasksFields = tasksObject ? fields.filter((field) => field.objectId === tasksObject.id) : [];
+  const tasksViews = tasksObject ? views.filter((view) => view.objectId === tasksObject.id) : [];
+
+  return { tasks, lists, statuses, tasksObject, tasksFields, tasksViews };
+}
+
+/**
+ * Adapter: project a workspace_tasks row into the PrismaWorkspaceRecord shape
+ * so existing TableView / KanbanView / SmartViewsBar components can render
+ * tasks without modification.
+ */
+export function taskToRecord(task: PrismaWorkspaceTask, tasksObjectId: string): PrismaWorkspaceRecord {
+  return {
+    id: task.id,
+    workspaceId: task.workspaceId,
+    objectId: tasksObjectId,
+    data: {
+      ...task.customData,
+      title: task.title,
+      description: task.description ?? "",
+      status: task.status,
+      priority: task.priority,
+      type: task.type,
+      due_at: task.dueAt ?? "",
+      reminder_at: task.reminderAt ?? "",
+      assigned_to_user_id: task.assignedToUserId ?? "",
+      owner_agent_id: task.ownerAgentId ?? "",
+      owner_user_id: task.ownerUserId ?? "",
+      list_id: task.listId ?? "",
+      parent_task_id: task.parentTaskId ?? "",
+      source_record_id: task.sourceRecordId ?? "",
+      source_object_id: task.sourceObjectId ?? "",
+      approval_status: task.approvalStatus,
+      completed_at: task.completedAt ?? "",
+      sort_order: task.sortOrder,
+      created_at: task.createdAt,
+      updated_at: task.updatedAt,
+    },
+    createdAt: task.createdAt,
+    updatedAt: task.updatedAt,
+  };
+}
+
+export function tasksToRecords(
+  tasks: PrismaWorkspaceTask[],
+  tasksObjectId: string | null,
+): PrismaWorkspaceRecord[] {
+  if (!tasksObjectId) return [];
+  return tasks.map((task) => taskToRecord(task, tasksObjectId));
 }
 
 export async function getWorkspaceSnapshot(workspaceSlug: string): Promise<WorkspaceSnapshot | null> {
@@ -873,5 +1584,33 @@ export async function getWorkspaceSnapshotForUser(workspaceSlug: string, userId:
       agents,
       activity,
     } satisfies WorkspaceSnapshot,
+  };
+}
+
+/**
+ * Lightweight variant of `getWorkspaceSnapshotForUser` for pages that only
+ * need membership info plus the data required by `buildWorkspaceNavItems`
+ * (objects + agents). Avoids pulling records, activity, views, fields, tasks
+ * that the caller does not use.
+ */
+export async function getWorkspaceNavContextForUser(
+  workspaceSlug: string,
+  userId: string,
+  isPlatformAdmin = false,
+) {
+  const memberships = await listWorkspaceMembershipsForUser(userId, isPlatformAdmin);
+  const membership = memberships.find((entry) => entry.workspace.subdomain === workspaceSlug) ?? null;
+  if (!membership) return null;
+
+  const [objects, agents] = await Promise.all([
+    listWorkspaceObjects(membership.workspaceId),
+    listWorkspaceAgents(membership.workspaceId),
+  ]);
+
+  return {
+    membership,
+    workspace: membership.workspace,
+    objects,
+    agents,
   };
 }

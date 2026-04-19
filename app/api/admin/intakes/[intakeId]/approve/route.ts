@@ -2,6 +2,9 @@ import { getIntakeSubmissionById, updateIntakeProvisioningStatus } from '@/lib/i
 import { listSites, trackUsageEvent, updateSitePublishStatus } from '@/lib/platformStore'
 import { ensureAdminApiAccess } from '@/lib/auth'
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 type Context = {
   params: Promise<{ intakeId: string }>
 }

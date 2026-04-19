@@ -197,7 +197,7 @@ async function setStatusToApprovedInDataTable(page) {
 }
 
 async function verifyApprovalInActivity(page) {
-  await page.goto(`${baseUrl}/workspaces/bbc-demo?tab=activity`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${baseUrl}/workspaces/bbc-demo?tab=agents`, { waitUntil: "domcontentloaded" });
   const actionSelect = page.locator('label:has-text("Acción") select');
   if (await actionSelect.isVisible().catch(() => false)) {
     await actionSelect.selectOption("all");

@@ -2,6 +2,9 @@ import { getCurrentAppUser } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
 import { listWorkspaceMembershipsForUser } from "@/lib/workspaceStore";
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 type Context = {
   params: Promise<{ workspaceSlug: string; fieldId: string }>;
 };
@@ -34,7 +37,41 @@ function mapFieldRow(row: Record<string, unknown>) {
     options: (row.options as Record<string, unknown>) ?? {},
     defaultValue: row.default_value ? String(row.default_value) : null,
     sortOrder: Number(row.sort_order ?? 0),
+    isLocked: Boolean(row.is_locked),
   };
+}
+
+async function loadField(
+  supabase: ReturnType<typeof requireSupabaseAdmin>,
+  workspaceId: string,
+  fieldId: string,
+) {
+  const preferred = await supabase
+    .from("workspace_fields")
+    .select("id, key, name, is_locked")
+    .eq("id", fieldId)
+    .eq("workspace_id", workspaceId)
+    .maybeSingle();
+
+  if (!preferred.error) {
+    return { data: preferred.data, error: null as null };
+  }
+
+  if (!preferred.error.message.includes("is_locked")) {
+    return { data: null, error: preferred.error };
+  }
+
+  const fallback = await supabase
+    .from("workspace_fields")
+    .select("id, key, name")
+    .eq("id", fieldId)
+    .eq("workspace_id", workspaceId)
+    .maybeSingle();
+
+  if (fallback.error) {
+    return { data: null, error: fallback.error };
+  }
+  return { data: fallback.data ? { ...fallback.data, is_locked: false } : null, error: null as null };
 }
 
 async function authorizeWorkspaceAdmin(workspaceSlug: string) {
@@ -107,12 +144,36 @@ export async function PATCH(request: Request, context: Context) {
     }
 
     const supabase = requireSupabaseAdmin();
+
+    const existing = await loadField(supabase, authorization.membership.workspaceId, fieldId);
+    if (existing.error) {
+      throw new Error(existing.error.message);
+    }
+    if (!existing.data) {
+      return Response.json({ error: "Field not found." }, { status: 404 });
+    }
+    if (existing.data.is_locked) {
+      const touchesStructural =
+        payload.name !== undefined ||
+        payload.options !== undefined ||
+        payload.required !== undefined;
+      if (touchesStructural) {
+        return Response.json(
+          {
+            error:
+              "This field is locked by the CRM system and cannot be renamed or changed structurally. Only sort order is editable.",
+          },
+          { status: 423 },
+        );
+      }
+    }
+
     const { data, error } = await supabase
       .from("workspace_fields")
       .update(update)
       .eq("id", fieldId)
       .eq("workspace_id", authorization.membership.workspaceId)
-      .select("id, workspace_id, object_id, name, key, type, required, options, default_value, sort_order")
+      .select("id, workspace_id, object_id, name, key, type, required, options, default_value, sort_order, is_locked")
       .maybeSingle();
 
     if (error) {
@@ -138,6 +199,21 @@ export async function DELETE(_request: Request, context: Context) {
     }
 
     const supabase = requireSupabaseAdmin();
+
+    const existing = await loadField(supabase, authorization.membership.workspaceId, fieldId);
+    if (existing.error) {
+      throw new Error(existing.error.message);
+    }
+    if (!existing.data) {
+      return Response.json({ error: "Field not found." }, { status: 404 });
+    }
+    if (existing.data.is_locked) {
+      return Response.json(
+        { error: "This field is locked by the CRM system and cannot be deleted." },
+        { status: 423 },
+      );
+    }
+
     const { data, error } = await supabase
       .from("workspace_fields")
       .delete()

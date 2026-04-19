@@ -1,6 +1,15 @@
 import { getCurrentAppUser } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
-import { listWorkspaceMembershipsForUser } from "@/lib/workspaceStore";
+import { getWorkspaceMembershipForSlug } from "@/lib/workspaceStore";
+import {
+  normalizeDomain,
+  normalizeEmail,
+  normalizePhone,
+  normalizeText,
+} from "@/app/api/workspaces/[workspaceSlug]/crm/_shared";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 type Context = {
   params: Promise<{ workspaceSlug: string }>;
@@ -8,15 +17,21 @@ type Context = {
 
 type ImportRow = Record<string, unknown>;
 
+type ImportMode = "skip" | "update" | "upsert";
+
 type ImportRequest = {
   objectId?: string;
   rows?: ImportRow[];
   dedupeFieldKey?: string;
+  dedupeKey?: string;
+  mode?: ImportMode;
   fileName?: string;
 };
 
 const MAX_IMPORT_ROWS = 5000;
 const INSERT_BATCH_SIZE = 500;
+
+const ALLOWED_MODES: ImportMode[] = ["skip", "update", "upsert"];
 
 function requireSupabaseAdmin() {
   const supabase = getSupabaseAdmin();
@@ -26,23 +41,44 @@ function requireSupabaseAdmin() {
   return supabase;
 }
 
-function stringifyValue(value: unknown) {
-  if (value === null || value === undefined) return "";
-  if (typeof value === "string") return value.trim();
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
-  return JSON.stringify(value);
+type Normalizer = (value: unknown) => string | null;
+
+function normalizerForField(fieldKey: string, objectKind: string | null): Normalizer {
+  if (fieldKey === "email") return normalizeEmail;
+  if (fieldKey === "phone") return normalizePhone;
+  if (fieldKey === "domain") return normalizeDomain;
+  if (objectKind === "crm_people" && fieldKey === "full_name") return normalizeText;
+  if (objectKind === "crm_companies" && fieldKey === "name") return normalizeText;
+  return (value) => {
+    const text = normalizeText(value);
+    return text ? text.toLowerCase() : null;
+  };
+}
+
+function autoDedupeKeyForKind(kind: string | null): string | null {
+  if (kind === "crm_people") return "email";
+  if (kind === "crm_companies") return "domain";
+  return null;
+}
+
+function autoFallbackDedupeKey(kind: string | null, primary: string | null): string | null {
+  if (kind === "crm_people" && primary === "email") return "phone";
+  if (kind === "crm_companies" && primary === "domain") return "name";
+  return null;
 }
 
 export async function POST(request: Request, context: Context) {
   try {
+    const { workspaceSlug } = await context.params;
     const user = await getCurrentAppUser();
     if (!user) {
       return Response.json({ error: "Authentication required." }, { status: 401 });
     }
-
-    const { workspaceSlug } = await context.params;
-    const memberships = await listWorkspaceMembershipsForUser(user.id, user.isPlatformAdmin);
-    const membership = memberships.find((entry) => entry.workspace.subdomain === workspaceSlug);
+    const membership = await getWorkspaceMembershipForSlug(
+      user.id,
+      workspaceSlug,
+      user.isPlatformAdmin,
+    );
     if (!membership) {
       return Response.json({ error: "You do not have access to this workspace." }, { status: 403 });
     }
@@ -54,7 +90,10 @@ export async function POST(request: Request, context: Context) {
     const objectId = body.objectId?.trim();
     const fileName = body.fileName?.trim() || "import.csv";
     const rows = Array.isArray(body.rows) ? body.rows : [];
-    const dedupeFieldKey = body.dedupeFieldKey?.trim() || null;
+    const requestedMode = (body.mode ?? "skip") as ImportMode;
+    const mode: ImportMode = ALLOWED_MODES.includes(requestedMode) ? requestedMode : "skip";
+    const requestedDedupeKey =
+      body.dedupeKey?.trim() || body.dedupeFieldKey?.trim() || null;
 
     if (!objectId) {
       return Response.json({ error: "objectId is required." }, { status: 400 });
@@ -63,14 +102,17 @@ export async function POST(request: Request, context: Context) {
       return Response.json({ error: "rows must include at least one record." }, { status: 400 });
     }
     if (rows.length > MAX_IMPORT_ROWS) {
-      return Response.json({ error: `A single import is limited to ${MAX_IMPORT_ROWS} rows.` }, { status: 400 });
+      return Response.json(
+        { error: `A single import is limited to ${MAX_IMPORT_ROWS} rows.` },
+        { status: 400 },
+      );
     }
 
     const supabase = requireSupabaseAdmin();
 
     const { data: objectRow, error: objectError } = await supabase
       .from("workspace_objects")
-      .select("id")
+      .select("id, kind")
       .eq("id", objectId)
       .eq("workspace_id", membership.workspaceId)
       .maybeSingle();
@@ -80,22 +122,77 @@ export async function POST(request: Request, context: Context) {
     if (!objectRow) {
       return Response.json({ error: "Object not found in this workspace." }, { status: 404 });
     }
+    const objectKind =
+      typeof (objectRow as { kind?: string | null }).kind === "string"
+        ? ((objectRow as { kind: string }).kind)
+        : null;
 
-    let existingByDedupe = new Set<string>();
-    if (dedupeFieldKey) {
+    let effectiveDedupeKey = requestedDedupeKey;
+    if (!effectiveDedupeKey && mode !== "skip") {
+      effectiveDedupeKey = autoDedupeKeyForKind(objectKind);
+    }
+    if (!effectiveDedupeKey && mode === "skip") {
+      effectiveDedupeKey = null;
+    }
+
+    const fallbackDedupeKey =
+      mode !== "skip" ? autoFallbackDedupeKey(objectKind, effectiveDedupeKey) : null;
+
+    let existing: Array<{ id: string; data: Record<string, unknown> }> = [];
+    if (effectiveDedupeKey || fallbackDedupeKey) {
       const { data: existingRecords, error: existingError } = await supabase
         .from("records")
-        .select("data")
+        .select("id, data")
         .eq("workspace_id", membership.workspaceId)
-        .eq("object_id", objectId);
+        .eq("object_id", objectId)
+        .is("deleted_at", null);
       if (existingError) {
         throw new Error(existingError.message);
       }
-      existingByDedupe = new Set(
-        (existingRecords ?? [])
-          .map((entry) => stringifyValue((entry.data as Record<string, unknown> | null)?.[dedupeFieldKey]))
-          .filter(Boolean),
-      );
+      existing = (existingRecords ?? []).map((entry) => ({
+        id: String(entry.id),
+        data: (entry.data as Record<string, unknown>) ?? {},
+      }));
+    }
+
+    function buildLookup(fieldKey: string): Map<string, { id: string; data: Record<string, unknown> }> {
+      const normalizer = normalizerForField(fieldKey, objectKind);
+      const map = new Map<string, { id: string; data: Record<string, unknown> }>();
+      for (const record of existing) {
+        const key = normalizer(record.data[fieldKey]);
+        if (key) map.set(key, record);
+      }
+      return map;
+    }
+
+    const primaryLookup = effectiveDedupeKey ? buildLookup(effectiveDedupeKey) : new Map();
+    const fallbackLookup = fallbackDedupeKey ? buildLookup(fallbackDedupeKey) : new Map();
+
+    function findMatch(row: Record<string, unknown>): { id: string; data: Record<string, unknown> } | null {
+      if (effectiveDedupeKey) {
+        const normalizer = normalizerForField(effectiveDedupeKey, objectKind);
+        const key = normalizer(row[effectiveDedupeKey]);
+        if (key && primaryLookup.has(key)) return primaryLookup.get(key) ?? null;
+      }
+      if (fallbackDedupeKey) {
+        const normalizer = normalizerForField(fallbackDedupeKey, objectKind);
+        const key = normalizer(row[fallbackDedupeKey]);
+        if (key && fallbackLookup.has(key)) return fallbackLookup.get(key) ?? null;
+      }
+      return null;
+    }
+
+    function mergeData(
+      existingData: Record<string, unknown>,
+      incoming: Record<string, unknown>,
+    ): Record<string, unknown> {
+      const merged: Record<string, unknown> = { ...existingData };
+      for (const [key, value] of Object.entries(incoming)) {
+        if (value === undefined || value === null) continue;
+        if (typeof value === "string" && value.trim().length === 0) continue;
+        merged[key] = value;
+      }
+      return merged;
     }
 
     const toInsert: Array<{
@@ -104,30 +201,48 @@ export async function POST(request: Request, context: Context) {
       data: Record<string, unknown>;
       created_by: string;
     }> = [];
+    const toUpdate: Array<{ id: string; data: Record<string, unknown> }> = [];
+    let inserted = 0;
+    let updated = 0;
     let skipped = 0;
+    const errors: Array<{ row: number; reason: string }> = [];
 
-    for (const row of rows) {
+    rows.forEach((row, rowIndex) => {
       if (!row || typeof row !== "object" || Array.isArray(row)) {
         skipped += 1;
-        continue;
+        errors.push({ row: rowIndex, reason: "invalid_row" });
+        return;
       }
 
-      if (dedupeFieldKey) {
-        const dedupeValue = stringifyValue((row as Record<string, unknown>)[dedupeFieldKey]);
-        if (!dedupeValue || existingByDedupe.has(dedupeValue)) {
+      const typedRow = row as Record<string, unknown>;
+      const match = mode === "skip" && !effectiveDedupeKey ? null : findMatch(typedRow);
+
+      if (match) {
+        if (mode === "skip") {
           skipped += 1;
-          continue;
+          errors.push({ row: rowIndex, reason: "duplicate" });
+          return;
         }
-        existingByDedupe.add(dedupeValue);
+        toUpdate.push({
+          id: match.id,
+          data: mergeData(match.data, typedRow),
+        });
+        return;
+      }
+
+      if (mode === "update") {
+        skipped += 1;
+        errors.push({ row: rowIndex, reason: "no_match" });
+        return;
       }
 
       toInsert.push({
         workspace_id: membership.workspaceId,
         object_id: objectId,
-        data: row as Record<string, unknown>,
+        data: typedRow,
         created_by: user.id,
       });
-    }
+    });
 
     if (toInsert.length > 0) {
       for (let index = 0; index < toInsert.length; index += INSERT_BATCH_SIZE) {
@@ -136,22 +251,41 @@ export async function POST(request: Request, context: Context) {
         if (insertError) {
           throw new Error(insertError.message);
         }
+        inserted += batch.length;
       }
     }
 
-    const imported = toInsert.length;
-    const errors: string[] = [];
+    if (toUpdate.length > 0) {
+      for (const update of toUpdate) {
+        const { error: updateError } = await supabase
+          .from("records")
+          .update({ data: update.data, updated_at: new Date().toISOString() })
+          .eq("id", update.id)
+          .eq("workspace_id", membership.workspaceId);
+        if (updateError) {
+          errors.push({ row: -1, reason: `update_failed:${update.id}` });
+        } else {
+          updated += 1;
+        }
+      }
+    }
+
     const { error: historyError } = await supabase.from("workspace_import_history").insert({
       workspace_id: membership.workspaceId,
       object_id: objectId,
       file_name: fileName,
       total_rows: rows.length,
-      imported_rows: imported,
+      imported_rows: inserted,
       skipped_rows: skipped,
       error_rows: errors.length,
       summary: {
-        errors,
-        dedupeFieldKey: dedupeFieldKey ?? undefined,
+        mode,
+        dedupeKey: effectiveDedupeKey ?? undefined,
+        fallbackDedupeKey: fallbackDedupeKey ?? undefined,
+        inserted,
+        updated,
+        skipped,
+        errors: errors.slice(0, 50),
       },
       created_by: user.id,
     });
@@ -160,7 +294,7 @@ export async function POST(request: Request, context: Context) {
     }
 
     let followUpTaskId: string | null = null;
-    if (imported > 0) {
+    if (inserted > 0 || updated > 0) {
       const { data: createdTask, error: taskError } = await supabase
         .from("workspace_tasks")
         .insert({
@@ -174,8 +308,10 @@ export async function POST(request: Request, context: Context) {
           approval_status: "not_required",
           metadata: {
             file_name: fileName,
-            rows_imported: imported,
+            rows_imported: inserted,
+            rows_updated: updated,
             rows_skipped: skipped,
+            mode,
           },
           created_by: user.id,
         })
@@ -208,8 +344,10 @@ export async function POST(request: Request, context: Context) {
             details: {
               file_name: fileName,
               object_id: objectId,
-              rows_imported: imported,
+              rows_imported: inserted,
+              rows_updated: updated,
               rows_skipped: skipped,
+              mode,
               task_id: followUpTaskId,
             },
           });
@@ -219,11 +357,19 @@ export async function POST(request: Request, context: Context) {
 
     return Response.json({
       import: {
+        mode,
+        dedupeKey: effectiveDedupeKey,
+        fallbackDedupeKey,
         rowsTotal: rows.length,
-        rowsImported: imported,
+        rowsImported: inserted,
+        rowsUpdated: updated,
         rowsSkipped: skipped,
         followUpTaskId,
       },
+      inserted,
+      updated,
+      skipped,
+      errors,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to import records.";
@@ -233,14 +379,16 @@ export async function POST(request: Request, context: Context) {
 
 export async function GET(request: Request, context: Context) {
   try {
+    const { workspaceSlug } = await context.params;
     const user = await getCurrentAppUser();
     if (!user) {
       return Response.json({ error: "Authentication required." }, { status: 401 });
     }
-
-    const { workspaceSlug } = await context.params;
-    const memberships = await listWorkspaceMembershipsForUser(user.id, user.isPlatformAdmin);
-    const membership = memberships.find((entry) => entry.workspace.subdomain === workspaceSlug);
+    const membership = await getWorkspaceMembershipForSlug(
+      user.id,
+      workspaceSlug,
+      user.isPlatformAdmin,
+    );
     if (!membership) {
       return Response.json({ error: "You do not have access to this workspace." }, { status: 403 });
     }
@@ -252,7 +400,9 @@ export async function GET(request: Request, context: Context) {
     const supabase = requireSupabaseAdmin();
     const { data, error } = await supabase
       .from("workspace_import_history")
-      .select("id, workspace_id, object_id, file_name, total_rows, imported_rows, skipped_rows, error_rows, summary, created_by, created_at")
+      .select(
+        "id, workspace_id, object_id, file_name, total_rows, imported_rows, skipped_rows, error_rows, summary, created_by, created_at",
+      )
       .eq("workspace_id", membership.workspaceId)
       .order("created_at", { ascending: false })
       .limit(limit);
@@ -281,4 +431,3 @@ export async function GET(request: Request, context: Context) {
     return Response.json({ error: message }, { status: 400 });
   }
 }
-

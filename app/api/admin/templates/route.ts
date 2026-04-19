@@ -4,6 +4,10 @@ import {
   listAgentTemplates,
   updateAgentTemplate,
 } from '@/lib/platformStore'
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 import { ensureAdminApiAccess } from '@/lib/auth'
 
 type CreateTemplateRequest = {

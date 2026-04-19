@@ -383,9 +383,15 @@ async function writeState(state: PlatformState) {
 }
 
 function fromWorkspaceRow(row: Record<string, unknown>): Workspace {
+  const resolvedSlug =
+    typeof row.subdomain === 'string' && row.subdomain.trim().length > 0
+      ? row.subdomain
+      : typeof row.slug === 'string'
+        ? row.slug
+        : ''
   return {
     id: String(row.id),
-    slug: String(row.slug),
+    slug: String(resolvedSlug),
     name: String(row.name),
     status: (row.status as WorkspaceStatus) ?? 'active',
     metadata: (row.metadata as Record<string, unknown>) ?? {},
@@ -397,9 +403,8 @@ function fromWorkspaceRow(row: Record<string, unknown>): Workspace {
 function toWorkspaceRow(workspace: Workspace) {
   return {
     id: workspace.id,
-    slug: workspace.slug,
+    subdomain: workspace.slug,
     name: workspace.name,
-    status: workspace.status,
     metadata: workspace.metadata,
     created_at: workspace.createdAt,
     updated_at: workspace.updatedAt,
@@ -585,6 +590,17 @@ function hostFromEndpoint(endpoint: string) {
   } catch {
     return endpoint
   }
+}
+
+function resolveHermesImageRef(value: unknown) {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    return 'prisma/hermes:stable'
+  }
+  const normalized = value.trim()
+  if (normalized.includes('/') || normalized.includes(':')) {
+    return normalized
+  }
+  return `prisma/hermes:${normalized}`
 }
 
 function fromWorkspaceAgentRow(row: Record<string, unknown>): AgentDefinition {
@@ -825,7 +841,19 @@ export async function createWorkspace(input: CreateWorkspaceInput) {
 
   const supabase = getSupabaseAdmin()
   if (supabase) {
-    const { data, error } = await supabase.from('workspaces').insert(toWorkspaceRow(record)).select().single()
+    const { data, error } = await supabase
+      .from('workspaces')
+      .insert({
+        name: record.name,
+        subdomain: record.slug,
+        metadata: record.metadata,
+        inbound_token:
+          typeof crypto !== "undefined" && "randomUUID" in crypto
+            ? crypto.randomUUID().replace(/-/g, "")
+            : `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`,
+      })
+      .select()
+      .single()
     if (!error && data) {
       return fromWorkspaceRow(data as Record<string, unknown>)
     }
@@ -1268,7 +1296,13 @@ export async function createAgentDefinition(input: CreateAgentInput) {
 
   const supabase = getSupabaseAdmin()
   if (supabase) {
-    const workspaceAgentInsert = await supabase.from('workspace_agents').insert(toWorkspaceAgentRow(record)).select().single()
+    const workspaceAgentPayload = toWorkspaceAgentRow(record)
+    const { id: _ignoredLocalId, ...workspaceAgentInsertPayload } = workspaceAgentPayload
+    const workspaceAgentInsert = await supabase
+      .from('workspace_agents')
+      .insert(workspaceAgentInsertPayload)
+      .select()
+      .single()
     if (!workspaceAgentInsert.error && workspaceAgentInsert.data) {
       return fromWorkspaceAgentRow(workspaceAgentInsert.data as Record<string, unknown>)
     }
@@ -1298,21 +1332,70 @@ const placeholderAgentBlueprints: Array<{
 }> = [
   {
     role: 'intake_assistant',
-    name: 'Agente 1',
+    name: 'Main Agent',
     objective: 'Define y opera las instrucciones principales del workspace.',
-    soulMd: 'Aún no configurado. Usa el chat del builder para definir responsabilidades.',
+    soulMd: [
+      '# SOUL.md - main',
+      '',
+      '## Mission',
+      '- Act as the default operator for this workspace.',
+      '- Answer in Spanish unless the user explicitly asks for another language.',
+      '- Keep all reads and writes scoped to this workspace only.',
+      '',
+      '## Responsibilities',
+      '- Understand object schemas from `workspace_objects` and `workspace_fields`.',
+      '- Help users query status, summarize pipeline, and trigger follow-up tasks.',
+      '- Delegate specialized work by creating `workspace_tasks` rows for peer agents.',
+      '',
+      '## Guardrails',
+      '- Never reference or infer data from another workspace.',
+      '- If a required field is missing, ask a clarifying question before writing.',
+      '- Prefer concise, structured responses and cite record IDs when relevant.',
+    ].join('\n'),
   },
   {
     role: 'crm_updater',
-    name: 'Agente 2',
+    name: 'Agent 2',
     objective: 'Gestiona procesos internos y seguimiento operativo.',
-    soulMd: 'Aún no configurado. Usa el chat del builder para definir skills y alcance.',
+    soulMd: [
+      '# SOUL.md - agent-2',
+      '',
+      '## Mission',
+      '- Perform structured CRM updates and data hygiene for this workspace.',
+      '- Treat `records` as the source of truth and preserve data consistency.',
+      '',
+      '## Responsibilities',
+      '- Normalize incoming payloads before write operations.',
+      '- Resolve duplicate candidates and mark merge intent in task details.',
+      '- Maintain stage/status transitions using configured workspace fields.',
+      '',
+      '## Guardrails',
+      '- Do not fabricate values for required fields.',
+      '- On conflicts, create a `workspace_tasks` review item instead of force-writing.',
+      '- Return explicit write summaries with object, record ID, and changed keys.',
+    ].join('\n'),
   },
   {
     role: 'follow_up',
-    name: 'Agente 3',
+    name: 'Agent 3',
     objective: 'Automatiza seguimientos y tareas recurrentes.',
-    soulMd: 'Aún no configurado. Usa el chat del builder para definir canales y cron.',
+    soulMd: [
+      '# SOUL.md - agent-3',
+      '',
+      '## Mission',
+      '- Handle recurring follow-ups, reminders, and outbound task execution.',
+      '- Convert pending items into clear next actions with deadlines.',
+      '',
+      '## Responsibilities',
+      '- Poll open `workspace_tasks` assigned to follow-up workflows.',
+      '- Draft concise outbound responses for approved channels.',
+      '- Post completion notes back to `workspace_tasks` and related records.',
+      '',
+      '## Guardrails',
+      '- Never send outbound actions without explicit task context.',
+      '- Escalate unclear ownership to main agent via new task.',
+      '- Keep updates auditable with timestamps and action summaries.',
+    ].join('\n'),
   },
 ]
 
@@ -1495,7 +1578,7 @@ export async function listDeployments(workspaceId?: string) {
           agentDefinitionId: String(typed.id),
           dropletHost: hostFromEndpoint(String(typed.api_endpoint)),
           containerName: String(typed.container_name),
-          imageRef: `prisma/hermes:${typed.hermes_version ?? 'stable'}`,
+          imageRef: resolveHermesImageRef(typed.hermes_version),
           envSecretRef: `secret://${typed.workspace_id}/hermes`,
           deploymentVersion: 1,
           status: deploymentStatusFromRuntime(String(typed.status ?? 'deploying')),
@@ -1544,7 +1627,7 @@ export async function createDeployment(input: CreateDeploymentInput) {
   const supabase = getSupabaseAdmin()
   if (supabase) {
     const endpointHost = input.dropletHost.startsWith('http') ? input.dropletHost : `http://${input.dropletHost}`
-    const endpoint = `${endpointHost.replace(/\/$/, '')}/v1`
+    const endpoint = endpointHost.replace(/\/$/, '')
     const runtimeUpdate = await supabase
       .from('workspace_agents')
       .update({
@@ -1712,6 +1795,13 @@ export async function provisionWorkspaceFromIntake(submission: IntakeSubmission)
       whatsappNumber: submission.whatsappNumber,
     },
   })
+
+  try {
+    const { bootstrapCrm } = await import('@/lib/crmBootstrap')
+    await bootstrapCrm(workspace.id)
+  } catch (error) {
+    console.error('bootstrapCrm (intake provisioning) failed', error)
+  }
 
   const project = await createProject({
     workspaceId: workspace.id,

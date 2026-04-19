@@ -1,6 +1,10 @@
 import { getCurrentAppUser } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
 import { listWorkspaceMembershipsForUser } from "@/lib/workspaceStore";
+import { computeFieldDiff, logRecordHistory } from "@/lib/recordHistory";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 type Context = {
   params: Promise<{ workspaceSlug: string; recordId: string }>;
@@ -41,6 +45,7 @@ function mapRecordRow(row: Record<string, unknown>) {
     data: (row.data as Record<string, unknown>) ?? {},
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
+    deletedAt: row.deleted_at ? String(row.deleted_at) : null,
   };
 }
 
@@ -63,6 +68,59 @@ async function authorizeRecordWrite(workspaceSlug: string) {
   return { user, membership };
 }
 
+export async function GET(request: Request, context: Context) {
+  try {
+    const { workspaceSlug, recordId } = await context.params;
+    const user = await getCurrentAppUser();
+    if (!user) {
+      return Response.json({ error: "Authentication required." }, { status: 401 });
+    }
+    const memberships = await listWorkspaceMembershipsForUser(user.id, user.isPlatformAdmin);
+    const membership = memberships.find((entry) => entry.workspace.subdomain === workspaceSlug);
+    if (!membership) {
+      return Response.json({ error: "You do not have access to this workspace." }, { status: 403 });
+    }
+
+    const supabase = requireSupabaseAdmin();
+    const { data: record, error } = await supabase
+      .from("records")
+      .select("id, workspace_id, object_id, data, created_at, updated_at, deleted_at")
+      .eq("id", recordId)
+      .eq("workspace_id", membership.workspaceId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!record) return Response.json({ error: "Record not found." }, { status: 404 });
+
+    const url = new URL(request.url);
+    const includeHistory = url.searchParams.get("includeHistory") === "true";
+    let history: Array<Record<string, unknown>> | undefined;
+    if (includeHistory) {
+      const { data: activities } = await supabase
+        .from("record_activities")
+        .select("id, type, subject, body, data, created_at, author_user_id, author_agent_id")
+        .eq("workspace_id", membership.workspaceId)
+        .eq("record_id", recordId)
+        .order("created_at", { ascending: false })
+        .limit(200);
+      history = (activities ?? []).map((row) => ({
+        id: String((row as { id: unknown }).id),
+        type: String((row as { type: unknown }).type),
+        subject: (row as { subject?: string | null }).subject ?? null,
+        body: (row as { body?: string | null }).body ?? null,
+        data: (row as { data?: unknown }).data ?? null,
+        createdAt: String((row as { created_at: unknown }).created_at),
+        authorUserId: (row as { author_user_id?: string | null }).author_user_id ?? null,
+        authorAgentId: (row as { author_agent_id?: string | null }).author_agent_id ?? null,
+      }));
+    }
+
+    return Response.json({ record: mapRecordRow(record as Record<string, unknown>), history });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unable to fetch record.";
+    return Response.json({ error: message }, { status: 400 });
+  }
+}
+
 export async function PATCH(request: Request, context: Context) {
   try {
     const { workspaceSlug, recordId } = await context.params;
@@ -79,9 +137,10 @@ export async function PATCH(request: Request, context: Context) {
     const supabase = requireSupabaseAdmin();
     const { data: existingRecord, error: existingRecordError } = await supabase
       .from("records")
-      .select("id, object_id, data")
+      .select("id, object_id, data, deleted_at")
       .eq("id", recordId)
       .eq("workspace_id", authorization.membership.workspaceId)
+      .is("deleted_at", null)
       .maybeSingle();
 
     if (existingRecordError) {
@@ -97,7 +156,8 @@ export async function PATCH(request: Request, context: Context) {
       .update({ data: body.data })
       .eq("id", recordId)
       .eq("workspace_id", authorization.membership.workspaceId)
-      .select("id, workspace_id, object_id, data, created_at, updated_at")
+      .is("deleted_at", null)
+      .select("id, workspace_id, object_id, data, created_at, updated_at, deleted_at")
       .maybeSingle();
 
     if (error) {
@@ -118,6 +178,19 @@ export async function PATCH(request: Request, context: Context) {
         : {};
     const previousStatus = normalizeStatus(previousData.status);
     const nextStatus = normalizeStatus(nextData.status);
+
+    const diff = computeFieldDiff(previousData, nextData);
+    if (diff.length > 0) {
+      await logRecordHistory({
+        supabase,
+        workspaceId: authorization.membership.workspaceId,
+        objectId: String(existingRecord.object_id),
+        recordId,
+        actor: { userId: authorization.user.id },
+        type: "record.updated",
+        diff,
+      });
+    }
 
     if (previousStatus !== "approved" && nextStatus === "approved") {
       try {
@@ -175,12 +248,21 @@ export async function DELETE(_request: Request, context: Context) {
 
     const supabase = requireSupabaseAdmin();
 
-    const { data: deletedRecord, error } = await supabase
+    const { data: existingRecord } = await supabase
       .from("records")
-      .delete()
+      .select("id, object_id")
       .eq("id", recordId)
       .eq("workspace_id", authorization.membership.workspaceId)
-      .select("id")
+      .is("deleted_at", null)
+      .maybeSingle();
+
+    const { data: deletedRecord, error } = await supabase
+      .from("records")
+      .update({ deleted_at: new Date().toISOString() })
+      .eq("id", recordId)
+      .eq("workspace_id", authorization.membership.workspaceId)
+      .is("deleted_at", null)
+      .select("id, deleted_at")
       .maybeSingle();
 
     if (error) {
@@ -191,7 +273,21 @@ export async function DELETE(_request: Request, context: Context) {
       return Response.json({ error: "Record not found." }, { status: 404 });
     }
 
-    return Response.json({ deletedRecordId: deletedRecord.id });
+    if (existingRecord?.object_id) {
+      await logRecordHistory({
+        supabase,
+        workspaceId: authorization.membership.workspaceId,
+        objectId: String(existingRecord.object_id),
+        recordId,
+        actor: { userId: authorization.user.id },
+        type: "record.deleted",
+      });
+    }
+
+    return Response.json({
+      deletedRecordId: deletedRecord.id,
+      deletedAt: deletedRecord.deleted_at ? String(deletedRecord.deleted_at) : null,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to delete record.";
     return Response.json({ error: message }, { status: 400 });

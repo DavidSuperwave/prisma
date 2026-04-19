@@ -6,19 +6,23 @@ import {
   type ConversationRow,
 } from "@/app/api/workspaces/[workspaceSlug]/conversations/_shared";
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 type Context = {
   params: Promise<{ workspaceSlug: string; conversationId: string }>;
 };
 
 type UpdateConversationRequest = {
   title?: string;
+  agentPaused?: boolean;
 };
 
 async function loadConversation(workspaceId: string, conversationId: string) {
   const supabase = requireSupabaseAdmin();
   const { data, error } = await supabase
     .from("workspace_conversations")
-    .select("id, workspace_id, agent_id, title, source, runtime_conversation_id, channel_type, channel_identity, metadata, message_count, last_message_at, created_by, created_at, updated_at")
+    .select("id, workspace_id, agent_id, title, source, runtime_conversation_id, channel_type, channel_identity, metadata, agent_paused, message_count, last_message_at, created_by, created_at, updated_at")
     .eq("workspace_id", workspaceId)
     .eq("id", conversationId)
     .maybeSingle();
@@ -62,8 +66,10 @@ export async function PATCH(request: Request, context: Context) {
     const workspaceContext = auth.context;
     const payload = (await request.json().catch(() => ({}))) as UpdateConversationRequest;
     const title = typeof payload.title === "string" ? payload.title.trim() : "";
-    if (!title) {
-      return Response.json({ error: "title is required." }, { status: 400 });
+    const hasTitle = title.length > 0;
+    const hasAgentPaused = typeof payload.agentPaused === "boolean";
+    if (!hasTitle && !hasAgentPaused) {
+      return Response.json({ error: "title or agentPaused is required." }, { status: 400 });
     }
 
     const conversation = await loadConversation(workspaceContext.workspaceId, conversationId);
@@ -78,12 +84,13 @@ export async function PATCH(request: Request, context: Context) {
     const { data, error } = await supabase
       .from("workspace_conversations")
       .update({
-        title: title.slice(0, 120),
+        ...(hasTitle ? { title: title.slice(0, 120) } : {}),
+        ...(hasAgentPaused ? { agent_paused: Boolean(payload.agentPaused) } : {}),
         updated_at: new Date().toISOString(),
       })
       .eq("workspace_id", workspaceContext.workspaceId)
       .eq("id", conversationId)
-      .select("id, workspace_id, agent_id, title, source, runtime_conversation_id, channel_type, channel_identity, metadata, message_count, last_message_at, created_by, created_at, updated_at")
+      .select("id, workspace_id, agent_id, title, source, runtime_conversation_id, channel_type, channel_identity, metadata, agent_paused, message_count, last_message_at, created_by, created_at, updated_at")
       .maybeSingle();
     if (error) {
       throw new Error(error.message);

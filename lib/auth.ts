@@ -4,6 +4,10 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
+import {
+  getWorkspaceMembershipForSlug,
+  type WorkspaceMembership,
+} from "@/lib/workspaceStore";
 
 const ACCESS_TOKEN_COOKIE = "prisma-access-token";
 const REFRESH_TOKEN_COOKIE = "prisma-refresh-token";
@@ -27,12 +31,33 @@ function requireSupabaseAdmin() {
   return supabase;
 }
 
+const INSECURE_PLATFORM_ADMIN_DEFAULTS = new Set([
+  "admin@example.com",
+  "george@bbc.local",
+]);
+
 function getConfiguredPlatformAdminEmails() {
-  const configured = process.env.PRISMA_PLATFORM_ADMIN_EMAILS ?? "george@bbc.local";
-  return configured
+  const raw = process.env.PRISMA_PLATFORM_ADMIN_EMAILS?.trim();
+  if (!raw) {
+    return [];
+  }
+  const emails = raw
     .split(",")
     .map((value) => value.trim().toLowerCase())
     .filter(Boolean);
+
+  if (process.env.NODE_ENV === "production") {
+    for (const email of emails) {
+      if (INSECURE_PLATFORM_ADMIN_DEFAULTS.has(email)) {
+        throw new Error(
+          `FATAL: PRISMA_PLATFORM_ADMIN_EMAILS contains an insecure default value "${email}". ` +
+            "Set PRISMA_PLATFORM_ADMIN_EMAILS to a real operator email in production.",
+        );
+      }
+    }
+  }
+
+  return emails;
 }
 
 function isConfiguredPlatformAdminEmail(email: string | null | undefined) {
@@ -178,4 +203,39 @@ export async function ensureAdminApiAccess() {
     return NextResponse.json({ error: "Forbidden." }, { status: 403 });
   }
   return null;
+}
+
+/**
+ * One-shot helper for workspace-scoped API routes.
+ *
+ * Previously routes did two round-trips: `getCurrentAppUser()` (which already
+ * queries `workspace_members`), then `listWorkspaceMembershipsForUser()`
+ * (which does the same join again for every workspace the user is in). This
+ * helper collapses that into (a) the auth call and (b) a single single-row
+ * join for the specific slug being requested.
+ *
+ * Returns a ready-to-return `NextResponse` on failure so route handlers can
+ * early-exit with a clean shape, or the resolved context on success.
+ */
+export type WorkspaceRequestContext = {
+  user: AuthenticatedAppUser;
+  membership: WorkspaceMembership;
+};
+
+export async function resolveWorkspaceRequestContext(
+  workspaceSlug: string,
+): Promise<WorkspaceRequestContext | NextResponse> {
+  const user = await getCurrentAppUser();
+  if (!user) {
+    return NextResponse.json({ error: "Authentication required." }, { status: 401 });
+  }
+  const membership = await getWorkspaceMembershipForSlug(
+    user.id,
+    workspaceSlug,
+    user.isPlatformAdmin,
+  );
+  if (!membership) {
+    return NextResponse.json({ error: "Workspace not found." }, { status: 404 });
+  }
+  return { user, membership };
 }

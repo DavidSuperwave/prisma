@@ -1,6 +1,9 @@
 import Stripe from 'stripe'
 import { getIntakeSubmissionById } from '@/lib/intakeStore'
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 function getStripe() {
   const secretKey = process.env.STRIPE_SECRET_KEY
   if (!secretKey) {

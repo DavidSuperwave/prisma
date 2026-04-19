@@ -2,22 +2,34 @@ import { getCurrentAppUser } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
 import { listWorkspaceMembershipsForUser } from "@/lib/workspaceStore";
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 type Context = {
   params: Promise<{ workspaceSlug: string; taskId: string }>;
 };
 
 type UpdateTaskRequest = {
   title?: string;
+  description?: string | null;
   status?: string;
   priority?: string;
   dueAt?: string | null;
+  reminderAt?: string | null;
   ownerUserId?: string | null;
   ownerAgentId?: string | null;
+  assignedToUserId?: string | null;
+  listId?: string | null;
+  parentTaskId?: string | null;
+  customData?: Record<string, unknown>;
+  sortOrder?: number;
   approvalStatus?: string;
   approvalRequired?: boolean;
   blockingReason?: string | null;
   metadata?: Record<string, unknown>;
 };
+
+const TASK_LEGACY_COLUMN_RE = /(record_id|list_id|parent_task_id|custom_data|sort_order|reminder_at|assigned_to_user_id|description)/;
 
 function requireSupabaseAdmin() {
   const supabase = getSupabaseAdmin();
@@ -47,17 +59,25 @@ function mapTask(row: Record<string, unknown>) {
     workspaceId: String(row.workspace_id),
     sourceRecordId: row.source_record_id ? String(row.source_record_id) : null,
     sourceObjectId: row.source_object_id ? String(row.source_object_id) : null,
+    recordId: row.record_id ? String(row.record_id) : null,
+    listId: row.list_id ? String(row.list_id) : null,
+    parentTaskId: row.parent_task_id ? String(row.parent_task_id) : null,
     type: String(row.type ?? "follow_up"),
     title: String(row.title ?? "Task"),
+    description: row.description ? String(row.description) : null,
     ownerUserId: row.owner_user_id ? String(row.owner_user_id) : null,
     ownerAgentId: row.owner_agent_id ? String(row.owner_agent_id) : null,
+    assignedToUserId: row.assigned_to_user_id ? String(row.assigned_to_user_id) : null,
     status: String(row.status ?? "pending"),
     priority: String(row.priority ?? "normal"),
     dueAt: row.due_at ? String(row.due_at) : null,
+    reminderAt: row.reminder_at ? String(row.reminder_at) : null,
     approvalRequired: Boolean(row.approval_required),
     approvalStatus: String(row.approval_status ?? "not_required"),
     blockingReason: row.blocking_reason ? String(row.blocking_reason) : null,
     metadata: (row.metadata as Record<string, unknown>) ?? {},
+    customData: (row.custom_data as Record<string, unknown>) ?? {},
+    sortOrder: Number(row.sort_order ?? 0),
     completedAt: row.completed_at ? String(row.completed_at) : null,
     createdBy: row.created_by ? String(row.created_by) : null,
     createdAt: String(row.created_at),
@@ -78,12 +98,28 @@ export async function PATCH(request: Request, context: Context) {
 
     const body = (await request.json().catch(() => ({}))) as UpdateTaskRequest;
     const supabase = requireSupabaseAdmin();
-    const { data: previousTask, error: previousTaskError } = await supabase
+    const previousTaskQuery = await supabase
       .from("workspace_tasks")
-      .select("id, status, approval_status, owner_agent_id, owner_user_id")
+      .select(
+        "id, status, approval_status, owner_agent_id, owner_user_id, record_id, source_record_id, source_object_id, title",
+      )
       .eq("id", taskId)
       .eq("workspace_id", authorization.membership.workspaceId)
       .maybeSingle();
+
+    let previousTask: Record<string, unknown> | null =
+      (previousTaskQuery.data as unknown as Record<string, unknown>) ?? null;
+    let previousTaskError = previousTaskQuery.error;
+    if (previousTaskError && previousTaskError.message.includes("record_id")) {
+      const fallback = await supabase
+        .from("workspace_tasks")
+        .select("id, status, approval_status, owner_agent_id, owner_user_id, source_record_id, source_object_id, title")
+        .eq("id", taskId)
+        .eq("workspace_id", authorization.membership.workspaceId)
+        .maybeSingle();
+      previousTask = (fallback.data as unknown as Record<string, unknown>) ?? null;
+      previousTaskError = fallback.error;
+    }
     if (previousTaskError) {
       throw new Error(previousTaskError.message);
     }
@@ -102,6 +138,9 @@ export async function PATCH(request: Request, context: Context) {
       }
       update.title = title;
     }
+    if (body.description !== undefined) {
+      update.description = body.description;
+    }
     if (body.status !== undefined) {
       update.status = body.status.trim();
       update.completed_at = body.status.trim().toLowerCase() === "completed" ? new Date().toISOString() : null;
@@ -111,6 +150,31 @@ export async function PATCH(request: Request, context: Context) {
     }
     if (body.dueAt !== undefined) {
       update.due_at = body.dueAt;
+    }
+    if (body.reminderAt !== undefined) {
+      update.reminder_at = body.reminderAt;
+    }
+    if (body.listId !== undefined) {
+      update.list_id = body.listId;
+    }
+    if (body.parentTaskId !== undefined) {
+      update.parent_task_id = body.parentTaskId;
+    }
+    if (body.customData !== undefined) {
+      if (!body.customData || typeof body.customData !== "object" || Array.isArray(body.customData)) {
+        return Response.json({ error: "customData must be an object." }, { status: 400 });
+      }
+      update.custom_data = body.customData;
+    }
+    if (body.sortOrder !== undefined) {
+      const parsed = Number(body.sortOrder);
+      if (!Number.isInteger(parsed)) {
+        return Response.json({ error: "sortOrder must be an integer." }, { status: 400 });
+      }
+      update.sort_order = parsed;
+    }
+    if (body.assignedToUserId !== undefined) {
+      update.assigned_to_user_id = body.assignedToUserId;
     }
     if (body.ownerUserId !== undefined) {
       update.owner_user_id = body.ownerUserId;
@@ -152,13 +216,37 @@ export async function PATCH(request: Request, context: Context) {
       return Response.json({ error: "At least one task field must be provided." }, { status: 400 });
     }
 
-    const { data: updatedTask, error } = await supabase
+    const SELECT_COLS =
+      "id, workspace_id, source_record_id, source_object_id, record_id, list_id, parent_task_id, type, title, description, owner_user_id, owner_agent_id, assigned_to_user_id, status, priority, due_at, reminder_at, approval_required, approval_status, blocking_reason, metadata, custom_data, sort_order, completed_at, created_by, created_at, updated_at";
+    const LEGACY_COLS =
+      "id, workspace_id, source_record_id, source_object_id, type, title, owner_user_id, owner_agent_id, status, priority, due_at, approval_required, approval_status, blocking_reason, metadata, completed_at, created_by, created_at, updated_at";
+
+    let updateResult = await supabase
       .from("workspace_tasks")
       .update(update)
       .eq("id", taskId)
       .eq("workspace_id", authorization.membership.workspaceId)
-      .select("id, workspace_id, source_record_id, source_object_id, type, title, owner_user_id, owner_agent_id, status, priority, due_at, approval_required, approval_status, blocking_reason, metadata, completed_at, created_by, created_at, updated_at")
+      .select(SELECT_COLS)
       .maybeSingle();
+
+    if (updateResult.error && TASK_LEGACY_COLUMN_RE.test(updateResult.error.message)) {
+      delete update.reminder_at;
+      delete update.assigned_to_user_id;
+      delete update.list_id;
+      delete update.parent_task_id;
+      delete update.custom_data;
+      delete update.sort_order;
+      delete update.description;
+      updateResult = await supabase
+        .from("workspace_tasks")
+        .update(update)
+        .eq("id", taskId)
+        .eq("workspace_id", authorization.membership.workspaceId)
+        .select(LEGACY_COLS)
+        .maybeSingle();
+    }
+
+    const { data: updatedTask, error } = updateResult;
 
     if (error) {
       throw new Error(error.message);
@@ -220,9 +308,76 @@ export async function PATCH(request: Request, context: Context) {
       },
     });
 
+    const completedNow = statusChanged && nextStatus.toLowerCase() === "completed";
+    const linkedRecordId =
+      (updatedTask as Record<string, unknown>).record_id ??
+      (updatedTask as Record<string, unknown>).source_record_id ??
+      null;
+    const linkedObjectId = (updatedTask as Record<string, unknown>).source_object_id ?? null;
+    if (completedNow && linkedRecordId && linkedObjectId) {
+      await supabase.from("record_activities").insert({
+        workspace_id: authorization.membership.workspaceId,
+        record_id: String(linkedRecordId),
+        object_id: String(linkedObjectId),
+        type: "task_completed",
+        subject: `Tarea completada: ${String(updatedTask.title)}`,
+        data: { task_id: String(updatedTask.id) },
+        author_user_id: authorization.user.id,
+      });
+    }
+
     return Response.json({ task: mapTask(updatedTask as Record<string, unknown>) });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to update task.";
+    return Response.json({ error: message }, { status: 400 });
+  }
+}
+
+export async function DELETE(_request: Request, context: Context) {
+  try {
+    const { workspaceSlug, taskId } = await context.params;
+    const authorization = await authorizeWorkspaceWrite(workspaceSlug);
+    if ("error" in authorization) {
+      return authorization.error;
+    }
+    if (!authorization.user.isPlatformAdmin && authorization.membership.role === "viewer") {
+      return Response.json({ error: "You do not have permission to delete tasks." }, { status: 403 });
+    }
+
+    const supabase = requireSupabaseAdmin();
+    const { data: existing } = await supabase
+      .from("workspace_tasks")
+      .select("id, title, owner_agent_id")
+      .eq("id", taskId)
+      .eq("workspace_id", authorization.membership.workspaceId)
+      .maybeSingle();
+
+    if (!existing) {
+      return Response.json({ error: "Task not found." }, { status: 404 });
+    }
+
+    const { error } = await supabase
+      .from("workspace_tasks")
+      .delete()
+      .eq("id", taskId)
+      .eq("workspace_id", authorization.membership.workspaceId);
+    if (error) {
+      throw new Error(error.message);
+    }
+
+    await supabase.from("agent_events").insert({
+      workspace_id: authorization.membership.workspaceId,
+      source_agent_id: existing.owner_agent_id ? String(existing.owner_agent_id) : null,
+      event_type: "task.deleted",
+      payload: {
+        task_id: String(existing.id),
+        title: String(existing.title ?? ""),
+      },
+    });
+
+    return Response.json({ deletedTaskId: String(existing.id) });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unable to delete task.";
     return Response.json({ error: message }, { status: 400 });
   }
 }

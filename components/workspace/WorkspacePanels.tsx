@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   AlertTriangle,
   ArrowUp,
@@ -10,14 +10,13 @@ import {
   Building2,
   CircleDot,
   FileStack,
-  Filter,
   Globe,
   Layers3,
   LoaderCircle,
   MessageSquare,
   Mic,
+  Pencil,
   Plus,
-  Search,
   ShieldCheck,
   Sparkles,
   WalletCards,
@@ -27,11 +26,14 @@ import type {
   PrismaWorkspaceAgent,
   PrismaWorkspaceField,
   PrismaWorkspaceObject,
-  PrismaWorkspaceRecord,
-  PrismaWorkspaceView,
 } from "@/lib/workspaceStore";
-import { applyViewToRecords, deriveQueueItems, getRecordFieldValue } from "@/lib/workspaceStore";
+import { deriveQueueItems } from "@/lib/workspaceStore";
 import { consumeCompleteSseDataLines } from "@/lib/chatSseClient";
+import { parseCsvForPreview, smartExtractSheet } from "@/lib/spreadsheetParser";
+import { ImagePickerCard, type ImagePickerCandidate } from "@/components/workspace/chat/ImagePickerCard";
+import { WriteProposalCard, type WriteProposalPayload } from "@/components/workspace/chat/WriteProposalCard";
+// TableView / KanbanView / KpiPanel were used by the old BaseDataPanel.
+// They are no longer referenced here (Data panel moved to components/workspace/data/DataPanel.tsx).
 
 type OverviewProps = {
   dashboardCards?: Array<{
@@ -75,30 +77,7 @@ type OverviewProps = {
   }>;
 };
 
-type DataPanelProps = {
-  objects: PrismaWorkspaceObject[];
-  fields: PrismaWorkspaceField[];
-  views: PrismaWorkspaceView[];
-  records: PrismaWorkspaceRecord[];
-  workspaceSlug: string;
-  currentRole: "admin" | "operator" | "viewer";
-  initialObjectId?: string;
-  initialViewId?: string;
-  recordBaseHref?: string;
-  askHref?: string;
-};
-
-type BoardColumn = {
-  key: string;
-  value: string | null;
-  label: string;
-  records: PrismaWorkspaceRecord[];
-};
-
-type BoardDropTarget = {
-  recordId: string;
-  toValue: string | null;
-};
+// DataPanelProps / BoardColumn / BoardDropTarget moved to components/workspace/data/DataPanel.tsx
 
 type AgentPanelProps = {
   workspaceId: string;
@@ -140,11 +119,11 @@ type AgentPanelProps = {
     lastCronRunAt?: string | null;
     channelConfig?: Record<string, unknown>;
   }>;
-  activity: PrismaWorkspaceActivity[];
 };
 
 type QueuePanelProps = {
   recordBaseHref?: string;
+  workspaceSlug?: string;
   queueItems: Array<{
     id: string;
     recordId?: string;
@@ -190,6 +169,14 @@ type ChatPanelProps = {
     type: "copilot" | "channel" | "worker";
     status: string;
     description: string | null;
+    skills: string[];
+    capabilities?: {
+      webSearch: boolean;
+      browser: boolean;
+      integration: boolean;
+      ingestion: boolean;
+      workspaceActions: boolean;
+    };
     isPrimaryCopilot?: boolean;
     readinessState?: "ready" | "draft";
     readinessIssues?: string[];
@@ -198,6 +185,8 @@ type ChatPanelProps = {
   primaryAgentId?: string | null;
   canSetPrimaryAgent?: boolean;
   askPrompt?: string | null;
+  objects?: PrismaWorkspaceObject[];
+  fields?: PrismaWorkspaceField[];
 };
 
 type RecordDetailPanelProps = {
@@ -255,6 +244,8 @@ type ChatMessage = {
   attachments?: unknown[];
 };
 
+type ChatComposerMode = "chat" | "web" | "image_search";
+
 type ChatSchemaProposalField = {
   name: string;
   key: string;
@@ -281,19 +272,70 @@ type ChatSchemaProposal = {
   objects: ChatSchemaProposalObject[];
 };
 
+type DocumentPreviewSheet = {
+  name: string;
+  headers: string[];
+  sampleRows: Array<Record<string, unknown>>;
+  rowCount: number;
+};
+
+type DocumentPreview = {
+  kind: "spreadsheet" | "pdf" | "image" | "other";
+  sheets?: DocumentPreviewSheet[];
+};
+
+type DocumentActionId = "create-object" | "import-existing" | "extract" | "attach-only";
+
+type DocumentActionBlock = {
+  kind: "document_actions";
+  recordId: string;
+  fileName: string;
+  fileKind: DocumentPreview["kind"];
+  summary: string;
+  preview?: DocumentPreview;
+  actions: Array<{ id: DocumentActionId; label: string }>;
+  resolvedAction?: DocumentActionId;
+  resolutionState?: "idle" | "working" | "done" | "failed";
+  resolutionMessage?: string;
+};
+
+type ImagePickerBlock = {
+  kind: "image_picker";
+  mode: "search" | "generate";
+  prompt: string;
+  candidates: ImagePickerCandidate[];
+  recordId?: string | null;
+  savedPath?: string | null;
+  savedUrl?: string | null;
+};
+
+type WriteProposalBlock = {
+  kind: "write_proposal";
+  toolName: string;
+  proposal: WriteProposalPayload;
+  confirmToken: string;
+  expiresAt?: string | null;
+  state: "pending" | "confirmed" | "cancelled";
+};
+
 type ChatMessageBlock =
   | {
       kind: "schema_proposal";
       proposal: ChatSchemaProposal;
       approvalState?: "pending" | "approved" | "failed";
       approvalMessage?: string;
-    };
+      documentRecordId?: string;
+    }
+  | DocumentActionBlock
+  | ImagePickerBlock
+  | WriteProposalBlock;
 
 type ChatAttachment = {
   id: string;
   fileName: string;
   publicUrl: string;
   contentType: string;
+  fileKind?: DocumentPreview["kind"];
 };
 
 type ChatSession = {
@@ -302,30 +344,176 @@ type ChatSession = {
   title: string;
   source: string;
   runtimeConversationId: string;
+  agentPaused: boolean;
   messages: ChatMessage[];
   attachments: ChatAttachment[];
   updatedAt: string;
 };
+
+const defaultChatSessionTitle = "Nuevo chat";
+
+function normalizeCapabilityToken(value: string) {
+  return value.trim().toLowerCase().replace(/[\s._-]+/g, "");
+}
+
+function renderInlineAssistantMarkdown(text: string) {
+  const parts = text.split(/(\*\*[^*]+\*\*|__[^_]+__|\*[^*]+\*|_[^_]+_|`[^`]+`)/g);
+  return parts
+    .filter((part) => part.length > 0)
+    .map((part, index) => {
+      if (
+        (part.startsWith("**") && part.endsWith("**")) ||
+        (part.startsWith("__") && part.endsWith("__"))
+      ) {
+        return <strong key={`md-strong-${index}`}>{part.slice(2, -2)}</strong>;
+      }
+      if ((part.startsWith("*") && part.endsWith("*")) || (part.startsWith("_") && part.endsWith("_"))) {
+        return <em key={`md-em-${index}`}>{part.slice(1, -1)}</em>;
+      }
+      if (part.startsWith("`") && part.endsWith("`")) {
+        return (
+          <code key={`md-code-${index}`} style={chatInlineCodeStyle}>
+            {part.slice(1, -1)}
+          </code>
+        );
+      }
+      return <span key={`md-span-${index}`}>{part}</span>;
+    });
+}
+
+function renderAssistantMessageContent(content: string) {
+  const lines = content.split("\n");
+  const blocks: Array<
+    | { kind: "paragraph"; value: string }
+    | { kind: "unordered-list"; items: string[] }
+    | { kind: "ordered-list"; items: string[] }
+  > = [];
+
+  let paragraphBuffer: string[] = [];
+  let listKind: "unordered-list" | "ordered-list" | null = null;
+  let listItems: string[] = [];
+
+  const flushParagraph = () => {
+    if (paragraphBuffer.length === 0) {
+      return;
+    }
+    blocks.push({ kind: "paragraph", value: paragraphBuffer.join("\n") });
+    paragraphBuffer = [];
+  };
+
+  const flushList = () => {
+    if (!listKind || listItems.length === 0) {
+      listKind = null;
+      listItems = [];
+      return;
+    }
+    blocks.push({ kind: listKind, items: [...listItems] });
+    listKind = null;
+    listItems = [];
+  };
+
+  for (const rawLine of lines) {
+    const line = rawLine.trimEnd();
+    const orderedMatch = line.match(/^\s*\d+\.\s+(.+)$/);
+    const unorderedMatch = line.match(/^\s*[-*]\s+(.+)$/);
+    if (orderedMatch) {
+      flushParagraph();
+      if (listKind !== "ordered-list") {
+        flushList();
+        listKind = "ordered-list";
+      }
+      listItems.push(orderedMatch[1]);
+      continue;
+    }
+    if (unorderedMatch) {
+      flushParagraph();
+      if (listKind !== "unordered-list") {
+        flushList();
+        listKind = "unordered-list";
+      }
+      listItems.push(unorderedMatch[1]);
+      continue;
+    }
+    if (line.trim().length === 0) {
+      flushParagraph();
+      flushList();
+      continue;
+    }
+    flushList();
+    paragraphBuffer.push(line);
+  }
+
+  flushParagraph();
+  flushList();
+
+  if (blocks.length === 0) {
+    return (
+      <p style={assistantMessageParagraphStyle}>
+        {renderInlineAssistantMarkdown(content)}
+      </p>
+    );
+  }
+
+  return blocks.map((block, blockIndex) => {
+    if (block.kind === "paragraph") {
+      return (
+        <p key={`assistant-paragraph-${blockIndex}`} style={assistantMessageParagraphStyle}>
+          {renderInlineAssistantMarkdown(block.value)}
+        </p>
+      );
+    }
+    if (block.kind === "ordered-list") {
+      return (
+        <ol key={`assistant-ol-${blockIndex}`} style={assistantMessageListStyle}>
+          {block.items.map((item, itemIndex) => (
+            <li key={`assistant-ol-item-${blockIndex}-${itemIndex}`}>
+              {renderInlineAssistantMarkdown(item)}
+            </li>
+          ))}
+        </ol>
+      );
+    }
+    return (
+      <ul key={`assistant-ul-${blockIndex}`} style={assistantMessageListStyle}>
+        {block.items.map((item, itemIndex) => (
+          <li key={`assistant-ul-item-${blockIndex}-${itemIndex}`}>
+            {renderInlineAssistantMarkdown(item)}
+          </li>
+        ))}
+      </ul>
+    );
+  });
+}
 
 function Panel({
   title,
   eyebrow,
   description,
   children,
+  actions,
 }: {
   title: string;
   eyebrow?: string;
   description?: string;
   children: React.ReactNode;
+  actions?: React.ReactNode;
 }) {
   return (
     <section style={panelStyle}>
-      <div style={panelHeaderStyle}>
-        {eyebrow ? <p style={eyebrowStyle}>{eyebrow}</p> : null}
+      <div
+        style={{
+          ...panelHeaderStyle,
+          ...(actions
+            ? { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }
+            : {}),
+        }}
+      >
         <div>
+          {eyebrow ? <p style={eyebrowStyle}>{eyebrow}</p> : null}
           <h2 style={panelTitleStyle}>{title}</h2>
           {description ? <p style={panelDescriptionStyle}>{description}</p> : null}
         </div>
+        {actions ? <div>{actions}</div> : null}
       </div>
       {children}
     </section>
@@ -337,9 +525,10 @@ function createSession(userId: string, agentId: string) {
   return {
     id: sessionId,
     agentId,
-    title: "Nuevo chat",
+    title: defaultChatSessionTitle,
     source: "workspace_chat",
     runtimeConversationId: `user-${userId}-${agentId}-${sessionId}`,
+    agentPaused: false,
     messages: [],
     attachments: [],
     updatedAt: new Date().toISOString(),
@@ -358,6 +547,127 @@ function resolveGreetingPrefix() {
   if (hour < 12) return "Buenos dias";
   if (hour < 19) return "Buenas tardes";
   return "Buenas noches";
+}
+
+const SPREADSHEET_EXTENSIONS = ["xlsx", "xls", "csv"];
+const SAMPLE_ROW_LIMIT = 50;
+
+// xlsx is ~400KB gzipped; only load it when we actually need to read a
+// spreadsheet file. The module is cached by the bundler after the first call.
+type XlsxModule = typeof import("xlsx");
+let xlsxModulePromise: Promise<XlsxModule> | null = null;
+function loadXlsx(): Promise<XlsxModule> {
+  if (!xlsxModulePromise) {
+    xlsxModulePromise = import("xlsx");
+  }
+  return xlsxModulePromise;
+}
+
+function classifyDocumentFile(file: File): DocumentPreview["kind"] {
+  const mime = (file.type ?? "").toLowerCase();
+  const name = (file.name ?? "").toLowerCase();
+  const ext = name.includes(".") ? name.split(".").pop() ?? "" : "";
+  if (SPREADSHEET_EXTENSIONS.includes(ext)) return "spreadsheet";
+  if (mime.includes("spreadsheet") || mime === "text/csv") return "spreadsheet";
+  if (mime === "application/pdf" || ext === "pdf") return "pdf";
+  if (mime.startsWith("image/")) return "image";
+  return "other";
+}
+
+
+async function buildDocumentPreview(file: File): Promise<DocumentPreview | null> {
+  const kind = classifyDocumentFile(file);
+  if (kind !== "spreadsheet") {
+    return { kind };
+  }
+  try {
+    const buffer = await file.arrayBuffer();
+    const ext = (file.name ?? "").toLowerCase().split(".").pop() ?? "";
+    if (ext === "csv") {
+      const text = new TextDecoder("utf-8").decode(buffer);
+      const { headers, rows, rowCount } = parseCsvForPreview(text);
+      if (headers.length === 0) {
+        return { kind };
+      }
+      return {
+        kind,
+        sheets: [
+          {
+            name: "Sheet1",
+            headers,
+            sampleRows: rows.slice(0, SAMPLE_ROW_LIMIT),
+            rowCount,
+          },
+        ],
+      };
+    }
+    const XLSX = await loadXlsx();
+    const workbook = XLSX.read(buffer, { type: "array" });
+    const sheets: DocumentPreviewSheet[] = [];
+    for (const sheetName of workbook.SheetNames) {
+      const sheet = workbook.Sheets[sheetName];
+      if (!sheet) continue;
+      const { headers, rows: cleanedRows } = smartExtractSheet(sheet);
+      sheets.push({
+        name: sheetName,
+        headers,
+        sampleRows: cleanedRows.slice(0, SAMPLE_ROW_LIMIT),
+        rowCount: cleanedRows.length,
+      });
+    }
+    if (sheets.length === 0) {
+      return { kind };
+    }
+    return { kind, sheets };
+  } catch {
+    return { kind };
+  }
+}
+
+async function extractAllSpreadsheetRows(file: File, sheetName?: string): Promise<Array<Record<string, unknown>>> {
+  const buffer = await file.arrayBuffer();
+  const ext = (file.name ?? "").toLowerCase().split(".").pop() ?? "";
+  if (ext === "csv") {
+    const text = new TextDecoder("utf-8").decode(buffer);
+    return parseCsvForPreview(text).rows;
+  }
+  const XLSX = await loadXlsx();
+  const workbook = XLSX.read(buffer, { type: "array" });
+  const targetSheet = sheetName && workbook.Sheets[sheetName] ? sheetName : workbook.SheetNames[0];
+  if (!targetSheet) return [];
+  const sheet = workbook.Sheets[targetSheet];
+  if (!sheet) return [];
+  return smartExtractSheet(sheet).rows;
+}
+
+function summarizeDocumentPreview(fileName: string, preview: DocumentPreview | null | undefined, fileKind: DocumentPreview["kind"]): string {
+  if (fileKind === "spreadsheet" && preview?.sheets && preview.sheets.length > 0) {
+    const sheet = preview.sheets[0];
+    const headerSample = sheet.headers.slice(0, 5).join(", ");
+    const extra = sheet.headers.length > 5 ? `, +${sheet.headers.length - 5} mas` : "";
+    return `Detecté ${sheet.headers.length} columnas y ${sheet.rowCount} filas en "${sheet.name}" de ${fileName}${headerSample ? `: ${headerSample}${extra}` : ""}.`;
+  }
+  if (fileKind === "pdf") {
+    return `Documento PDF cargado: ${fileName}. Puedo extraer información clave o adjuntarlo sin procesar.`;
+  }
+  if (fileKind === "image") {
+    return `Imagen cargada: ${fileName}. Puedo intentar extraer texto o adjuntarla sin procesar.`;
+  }
+  return `Archivo cargado: ${fileName}.`;
+}
+
+function buildDocumentActionsForKind(kind: DocumentPreview["kind"]): DocumentActionBlock["actions"] {
+  if (kind === "spreadsheet") {
+    return [
+      { id: "create-object", label: "Crear tabla con estos datos" },
+      { id: "import-existing", label: "Importar a una tabla existente" },
+      { id: "attach-only", label: "Solo adjuntar" },
+    ];
+  }
+  return [
+    { id: "extract", label: "Extraer información" },
+    { id: "attach-only", label: "Solo adjuntar" },
+  ];
 }
 
 function buildRevealStyle(isVisible: boolean, delayMs = 0): React.CSSProperties {
@@ -782,10 +1092,12 @@ export function OverviewPanel({
   );
 }
 
-export function QueuePanel({ queueItems, recordBaseHref }: QueuePanelProps) {
+export function QueuePanel({ queueItems, recordBaseHref, workspaceSlug }: QueuePanelProps) {
   const [filter, setFilter] = useState<string>("all");
   const filteredQueueItems =
     filter === "all" ? queueItems : queueItems.filter((item) => item.status.toLowerCase() === filter);
+  const topItems = filteredQueueItems.slice(0, 5);
+  const tasksHref = workspaceSlug ? `/workspaces/${workspaceSlug}/tasks?view=queue` : null;
   const filters = [
     { id: "all", label: "Todas" },
     { id: "pending", label: "Pendientes" },
@@ -797,8 +1109,30 @@ export function QueuePanel({ queueItems, recordBaseHref }: QueuePanelProps) {
     <div style={stackStyle}>
       <Panel
         eyebrow="Queue"
-        title="Queue"
-        description={`${queueItems.length} items requieren accion.`}
+        title="Vista previa de tareas urgentes"
+        description={`${queueItems.length} tareas en total · mostrando las primeras ${topItems.length}.`}
+        actions={
+          tasksHref ? (
+            <a
+              href={tasksHref}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                padding: "6px 12px",
+                borderRadius: "var(--radius-md)",
+                background: "var(--workspace-accent-strong, #2563eb)",
+                color: "#ffffff",
+                fontSize: 12,
+                fontWeight: 600,
+                textDecoration: "none",
+              }}
+            >
+              Abrir tareas
+              <ArrowRight size={14} />
+            </a>
+          ) : null
+        }
       >
         <div style={filterRowStyle}>
           {filters.map((item) => (
@@ -818,7 +1152,7 @@ export function QueuePanel({ queueItems, recordBaseHref }: QueuePanelProps) {
           ))}
         </div>
 
-        {filteredQueueItems.length === 0 ? (
+        {topItems.length === 0 ? (
           <EmptyState
             icon={Sparkles}
             title="No hay tareas urgentes"
@@ -826,38 +1160,59 @@ export function QueuePanel({ queueItems, recordBaseHref }: QueuePanelProps) {
           />
         ) : (
           <div style={queueTableStyle}>
-            {filteredQueueItems.map((item) => (
+            {topItems.map((item) => {
+              const preferTasks = tasksHref && !item.recordId;
+              const href = preferTasks
+                ? `${tasksHref}&task=${item.id}`
+                : recordBaseHref && item.objectId && (item.recordId ?? item.id)
+                  ? `${recordBaseHref}&object=${item.objectId}&record=${item.recordId ?? item.id}`
+                  : tasksHref ?? undefined;
+              return (
+                <a
+                  key={item.id}
+                  href={href}
+                  style={{
+                    ...queueTableRowStyle,
+                    borderLeft: `4px solid ${resolvePriorityColor(item.status)}`,
+                    textDecoration: "none",
+                  }}
+                >
+                  <div>
+                    <p style={queueTitleStyle}>{item.title}</p>
+                    <p style={queueSubtitleStyle}>
+                      {item.subtitle} · {formatQueueAction(item.status)}
+                    </p>
+                  </div>
+                  <div style={queueRightStyle}>
+                    <StatusPill tone={item.status.toLowerCase()}>{formatStatusLabel(item.status)}</StatusPill>
+                    <ArrowRight size={16} color="var(--workspace-muted)" />
+                  </div>
+                </a>
+              );
+            })}
+            {filteredQueueItems.length > topItems.length && tasksHref ? (
               <a
-                key={item.id}
-                href={
-                  recordBaseHref && item.objectId && (item.recordId ?? item.id)
-                    ? `${recordBaseHref}&object=${item.objectId}&record=${item.recordId ?? item.id}`
-                    : undefined
-                }
+                href={tasksHref}
                 style={{
                   ...queueTableRowStyle,
-                  borderLeft: `4px solid ${resolvePriorityColor(item.status)}`,
+                  justifyContent: "center",
                   textDecoration: "none",
+                  color: "var(--workspace-accent-strong, #2563eb)",
+                  fontWeight: 600,
                 }}
               >
-                <div>
-                  <p style={queueTitleStyle}>{item.title}</p>
-                  <p style={queueSubtitleStyle}>
-                    {item.subtitle} · {formatQueueAction(item.status)}
-                  </p>
-                </div>
-                <div style={queueRightStyle}>
-                  <StatusPill tone={item.status.toLowerCase()}>{formatStatusLabel(item.status)}</StatusPill>
-                  <ArrowRight size={16} color="var(--workspace-muted)" />
-                </div>
+                Ver las {filteredQueueItems.length - topItems.length} tareas restantes →
               </a>
-            ))}
+            ) : null}
           </div>
         )}
       </Panel>
     </div>
   );
 }
+
+/** Set to `true` to show the human takeover toggle in the chat header. */
+const SHOW_HUMAN_TAKEOVER_BUTTON = false;
 
 export function ChatPanel({
   workspaceId,
@@ -871,8 +1226,12 @@ export function ChatPanel({
   primaryAgentId,
   canSetPrimaryAgent = false,
   askPrompt,
+  objects = [],
+  fields = [],
 }: ChatPanelProps) {
   const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const sortedAgents = [...chatAgents].sort((left, right) => {
     const leftPrimary = left.isPrimaryCopilot ? 1 : 0;
     const rightPrimary = right.isPrimaryCopilot ? 1 : 0;
@@ -902,10 +1261,101 @@ export function ChatPanel({
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
-  const [renameDraft, setRenameDraft] = useState("");
+  const [isTogglingTakeover, setIsTogglingTakeover] = useState(false);
+  const [isEditingTitle, setIsEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
+  const [composerMode, setComposerMode] = useState<ChatComposerMode>("chat");
+  const [isToolsOpen, setIsToolsOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
   const [pendingProposalId, setPendingProposalId] = useState<string | null>(null);
+  const [isDocumentsFinderOpen, setIsDocumentsFinderOpen] = useState(false);
+  const [documentsFinderQuery, setDocumentsFinderQuery] = useState("");
+  const [workspaceDocuments, setWorkspaceDocuments] = useState<Array<{
+    id: string;
+    fileName: string;
+    publicUrl: string;
+    mimeType: string;
+    fileKind: DocumentPreview["kind"];
+    preview?: DocumentPreview;
+    createdAt: string;
+  }>>([]);
+  const [isDocumentsLoading, setIsDocumentsLoading] = useState(false);
+  const [workspaceFolders, setWorkspaceFolders] = useState<Array<{
+    id: string;
+    name: string;
+    parentId: string | null;
+    fileCount: number;
+  }>>([]);
+  const [mentionPickerState, setMentionPickerState] = useState<{
+    open: boolean;
+    query: string;
+    triggerIndex: number;
+  }>({ open: false, query: "", triggerIndex: -1 });
+  type PendingAttachmentRef =
+    | { kind: "record"; id: string }
+    | { kind: "folder"; id: string; name: string; fileCount: number };
+  const [pendingAttachmentRefs, setPendingAttachmentRefs] = useState<PendingAttachmentRef[]>([]);
+  const addPendingRecordRef = useCallback(
+    (recordId: string) => {
+      setPendingAttachmentRefs((current) =>
+        current.some((entry) => entry.kind === "record" && entry.id === recordId)
+          ? current
+          : [...current, { kind: "record", id: recordId }],
+      );
+    },
+    [],
+  );
+  const addPendingFolderRef = useCallback(
+    (folder: { id: string; name: string; fileCount: number }) => {
+      setPendingAttachmentRefs((current) =>
+        current.some((entry) => entry.kind === "folder" && entry.id === folder.id)
+          ? current
+          : [...current, { kind: "folder", ...folder }],
+      );
+    },
+    [],
+  );
+  const removePendingRef = useCallback((predicate: (ref: PendingAttachmentRef) => boolean) => {
+    setPendingAttachmentRefs((current) => current.filter((entry) => !predicate(entry)));
+  }, []);
+  const [existingTableImport, setExistingTableImport] = useState<{
+    recordId: string;
+    messageId: string;
+    blockKey: string;
+    fileName: string;
+    headers: string[];
+    rows: Array<Record<string, unknown>>;
+    objectId: string;
+    mapping: Record<string, string>;
+  } | null>(null);
+  const [isRunningExistingImport, setIsRunningExistingImport] = useState(false);
+  const uploadInputRef = useRef<HTMLInputElement | null>(null);
+  const chatMessagesRef = useRef<HTMLDivElement | null>(null);
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
+  const toolsMenuRef = useRef<HTMLDivElement | null>(null);
+  const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const documentsFinderRef = useRef<HTMLDivElement | null>(null);
+  const uploadedFileCacheRef = useRef<Map<string, File>>(new Map());
+
+  const normalizedSkillTokens = (selectedAgent?.skills ?? []).map(normalizeCapabilityToken);
+  const webCapabilityEnabled =
+    Boolean(selectedAgent?.capabilities?.webSearch || selectedAgent?.capabilities?.browser) ||
+    normalizedSkillTokens.some((token) =>
+      [
+        "web",
+        "websearch",
+        "webextract",
+        "browser",
+        "browsernavigate",
+        "browservision",
+      ].includes(token),
+    );
+  const integrationsCapabilityEnabled =
+    Boolean(selectedAgent?.capabilities?.integration) || webCapabilityEnabled;
+  const ingestionCapabilityEnabled =
+    Boolean(selectedAgent?.capabilities?.ingestion) || normalizedSkillTokens.some((token) => token.includes("import"));
+  const workspaceActionCapabilityEnabled = Boolean(selectedAgent?.capabilities?.workspaceActions ?? true);
 
   function toTimeLabel(isoTimestamp: string) {
     return new Intl.DateTimeFormat("es-MX", {
@@ -938,6 +1388,10 @@ export function ChatPanel({
           publicUrl,
           contentType:
             typeof typed.contentType === "string" ? typed.contentType : "application/octet-stream",
+          fileKind:
+            typeof typed.fileKind === "string"
+              ? (typed.fileKind as DocumentPreview["kind"])
+              : undefined,
         });
       }
     }
@@ -976,7 +1430,7 @@ export function ChatPanel({
     };
   }, [workspaceSlug]);
 
-  async function importLegacySessions(agentId: string) {
+  async function importLegacySessions(agentId: string, signal: AbortSignal) {
     if (typeof window === "undefined") {
       return false;
     }
@@ -996,6 +1450,9 @@ export function ChatPanel({
 
     let imported = 0;
     for (const legacy of parsedSessions.slice(0, 8)) {
+      if (signal.aborted) {
+        break;
+      }
       const response = await fetch(`/api/workspaces/${workspaceSlug}/conversations`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1017,6 +1474,7 @@ export function ChatPanel({
             metadata: {},
           })),
         }),
+        signal,
       });
       if (response.ok) {
         imported += 1;
@@ -1025,13 +1483,20 @@ export function ChatPanel({
     return imported > 0;
   }
 
-  async function loadConversations(agentId: string) {
+  async function loadConversations(agentId: string, controller: AbortController) {
     setIsSessionsLoading(true);
     setError(null);
+    let timedOut = false;
+    const timeoutId = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, 20000);
+    const { signal } = controller;
     try {
       const fetchConversations = async () => {
         const response = await fetch(
           `/api/workspaces/${workspaceSlug}/conversations?agentId=${encodeURIComponent(agentId)}&source=workspace_chat`,
+          { signal },
         );
         const payload = (await response.json().catch(() => ({}))) as {
           error?: string;
@@ -1040,6 +1505,7 @@ export function ChatPanel({
             title: string;
             source: string;
             runtimeConversationId: string;
+            agentPaused?: boolean;
             updatedAt: string;
           }>;
         };
@@ -1051,7 +1517,7 @@ export function ChatPanel({
 
       let conversationRows = await fetchConversations();
       if (conversationRows.length === 0) {
-        const imported = await importLegacySessions(agentId);
+        const imported = await importLegacySessions(agentId, signal);
         if (imported) {
           conversationRows = await fetchConversations();
         }
@@ -1062,6 +1528,7 @@ export function ChatPanel({
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ agentId }),
+          signal,
         });
         const createPayload = (await createResponse.json().catch(() => ({}))) as {
           error?: string;
@@ -1070,6 +1537,7 @@ export function ChatPanel({
             title: string;
             source: string;
             runtimeConversationId: string;
+            agentPaused?: boolean;
             updatedAt: string;
           };
         };
@@ -1085,6 +1553,7 @@ export function ChatPanel({
         title: conversation.title,
         source: conversation.source,
         runtimeConversationId: conversation.runtimeConversationId,
+        agentPaused: Boolean(conversation.agentPaused),
         messages: [],
         attachments: [],
         updatedAt: conversation.updatedAt,
@@ -1096,12 +1565,25 @@ export function ChatPanel({
           : mappedSessions[0]?.id ?? "",
       );
     } catch (caughtError) {
+      const isAbort = caughtError instanceof DOMException && caughtError.name === "AbortError";
+      if (isAbort && !timedOut) {
+        return;
+      }
       const fallback = createSession(userId, agentId);
       setSessions([fallback]);
       setSelectedSessionId(fallback.id);
-      setError(caughtError instanceof Error ? caughtError.message : "No se pudo cargar el historial de chat.");
+      const message = isAbort
+        ? "El servidor no respondió en 20s. Revisa la conexión o recarga la página."
+        : caughtError instanceof Error
+          ? caughtError.message
+          : "No se pudo cargar el historial de chat.";
+      setError(message);
     } finally {
-      setIsSessionsLoading(false);
+      clearTimeout(timeoutId);
+      const externallyAborted = signal.aborted && !timedOut;
+      if (!externallyAborted) {
+        setIsSessionsLoading(false);
+      }
     }
   }
 
@@ -1117,9 +1599,30 @@ export function ChatPanel({
       setSelectedSessionId("");
       return;
     }
-    void loadConversations(selectedAgentId);
+    setComposerMode("chat");
+    setIsToolsOpen(false);
+    const controller = new AbortController();
+    void loadConversations(selectedAgentId, controller);
+    return () => {
+      controller.abort();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedAgentId, workspaceSlug, userId]);
+
+  useEffect(() => {
+    function handleOutsideClick(event: MouseEvent) {
+      if (!toolsMenuRef.current) {
+        return;
+      }
+      if (!toolsMenuRef.current.contains(event.target as Node)) {
+        setIsToolsOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleOutsideClick);
+    return () => {
+      document.removeEventListener("mousedown", handleOutsideClick);
+    };
+  }, []);
 
   useEffect(() => {
     if (typeof window === "undefined" || sessions.length === 0) {
@@ -1173,20 +1676,41 @@ export function ChatPanel({
   const selectedSessionMessageCount = selectedSession?.messages.length ?? 0;
 
   useEffect(() => {
-    if (!selectedSessionId) {
+    setTitleDraft(selectedSessionTitle);
+    setIsEditingTitle(false);
+  }, [selectedSessionId, selectedSessionTitle]);
+
+  useEffect(() => {
+    if (!isEditingTitle || !titleInputRef.current) {
       return;
     }
-    setRenameDraft(selectedSessionTitle);
-  }, [selectedSessionId, selectedSessionTitle]);
+    titleInputRef.current.focus();
+    titleInputRef.current.select();
+  }, [isEditingTitle]);
 
   useEffect(() => {
     if (!askPrompt || !selectedSessionId) {
       return;
     }
-    if (selectedSessionMessageCount === 0 && !input.trim()) {
-      setInput(askPrompt);
+    if (selectedSessionMessageCount !== 0 || input.trim()) {
+      return;
     }
-  }, [askPrompt, input, selectedSessionId, selectedSessionMessageCount]);
+    setInput(askPrompt);
+    if (!searchParams.has("prompt")) {
+      return;
+    }
+    const nextParams = new URLSearchParams(searchParams.toString());
+    nextParams.delete("prompt");
+    const nextUrl = nextParams.size ? `${pathname}?${nextParams.toString()}` : pathname;
+    router.replace(nextUrl, { scroll: false });
+  }, [askPrompt, input, pathname, router, searchParams, selectedSessionId, selectedSessionMessageCount]);
+
+  useEffect(() => {
+    if (!chatMessagesRef.current) {
+      return;
+    }
+    chatMessagesRef.current.scrollTop = chatMessagesRef.current.scrollHeight;
+  }, [selectedSession?.id, selectedSessionMessageCount]);
 
   function updateSession(sessionId: string, updater: (session: ChatSession) => ChatSession) {
     setSessions((current) =>
@@ -1216,6 +1740,7 @@ export function ChatPanel({
           title: string;
           source: string;
           runtimeConversationId: string;
+          agentPaused?: boolean;
           updatedAt: string;
         };
       };
@@ -1228,6 +1753,7 @@ export function ChatPanel({
         title: payload.conversation.title,
         source: payload.conversation.source,
         runtimeConversationId: payload.conversation.runtimeConversationId,
+        agentPaused: Boolean(payload.conversation.agentPaused),
         messages: [],
         attachments: [],
         updatedAt: payload.conversation.updatedAt,
@@ -1257,6 +1783,137 @@ export function ChatPanel({
     }
   }
 
+  function applyFallbackTitle(sessionId: string, fallbackTitle: string) {
+    const trimmed = fallbackTitle.trim();
+    if (!trimmed) {
+      return;
+    }
+
+    let shouldPersist = false;
+    updateSession(sessionId, (session) => {
+      if (session.title.trim() !== defaultChatSessionTitle) {
+        return session;
+      }
+      shouldPersist = true;
+      return {
+        ...session,
+        title: trimmed,
+        updatedAt: new Date().toISOString(),
+      };
+    });
+
+    if (!shouldPersist) {
+      return;
+    }
+
+    void fetch(`/api/workspaces/${workspaceSlug}/conversations/${sessionId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: trimmed }),
+    });
+  }
+
+  async function generateSessionTitle(sessionId: string, fallbackTitle: string) {
+    try {
+      const response = await fetch(`/api/workspaces/${workspaceSlug}/conversations/${sessionId}/generate-title`, {
+        method: "POST",
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        conversation?: { title?: string };
+      };
+      if (!response.ok || !payload.conversation?.title) {
+        applyFallbackTitle(sessionId, fallbackTitle);
+        return;
+      }
+
+      const generatedTitle = payload.conversation.title.trim();
+      if (!generatedTitle) {
+        applyFallbackTitle(sessionId, fallbackTitle);
+        return;
+      }
+
+      updateSession(sessionId, (session) => ({
+        ...session,
+        title: generatedTitle,
+        updatedAt: new Date().toISOString(),
+      }));
+    } catch {
+      applyFallbackTitle(sessionId, fallbackTitle);
+    }
+  }
+
+  function startTitleEditing() {
+    if (!selectedSession) {
+      return;
+    }
+    setTitleDraft(selectedSession.title);
+    setIsEditingTitle(true);
+  }
+
+  async function commitTitleEditing() {
+    if (!selectedSession) {
+      setIsEditingTitle(false);
+      return;
+    }
+    const trimmed = titleDraft.trim();
+    if (!trimmed) {
+      setTitleDraft(selectedSession.title);
+      setIsEditingTitle(false);
+      return;
+    }
+    await renameSession(selectedSession.id, trimmed);
+    setTitleDraft(trimmed);
+    setIsEditingTitle(false);
+  }
+
+  function cancelTitleEditing() {
+    setTitleDraft(selectedSession?.title ?? "");
+    setIsEditingTitle(false);
+  }
+
+  async function toggleHumanTakeover(nextPaused: boolean) {
+    if (!selectedSession || isTogglingTakeover) {
+      return;
+    }
+    const previous = selectedSession.agentPaused;
+    updateSession(selectedSession.id, (session) => ({
+      ...session,
+      agentPaused: nextPaused,
+      updatedAt: new Date().toISOString(),
+    }));
+    setIsTogglingTakeover(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/workspaces/${workspaceSlug}/conversations/${selectedSession.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agentPaused: nextPaused }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        conversation?: { agentPaused?: boolean };
+      };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "No se pudo actualizar el takeover humano.");
+      }
+      updateSession(selectedSession.id, (session) => ({
+        ...session,
+        agentPaused: Boolean(payload.conversation?.agentPaused ?? nextPaused),
+        updatedAt: new Date().toISOString(),
+      }));
+    } catch (caughtError) {
+      updateSession(selectedSession.id, (session) => ({
+        ...session,
+        agentPaused: previous,
+        updatedAt: new Date().toISOString(),
+      }));
+      setError(caughtError instanceof Error ? caughtError.message : "No se pudo actualizar el takeover humano.");
+    } finally {
+      setIsTogglingTakeover(false);
+    }
+  }
+
   async function uploadDocument(file: File) {
     if (!selectedSession || !selectedAgent || isUploading) {
       return;
@@ -1266,12 +1923,19 @@ export function ChatPanel({
     setError(null);
 
     try {
+      const fileKind = classifyDocumentFile(file);
+      const preview = await buildDocumentPreview(file);
+
       const formData = new FormData();
       formData.append("file", file);
       formData.append("sessionTitle", selectedSession.title);
       formData.append("conversationId", selectedSession.runtimeConversationId);
       formData.append("workspaceConversationId", selectedSession.id);
       formData.append("agentId", selectedAgent.id);
+      formData.append("kind", fileKind);
+      if (preview) {
+        formData.append("preview", JSON.stringify(preview));
+      }
 
       const response = await fetch(`/api/workspaces/${workspaceSlug}/documents`, {
         method: "POST",
@@ -1284,6 +1948,8 @@ export function ChatPanel({
         documentName?: string;
         publicUrl?: string;
         contentType?: string;
+        fileKind?: DocumentPreview["kind"];
+        preview?: DocumentPreview | null;
       };
 
       if (!response.ok || !payload.recordId || !payload.documentName || !payload.publicUrl) {
@@ -1293,56 +1959,63 @@ export function ChatPanel({
       const uploadedRecordId = payload.recordId;
       const uploadedDocumentName = payload.documentName;
       const uploadedPublicUrl = payload.publicUrl;
+      const resolvedKind = (payload.fileKind ?? fileKind) as DocumentPreview["kind"];
+      const resolvedPreview = payload.preview ?? preview ?? undefined;
+      const summary = summarizeDocumentPreview(uploadedDocumentName, resolvedPreview, resolvedKind);
+
+      uploadedFileCacheRef.current.set(uploadedRecordId, file);
+
+      const attachmentPayload = {
+        id: uploadedRecordId,
+        fileName: uploadedDocumentName,
+        publicUrl: uploadedPublicUrl,
+        contentType: payload.contentType ?? file.type ?? "application/octet-stream",
+        fileKind: resolvedKind,
+      };
+
+      const actionBlock: DocumentActionBlock = {
+        kind: "document_actions",
+        recordId: uploadedRecordId,
+        fileName: uploadedDocumentName,
+        fileKind: resolvedKind,
+        summary,
+        preview: resolvedPreview ?? undefined,
+        actions: buildDocumentActionsForKind(resolvedKind),
+        resolutionState: "idle",
+      };
+
+      const assistantMessage: ChatMessage = {
+        id: `upload-${Date.now()}`,
+        role: "assistant",
+        content: summary,
+        timestamp: currentTimeLabel(),
+        blocks: [actionBlock],
+        attachments: [attachmentPayload],
+      };
 
       updateSession(selectedSession.id, (session) => ({
         ...session,
-        attachments: [
-          {
-            id: uploadedRecordId,
-            fileName: uploadedDocumentName,
-            publicUrl: uploadedPublicUrl,
-            contentType: payload.contentType ?? file.type ?? "application/octet-stream",
-          },
-          ...session.attachments,
-        ],
-        messages: [
-          ...session.messages,
-          {
-            id: `upload-${Date.now()}`,
-            role: "assistant",
-            content: `Documento subido: ${uploadedDocumentName}. Se agregó al dataset Documents y el workspace se actualizará.`,
-            timestamp: currentTimeLabel(),
-            attachments: [
-              {
-                id: uploadedRecordId,
-                fileName: uploadedDocumentName,
-                publicUrl: uploadedPublicUrl,
-                contentType: payload.contentType ?? file.type ?? "application/octet-stream",
-              },
-            ],
-          },
-        ],
+        attachments: [attachmentPayload, ...session.attachments.filter((item) => item.id !== uploadedRecordId)],
+        messages: [...session.messages, assistantMessage],
         updatedAt: new Date().toISOString(),
       }));
+
       void fetch(`/api/workspaces/${workspaceSlug}/conversations/${selectedSession.id}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           role: "assistant",
-          content: `Documento subido: ${uploadedDocumentName}. Se agregó al dataset Documents y el workspace se actualizará.`,
-          attachments: [
-            {
-              id: uploadedRecordId,
-              fileName: uploadedDocumentName,
-              publicUrl: uploadedPublicUrl,
-              contentType: payload.contentType ?? file.type ?? "application/octet-stream",
-            },
-          ],
+          content: summary,
+          blocks: [actionBlock],
+          attachments: [attachmentPayload],
           metadata: {
             uploaded_via: "chat",
+            file_kind: resolvedKind,
           },
         }),
       });
+
+      void loadWorkspaceDocuments();
     } catch (caughtError) {
       const message = caughtError instanceof Error ? caughtError.message : "No se pudo subir el documento.";
       setError(message);
@@ -1350,6 +2023,385 @@ export function ChatPanel({
       setIsUploading(false);
       window.setTimeout(() => { if (typeof window !== "undefined") { router.replace(`${window.location.pathname}${window.location.search}`); router.refresh(); } }, 400);
     }
+  }
+
+  function openUploadPicker() {
+    if (isUploading) {
+      return;
+    }
+    uploadInputRef.current?.click();
+  }
+
+  const loadWorkspaceDocuments = useCallback(async () => {
+    setIsDocumentsLoading(true);
+    try {
+      const [docsResponse, foldersResponse] = await Promise.all([
+        fetch(`/api/workspaces/${workspaceSlug}/documents?limit=80`),
+        fetch(`/api/workspaces/${workspaceSlug}/folders`),
+      ]);
+      if (docsResponse.ok) {
+        const payload = (await docsResponse.json().catch(() => ({}))) as {
+          documents?: Array<{
+            id: string;
+            fileName: string;
+            publicUrl: string;
+            mimeType: string;
+            fileKind: DocumentPreview["kind"];
+            preview?: DocumentPreview | null;
+            createdAt: string;
+          }>;
+        };
+        setWorkspaceDocuments(
+          (payload.documents ?? []).map((entry) => ({
+            id: entry.id,
+            fileName: entry.fileName,
+            publicUrl: entry.publicUrl,
+            mimeType: entry.mimeType,
+            fileKind: entry.fileKind ?? "other",
+            preview: entry.preview ?? undefined,
+            createdAt: entry.createdAt,
+          })),
+        );
+      }
+      if (foldersResponse.ok) {
+        const payload = (await foldersResponse.json().catch(() => ({}))) as {
+          folders?: Array<{ id: string; name: string; parentId: string | null; fileCount: number }>;
+        };
+        setWorkspaceFolders(payload.folders ?? []);
+      }
+    } catch {
+      // Ignore transient errors; finder will simply show what we have.
+    } finally {
+      setIsDocumentsLoading(false);
+    }
+  }, [workspaceSlug]);
+
+  useEffect(() => {
+    void loadWorkspaceDocuments();
+  }, [loadWorkspaceDocuments]);
+
+  useEffect(() => {
+    if (!isDocumentsFinderOpen) return;
+    function handleClick(event: MouseEvent) {
+      if (!documentsFinderRef.current) return;
+      if (documentsFinderRef.current.contains(event.target as Node)) return;
+      setIsDocumentsFinderOpen(false);
+    }
+    window.addEventListener("mousedown", handleClick);
+    return () => window.removeEventListener("mousedown", handleClick);
+  }, [isDocumentsFinderOpen]);
+
+  function updateDocumentActionBlock(
+    messageId: string,
+    recordId: string,
+    updater: (block: DocumentActionBlock) => DocumentActionBlock,
+  ) {
+    if (!selectedSession) return;
+    updateSession(selectedSession.id, (session) => ({
+      ...session,
+      messages: session.messages.map((message) => {
+        if (message.id !== messageId) return message;
+        return {
+          ...message,
+          blocks: (message.blocks ?? []).map((block) =>
+            block.kind === "document_actions" && block.recordId === recordId ? updater(block) : block,
+          ),
+        };
+      }),
+      updatedAt: new Date().toISOString(),
+    }));
+  }
+
+  async function handleDocumentAction(
+    messageId: string,
+    block: DocumentActionBlock,
+    actionId: DocumentActionId,
+  ) {
+    if (!selectedSession || !selectedAgent) return;
+    if (actionId === "attach-only") {
+      updateDocumentActionBlock(messageId, block.recordId, (current) => ({
+        ...current,
+        resolvedAction: actionId,
+        resolutionState: "done",
+        resolutionMessage: "Archivo adjuntado. Puedes referenciarlo con @ en cualquier momento.",
+      }));
+      return;
+    }
+
+    if (actionId === "extract") {
+      updateDocumentActionBlock(messageId, block.recordId, (current) => ({
+        ...current,
+        resolvedAction: actionId,
+        resolutionState: "working",
+        resolutionMessage: "Procesando documento...",
+      }));
+      try {
+        const response = await fetch(
+          `/api/workspaces/${workspaceSlug}/documents/${block.recordId}/analyze`,
+          { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: "extract" }) },
+        );
+        const data = (await response.json().catch(() => ({}))) as { error?: string; summary?: string };
+        if (!response.ok) throw new Error(data.error ?? "No se pudo procesar el documento.");
+        updateDocumentActionBlock(messageId, block.recordId, (current) => ({
+          ...current,
+          resolutionState: "done",
+          resolutionMessage: data.summary ?? "Extracción en cola.",
+        }));
+      } catch (caughtError) {
+        const messageText = caughtError instanceof Error ? caughtError.message : "No se pudo procesar.";
+        updateDocumentActionBlock(messageId, block.recordId, (current) => ({
+          ...current,
+          resolutionState: "failed",
+          resolutionMessage: messageText,
+        }));
+      }
+      return;
+    }
+
+    if (actionId === "create-object") {
+      updateDocumentActionBlock(messageId, block.recordId, (current) => ({
+        ...current,
+        resolvedAction: actionId,
+        resolutionState: "working",
+        resolutionMessage: "Generando propuesta de tabla...",
+      }));
+      try {
+        const response = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            workspaceId,
+            agentId: selectedAgent.id,
+            conversationId: selectedSession.runtimeConversationId,
+            message: `Crea una tabla a partir del documento ${block.fileName}.`,
+            toolIntent: {
+              kind: "create_object_from_document",
+              documentRecordId: block.recordId,
+            },
+          }),
+        });
+        if (!response.ok || !response.body) {
+          const failurePayload = (await response.json().catch(() => ({}))) as { error?: string };
+          throw new Error(failurePayload.error ?? "No se pudo generar la propuesta.");
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let receivedProposal: ChatSchemaProposal | null = null;
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const { remainder, dataLines } = consumeCompleteSseDataLines(buffer);
+          buffer = remainder;
+          for (const raw of dataLines) {
+            if (raw === "[DONE]") continue;
+            try {
+              const parsed = JSON.parse(raw) as { type: string; proposal?: ChatSchemaProposal };
+              if (parsed.type === "schema_proposal" && parsed.proposal) {
+                receivedProposal = parsed.proposal;
+              }
+            } catch {
+              // Ignore malformed frames.
+            }
+          }
+        }
+
+        if (!receivedProposal) {
+          throw new Error("No recibí una propuesta de esquema.");
+        }
+
+        const proposalBlock: ChatMessageBlock = {
+          kind: "schema_proposal",
+          proposal: receivedProposal,
+          documentRecordId: block.recordId,
+        };
+        updateSession(selectedSession.id, (session) => ({
+          ...session,
+          messages: [
+            ...session.messages,
+            {
+              id: `proposal-${Date.now()}`,
+              role: "assistant",
+              content: "Preparé una propuesta de tabla a partir del documento. Revisa columnas y apruébala para crearla y cargar las filas.",
+              timestamp: currentTimeLabel(),
+              blocks: [proposalBlock],
+            },
+          ],
+          updatedAt: new Date().toISOString(),
+        }));
+        updateDocumentActionBlock(messageId, block.recordId, (current) => ({
+          ...current,
+          resolutionState: "done",
+          resolutionMessage: "Propuesta lista. Revísala abajo y apruébala.",
+        }));
+      } catch (caughtError) {
+        const messageText = caughtError instanceof Error ? caughtError.message : "No se pudo generar la propuesta.";
+        updateDocumentActionBlock(messageId, block.recordId, (current) => ({
+          ...current,
+          resolutionState: "failed",
+          resolutionMessage: messageText,
+        }));
+      }
+      return;
+    }
+
+    if (actionId === "import-existing") {
+      const sheet = block.preview?.sheets?.[0];
+      if (!sheet || sheet.headers.length === 0) {
+        updateDocumentActionBlock(messageId, block.recordId, (current) => ({
+          ...current,
+          resolvedAction: actionId,
+          resolutionState: "failed",
+          resolutionMessage: "No pude detectar columnas en este archivo.",
+        }));
+        return;
+      }
+      const cachedFile = uploadedFileCacheRef.current.get(block.recordId);
+      let rows: Array<Record<string, unknown>> = sheet.sampleRows;
+      if (cachedFile && sheet.rowCount > sheet.sampleRows.length) {
+        try {
+          rows = await extractAllSpreadsheetRows(cachedFile, sheet.name);
+        } catch {
+          rows = sheet.sampleRows;
+        }
+      }
+      const firstObject = objects[0] ?? null;
+      const mapping: Record<string, string> = {};
+      if (firstObject) {
+        const objectFieldList = fields.filter((entry) => entry.objectId === firstObject.id);
+        for (const header of sheet.headers) {
+          const normalized = header
+            .trim()
+            .toLowerCase()
+            .replace(/[^a-z0-9_]+/g, "_")
+            .replace(/^_+|_+$/g, "");
+          const match = objectFieldList.find((entry) => entry.key === normalized || entry.name.toLowerCase() === header.toLowerCase());
+          mapping[header] = match?.key ?? "skip";
+        }
+      }
+      setExistingTableImport({
+        recordId: block.recordId,
+        messageId,
+        blockKey: `${messageId}-${block.recordId}`,
+        fileName: block.fileName,
+        headers: sheet.headers,
+        rows,
+        objectId: firstObject?.id ?? "",
+        mapping,
+      });
+      updateDocumentActionBlock(messageId, block.recordId, (current) => ({
+        ...current,
+        resolvedAction: actionId,
+        resolutionState: "working",
+        resolutionMessage: "Selecciona la tabla destino y mapea las columnas.",
+      }));
+    }
+  }
+
+  async function commitExistingTableImport() {
+    if (!existingTableImport || isRunningExistingImport) return;
+    if (!existingTableImport.objectId) {
+      setError("Selecciona una tabla destino antes de importar.");
+      return;
+    }
+    const activeMapping = Object.entries(existingTableImport.mapping).filter(([, fieldKey]) => fieldKey && fieldKey !== "skip");
+    if (activeMapping.length === 0) {
+      setError("Mapea al menos una columna a un campo de la tabla.");
+      return;
+    }
+    setIsRunningExistingImport(true);
+    setError(null);
+    try {
+      const mappedRows = existingTableImport.rows.map((row) =>
+        activeMapping.reduce<Record<string, unknown>>((accumulator, [sourceKey, fieldKey]) => {
+          accumulator[fieldKey] = row[sourceKey];
+          return accumulator;
+        }, {}),
+      );
+      let imported = 0;
+      let skipped = 0;
+      const BATCH = 500;
+      for (let index = 0; index < mappedRows.length; index += BATCH) {
+        const batch = mappedRows.slice(index, index + BATCH);
+        const response = await fetch(`/api/workspaces/${workspaceSlug}/imports`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            objectId: existingTableImport.objectId,
+            rows: batch,
+            fileName: existingTableImport.fileName,
+          }),
+        });
+        const payload = (await response.json().catch(() => ({}))) as {
+          error?: string;
+          import?: { rowsImported: number; rowsSkipped: number };
+        };
+        if (!response.ok || !payload.import) {
+          throw new Error(payload.error ?? "No se pudo importar el archivo.");
+        }
+        imported += payload.import.rowsImported;
+        skipped += payload.import.rowsSkipped;
+      }
+      const selectedObject = objects.find((entry) => entry.id === existingTableImport.objectId);
+      const doneMessage = `Importados ${imported} registros en ${selectedObject?.name ?? "la tabla"} (${skipped} omitidos).`;
+      updateDocumentActionBlock(existingTableImport.messageId, existingTableImport.recordId, (current) => ({
+        ...current,
+        resolutionState: "done",
+        resolutionMessage: doneMessage,
+      }));
+      setExistingTableImport(null);
+      router.refresh();
+    } catch (caughtError) {
+      const messageText = caughtError instanceof Error ? caughtError.message : "No se pudo importar el archivo.";
+      setError(messageText);
+      updateDocumentActionBlock(existingTableImport.messageId, existingTableImport.recordId, (current) => ({
+        ...current,
+        resolutionState: "failed",
+        resolutionMessage: messageText,
+      }));
+    } finally {
+      setIsRunningExistingImport(false);
+    }
+  }
+
+  function enableWebLookupMode() {
+    if (!webCapabilityEnabled) {
+      setError("Este agente no tiene herramientas web habilitadas.");
+      return;
+    }
+    setError(null);
+    setComposerMode((current) => (current === "web" ? "chat" : "web"));
+    if (!input.trim()) {
+      setInput("Busca en la web y dame un resumen con hallazgos accionables para este workspace.");
+    }
+  }
+
+  function enableImageSearchMode() {
+    setError(null);
+    setComposerMode((current) => (current === "image_search" ? "chat" : "image_search"));
+  }
+
+  function handleToolPrompt(prompt: string, mode: ChatComposerMode = "chat") {
+    setInput(prompt);
+    setComposerMode(mode);
+    setIsToolsOpen(false);
+  }
+
+  function runQuickActionFromTools(
+    action:
+      | "bootstrap-crm"
+      | "bootstrap-dashboard"
+      | "scenario-close-import"
+      | "scenario-seasonal-analysis"
+      | "scenario-quote-approval"
+      | "scenario-calendar-scheduling",
+    preset?: "operations" | "sales" | "crm" | "custom",
+  ) {
+    setIsToolsOpen(false);
+    void runWorkspaceAction(action, preset);
   }
 
   async function deleteSession(sessionId: string) {
@@ -1375,7 +2427,7 @@ export function ChatPanel({
     });
   }
 
-  async function approveSchemaProposal(messageId: string, proposal: ChatSchemaProposal) {
+  async function approveSchemaProposal(messageId: string, proposal: ChatSchemaProposal, documentRecordId?: string | null) {
     if (!selectedSession || pendingProposalId === proposal.proposalId) {
       return;
     }
@@ -1411,17 +2463,89 @@ export function ChatPanel({
       });
       const payload = (await response.json().catch(() => ({}))) as {
         error?: string;
-        result?: { createdObjects?: Array<{ objectName: string; fieldCount: number }> };
+        result?: { createdObjects?: Array<{ objectName: string; objectId?: string; fieldCount: number; fieldKeys?: string[] }> };
       };
       if (!response.ok) {
-        throw new Error(payload.error ?? "No se pudo aplicar el esquema.");
+        const fallbackError =
+          response.status === 403
+            ? "No tienes permisos para aprobar esquemas. Necesitas rol admin."
+            : response.status === 400
+              ? "La propuesta de esquema es invalida o incompleta."
+              : "No se pudo aplicar el esquema.";
+        throw new Error(payload.error ?? fallbackError);
       }
 
       const createdObjects = payload.result?.createdObjects ?? [];
-      const summary =
+      let summary =
         createdObjects.length > 0
-          ? `Esquema aplicado: ${createdObjects.map((entry) => `${entry.objectName} (${entry.fieldCount} campos)`).join(", ")}.`
-          : "Esquema aplicado correctamente.";
+          ? `[Workspace action] Esquema aplicado: ${createdObjects.map((entry) => `${entry.objectName} (${entry.fieldCount} campos)`).join(", ")}.`
+          : "[Workspace action] Esquema aplicado correctamente.";
+
+      if (documentRecordId && createdObjects.length > 0 && proposal.objects[0]) {
+        try {
+          const objectDef = proposal.objects[0];
+          const sheetHeaders = objectDef.fields.map((field) => ({ key: field.key, name: field.name }));
+          const createdObject = createdObjects[0];
+          const createdObjectId = createdObject.objectId ?? null;
+
+          let sourceRows: Array<Record<string, unknown>> = [];
+          const cachedFile = uploadedFileCacheRef.current.get(documentRecordId);
+          if (cachedFile) {
+            sourceRows = await extractAllSpreadsheetRows(cachedFile);
+          }
+          if (sourceRows.length === 0) {
+            const analyzeResponse = await fetch(
+              `/api/workspaces/${workspaceSlug}/documents/${documentRecordId}/analyze`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ mode: "reparse" }),
+              },
+            );
+            const analyzePayload = (await analyzeResponse.json().catch(() => ({}))) as {
+              preview?: { sheets?: Array<{ sampleRows?: Array<Record<string, unknown>> }> };
+            };
+            const reparsedSheet = analyzePayload.preview?.sheets?.[0];
+            if (reparsedSheet?.sampleRows) {
+              sourceRows = reparsedSheet.sampleRows;
+            }
+          }
+          if (createdObjectId && sourceRows.length > 0) {
+            const mappedRows = sourceRows.map((row) =>
+              sheetHeaders.reduce<Record<string, unknown>>((accumulator, header) => {
+                accumulator[header.key] = row[header.name];
+                return accumulator;
+              }, {}),
+            );
+            const BATCH = 500;
+            let imported = 0;
+            let skipped = 0;
+            for (let index = 0; index < mappedRows.length; index += BATCH) {
+              const batch = mappedRows.slice(index, index + BATCH);
+              const importResponse = await fetch(`/api/workspaces/${workspaceSlug}/imports`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  objectId: createdObjectId,
+                  rows: batch,
+                  fileName: `documento-${documentRecordId.slice(0, 8)}.xlsx`,
+                }),
+              });
+              const importPayload = (await importResponse.json().catch(() => ({}))) as {
+                error?: string;
+                import?: { rowsImported: number; rowsSkipped: number };
+              };
+              if (importResponse.ok && importPayload.import) {
+                imported += importPayload.import.rowsImported;
+                skipped += importPayload.import.rowsSkipped;
+              }
+            }
+            summary = `${summary} Se importaron ${imported} registros (${skipped} omitidos).`;
+          }
+        } catch {
+          summary = `${summary} No pude importar los datos automáticamente; usa Importar para hacerlo manualmente.`;
+        }
+      }
 
       updateSession(selectedSession.id, (session) => ({
         ...session,
@@ -1448,6 +2572,18 @@ export function ChatPanel({
       }));
 
       setActionFeedback(summary);
+      void fetch(`/api/workspaces/${workspaceSlug}/conversations/${selectedSession.id}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          role: "assistant",
+          content: summary,
+          metadata: {
+            origin: "schema_approval",
+            proposalId: proposal.proposalId,
+          },
+        }),
+      });
       router.refresh();
     } catch (caughtError) {
       const message =
@@ -1478,42 +2614,47 @@ export function ChatPanel({
     if (!trimmed || !selectedSession || !selectedAgent || isLoading) {
       return;
     }
+    if (selectedSession.agentPaused) {
+      setError("Modo humano activo: desactiva takeover para reanudar respuestas del agente.");
+      return;
+    }
 
     setIsLoading(true);
     setError(null);
+    const isWebLookup = composerMode === "web";
+    const isImageSearch = composerMode === "image_search";
+    const userContent = isWebLookup
+      ? `[Integrations] ${trimmed}`
+      : isImageSearch
+        ? `[Image search] ${trimmed}`
+        : trimmed;
 
     const userMessage: ChatMessage = {
       id: `user-${Date.now()}`,
       role: "user",
-      content: trimmed,
+      content: userContent,
       timestamp: currentTimeLabel(),
     };
     const assistantId = `assistant-${Date.now()}`;
     const assistantMessage: ChatMessage = {
       id: assistantId,
       role: "assistant",
-      content: "",
+      content: "Pensando…",
       timestamp: currentTimeLabel(),
       blocks: [],
     };
+    const isFirstExchange = selectedSession.messages.length === 0;
+    const fallbackTitle = trimmed.slice(0, 36);
 
     const optimisticMessages = [...selectedSession.messages, userMessage, assistantMessage];
     updateSession(selectedSession.id, (session) => ({
       ...session,
-      title: session.messages.length === 0 ? trimmed.slice(0, 36) : session.title,
       messages: optimisticMessages,
       updatedAt: new Date().toISOString(),
     }));
-    if (selectedSession.messages.length === 0) {
-      void fetch(`/api/workspaces/${workspaceSlug}/conversations/${selectedSession.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title: trimmed.slice(0, 36),
-        }),
-      });
-    }
     setInput("");
+    setComposerMode("chat");
+    setIsToolsOpen(false);
 
     try {
       const response = await fetch("/api/chat", {
@@ -1530,23 +2671,49 @@ export function ChatPanel({
             current_record_title: contextSummary.activeRecordName ?? null,
             queue_preview: contextSummary.queueTitles,
           },
+          toolIntent: isWebLookup
+            ? {
+                kind: "web_lookup",
+                mode: webCapabilityEnabled ? "web" : "none",
+                query: trimmed,
+              }
+            : isImageSearch
+              ? {
+                  kind: "image_search",
+                  mode: "web",
+                  query: trimmed,
+                }
+              : null,
           message: trimmed,
+          attachmentRefs: pendingAttachmentRefs.map((entry) => ({ kind: entry.kind, id: entry.id })),
         }),
       });
+      const attachmentRefsSnapshot = pendingAttachmentRefs.map((entry) => ({ kind: entry.kind, id: entry.id }));
+      const attachmentRecordIds = attachmentRefsSnapshot.filter((e) => e.kind === "record").map((e) => e.id);
+      const attachmentFolderIds = attachmentRefsSnapshot.filter((e) => e.kind === "folder").map((e) => e.id);
       void fetch(`/api/workspaces/${workspaceSlug}/conversations/${selectedSession.id}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           role: "user",
-          content: trimmed,
+          content: userContent,
           metadata: {
             origin: "workspace_chat",
+            composer_mode: isWebLookup ? "web" : isImageSearch ? "image_search" : "chat",
+            tool_intent: isWebLookup ? "web_lookup" : isImageSearch ? "image_search" : null,
+            // New shape: structured refs for records and folders.
+            attachment_refs: { records: attachmentRecordIds, folders: attachmentFolderIds },
+            // Back-compat: keep legacy flat list of record IDs for older readers.
+            attachment_record_ids: attachmentRecordIds,
+            attachment_folder_ids: attachmentFolderIds,
           },
         }),
       });
+      setPendingAttachmentRefs([]);
 
       if (!response.ok || !response.body) {
-        throw new Error("No se pudo conectar con el copilot.");
+        const failurePayload = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(failurePayload.error ?? "No se pudo conectar con el copilot.");
       }
 
       const reader = response.body.getReader();
@@ -1554,6 +2721,7 @@ export function ChatPanel({
       let buffer = "";
       let assistantContent = "";
       let assistantBlocks: ChatMessageBlock[] = [];
+      let receivedFirstDelta = false;
 
       while (true) {
         const { value, done } = await reader.read();
@@ -1574,7 +2742,22 @@ export function ChatPanel({
             content?: string;
             text?: string;
             error?: string;
-            proposal?: ChatSchemaProposal;
+            proposal?: ChatSchemaProposal | WriteProposalPayload;
+            id?: string;
+            name?: string;
+            toolName?: string;
+            confirmToken?: string;
+            expiresAt?: string | null;
+            result?: {
+              ok?: boolean;
+              error?: string;
+              data?: {
+                prompt?: string;
+                query?: string;
+                mode?: "search" | "generate" | "text2img" | "img2img";
+                candidates?: ImagePickerCandidate[];
+              };
+            };
           };
           try {
             payload = JSON.parse(raw) as typeof payload;
@@ -1589,27 +2772,36 @@ export function ChatPanel({
                 : "";
           if (payload.type === "delta" && deltaPiece) {
             assistantContent = `${assistantContent}${deltaPiece}`;
-            updateSession(selectedSession.id, (session) => ({
-              ...session,
-              messages: session.messages.map((message) =>
-                message.id === assistantId ? { ...message, content: `${message.content}${deltaPiece}` } : message,
-              ),
-              updatedAt: new Date().toISOString(),
-            }));
-          }
-
-          if (payload.type === "schema_proposal" && payload.proposal) {
+            const isFirstDelta = !receivedFirstDelta;
+            receivedFirstDelta = true;
             updateSession(selectedSession.id, (session) => ({
               ...session,
               messages: session.messages.map((message) =>
                 message.id === assistantId
                   ? {
                       ...message,
+                      content: isFirstDelta ? deltaPiece : `${message.content}${deltaPiece}`,
+                    }
+                  : message,
+              ),
+              updatedAt: new Date().toISOString(),
+            }));
+          }
+
+          if (payload.type === "schema_proposal" && payload.proposal) {
+            const schemaProposal = payload.proposal as ChatSchemaProposal;
+            updateSession(selectedSession.id, (session) => ({
+              ...session,
+              messages: session.messages.map((message) =>
+                message.id === assistantId
+                  ? {
+                      ...message,
+                      content: receivedFirstDelta ? message.content : "",
                       blocks: [
                         ...(message.blocks ?? []),
                         {
-                          kind: "schema_proposal",
-                          proposal: payload.proposal!,
+                          kind: "schema_proposal" as const,
+                          proposal: schemaProposal,
                         },
                       ],
                     }
@@ -1620,10 +2812,77 @@ export function ChatPanel({
             assistantBlocks = [
               ...assistantBlocks,
               {
-                kind: "schema_proposal",
-                proposal: payload.proposal,
+                kind: "schema_proposal" as const,
+                proposal: schemaProposal,
               },
             ];
+          }
+
+          if (
+            payload.type === "tool_result" &&
+            (payload.name === "images.search" || payload.name === "images.generate") &&
+            payload.result?.ok &&
+            payload.result.data &&
+            Array.isArray(payload.result.data.candidates) &&
+            payload.result.data.candidates.length > 0
+          ) {
+            const toolName = payload.name;
+            const data = payload.result.data;
+            const candidates: ImagePickerCandidate[] = Array.isArray(data.candidates) ? data.candidates : [];
+            const mode: "search" | "generate" = toolName === "images.search" ? "search" : "generate";
+            const pickerBlock: ImagePickerBlock = {
+              kind: "image_picker",
+              mode,
+              prompt:
+                (typeof data.prompt === "string" && data.prompt) ||
+                (typeof data.query === "string" && data.query) ||
+                "",
+              candidates,
+              recordId: null,
+              savedPath: null,
+              savedUrl: null,
+            };
+            updateSession(selectedSession.id, (session) => ({
+              ...session,
+              messages: session.messages.map((message) =>
+                message.id === assistantId
+                  ? {
+                      ...message,
+                      blocks: [...(message.blocks ?? []), pickerBlock],
+                    }
+                  : message,
+              ),
+              updatedAt: new Date().toISOString(),
+            }));
+            assistantBlocks = [...assistantBlocks, pickerBlock];
+          }
+
+          if (
+            payload.type === "write_proposal" &&
+            payload.proposal &&
+            typeof payload.confirmToken === "string" &&
+            (typeof payload.toolName === "string" || typeof payload.name === "string")
+          ) {
+            const toolName = (payload.toolName ?? payload.name) as string;
+            const proposal = payload.proposal as WriteProposalPayload;
+            const block: WriteProposalBlock = {
+              kind: "write_proposal",
+              toolName,
+              proposal,
+              confirmToken: payload.confirmToken,
+              expiresAt: payload.expiresAt ?? null,
+              state: "pending",
+            };
+            updateSession(selectedSession.id, (session) => ({
+              ...session,
+              messages: session.messages.map((message) =>
+                message.id === assistantId
+                  ? { ...message, blocks: [...(message.blocks ?? []), block] }
+                  : message,
+              ),
+              updatedAt: new Date().toISOString(),
+            }));
+            assistantBlocks = [...assistantBlocks, block];
           }
 
           if (payload.type === "error") {
@@ -1632,18 +2891,33 @@ export function ChatPanel({
         }
       }
 
+      if (!assistantContent.trim() && assistantBlocks.length === 0) {
+        const fallbackAssistantContent = "No recibi texto del agente. Intenta de nuevo en unos segundos.";
+        assistantContent = fallbackAssistantContent;
+        updateSession(selectedSession.id, (session) => ({
+          ...session,
+          messages: session.messages.map((message) =>
+            message.id === assistantId ? { ...message, content: fallbackAssistantContent } : message,
+          ),
+          updatedAt: new Date().toISOString(),
+        }));
+      }
+
       void fetch(`/api/workspaces/${workspaceSlug}/conversations/${selectedSession.id}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           role: "assistant",
-          content: assistantContent,
+          content: assistantContent || "Listo.",
           blocks: assistantBlocks,
           metadata: {
             origin: "workspace_chat",
           },
         }),
       });
+      if (isFirstExchange) {
+        void generateSessionTitle(selectedSession.id, fallbackTitle);
+      }
     } catch (caughtError) {
       const message = caughtError instanceof Error ? caughtError.message : "Error desconocido";
       setError(message);
@@ -1728,7 +3002,7 @@ export function ChatPanel({
         if (!response.ok) {
           throw new Error(data.error ?? "No se pudo ejecutar el escenario.");
         }
-        setActionFeedback(`Escenario en cola. Task creada: ${data.task?.id?.slice(0, 8) ?? "n/a"}…`);
+        setActionFeedback(`[Workspace action] Escenario en cola. Task creada: ${data.task?.id?.slice(0, 8) ?? "n/a"}…`);
         router.refresh();
         return;
       }
@@ -1747,8 +3021,8 @@ export function ChatPanel({
       }
       setActionFeedback(
         action === "bootstrap-crm"
-          ? "CRM inicial creado. Recarga el workspace para ver tablas, vistas y datos base."
-          : "Dashboard inicial creado. Regresa a Home para ver las nuevas tarjetas.",
+          ? "[Workspace action] CRM inicial creado. Recarga el workspace para ver tablas, vistas y datos base."
+          : "[Workspace action] Dashboard inicial creado. Regresa a Home para ver las nuevas tarjetas.",
       );
       router.refresh();
     } catch (caughtError) {
@@ -1773,7 +3047,7 @@ export function ChatPanel({
       if (!response.ok) {
         throw new Error(payload.error ?? "No se pudo definir el CEO principal.");
       }
-      setActionFeedback(`${selectedAgent.name} ahora es el CEO principal del workspace.`);
+      setActionFeedback(`[Workspace action] ${selectedAgent.name} ahora es el CEO principal del workspace.`);
       router.refresh();
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "No se pudo definir el CEO principal.");
@@ -1781,20 +3055,22 @@ export function ChatPanel({
   }
 
   return (
-    <div style={stackStyle}>
-      <Panel
-        eyebrow="Chat"
-        title="Chat con agentes"
-        description="Conversaciones separadas por usuario, con CEO principal por defecto."
-      >
-        {!selectedAgent ? (
-          <EmptyState
-            icon={Bot}
-            title="No hay agentes disponibles"
-            description="Crea o activa un agente para usar el chat del workspace."
-          />
-        ) : (
-          <div style={chatLayoutStyle}>
+    <div style={chatWorkspaceShellStyle}>
+      <header style={chatWorkspaceHeaderStyle}>
+        <p style={eyebrowStyle}>Chat</p>
+        <div>
+          <h2 style={panelTitleStyle}>Chat con agentes</h2>
+          <p style={panelDescriptionStyle}>Conversaciones separadas por usuario, con CEO principal por defecto.</p>
+        </div>
+      </header>
+      {!selectedAgent ? (
+        <EmptyState
+          icon={Bot}
+          title="No hay agentes disponibles"
+          description="Crea o activa un agente para usar el chat del workspace."
+        />
+      ) : (
+        <div style={chatLayoutStyle}>
             <div style={chatSidebarStyle}>
               <div style={chatSidebarHeaderStyle}>
                 <div>
@@ -1869,10 +3145,52 @@ export function ChatPanel({
               <div style={chatHeaderStyle}>
                 <div>
                   <p style={eyebrowStyle}>Conversación actual</p>
-                  <h3 style={chatTitleStyle}>{selectedSession?.title ?? "Nuevo chat"}</h3>
+                  <div style={chatTitleRowStyle}>
+                    {isEditingTitle ? (
+                      <input
+                        ref={titleInputRef}
+                        value={titleDraft}
+                        onChange={(event) => setTitleDraft(event.target.value)}
+                        onBlur={() => void commitTitleEditing()}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            void commitTitleEditing();
+                          }
+                          if (event.key === "Escape") {
+                            event.preventDefault();
+                            cancelTitleEditing();
+                          }
+                        }}
+                        style={chatInlineTitleInputStyle}
+                        aria-label="Renombrar conversación actual"
+                      />
+                    ) : (
+                      <h3 style={chatTitleStyle}>{selectedSession?.title ?? "Nuevo chat"}</h3>
+                    )}
+                    <button
+                      type="button"
+                      style={chatTitleEditButtonStyle}
+                      onMouseDown={(event) => {
+                        if (isEditingTitle) {
+                          event.preventDefault();
+                        }
+                      }}
+                      onClick={() => {
+                        if (isEditingTitle) {
+                          void commitTitleEditing();
+                          return;
+                        }
+                        startTitleEditing();
+                      }}
+                      disabled={!selectedSession}
+                      aria-label={isEditingTitle ? "Guardar título de conversación" : "Editar título de conversación"}
+                    >
+                      {isEditingTitle ? "OK" : <Pencil size={14} />}
+                    </button>
+                  </div>
                 </div>
                 <div style={chatSessionMetaRowStyle}>
-                  <StatusPill tone={selectedAgent.status.toLowerCase()}>{selectedAgent.status}</StatusPill>
                   <StatusPill tone={selectedAgent.type === "copilot" ? "active" : "neutral"}>
                     {selectedAgent.type === "copilot"
                       ? selectedAgent.isPrimaryCopilot
@@ -1882,43 +3200,171 @@ export function ChatPanel({
                         ? "Canal"
                         : "Worker"}
                   </StatusPill>
-                  <StatusPill tone={selectedAgent.readinessState === "ready" ? "active" : "pending"}>
-                    {selectedAgent.readinessState === "ready" ? "Listo" : "Draft"}
-                  </StatusPill>
+                  {selectedSession?.agentPaused ? <StatusPill tone="warning">Humano al mando</StatusPill> : null}
+                  <div ref={documentsFinderRef} style={{ position: "relative" }}>
+                    <button
+                      type="button"
+                      style={documentsFinderTriggerStyle}
+                      onClick={() => {
+                        setIsDocumentsFinderOpen((current) => !current);
+                        if (!isDocumentsFinderOpen) {
+                          void loadWorkspaceDocuments();
+                        }
+                      }}
+                      aria-label="Abrir buscador de documentos"
+                    >
+                      <FileStack size={12} />
+                      <span>Documentos</span>
+                    </button>
+                    {isDocumentsFinderOpen ? (
+                      <div style={documentsFinderPopoverStyle}>
+                        <input
+                          type="search"
+                          value={documentsFinderQuery}
+                          onChange={(event) => setDocumentsFinderQuery(event.target.value)}
+                          placeholder="Buscar documento..."
+                          style={documentsFinderSearchStyle}
+                          autoFocus
+                        />
+                        <div style={documentsFinderListStyle}>
+                          {(() => {
+                            const query = documentsFinderQuery.trim().toLowerCase();
+                            const attachmentIds = new Set(
+                              (selectedSession?.attachments ?? []).map((entry) => entry.id),
+                            );
+                            const pendingFolderIds = new Set(
+                              pendingAttachmentRefs
+                                .filter((entry) => entry.kind === "folder")
+                                .map((entry) => entry.id),
+                            );
+                            const sessionDocs = workspaceDocuments.filter((doc) => attachmentIds.has(doc.id));
+                            const otherDocs = workspaceDocuments.filter((doc) => !attachmentIds.has(doc.id));
+                            const matches = (doc: typeof workspaceDocuments[number]) =>
+                              !query || doc.fileName.toLowerCase().includes(query);
+                            const sessionVisible = sessionDocs.filter(matches);
+                            const otherVisible = otherDocs.filter(matches);
+                            const folderVisible = workspaceFolders
+                              .filter((folder) => !pendingFolderIds.has(folder.id))
+                              .filter((folder) => !query || folder.name.toLowerCase().includes(query));
+                            const renderRow = (doc: typeof workspaceDocuments[number]) => (
+                              <button
+                                key={doc.id}
+                                type="button"
+                                style={documentsFinderRowStyle}
+                                onClick={() => {
+                                  addPendingRecordRef(doc.id);
+                                  setIsDocumentsFinderOpen(false);
+                                }}
+                                title={doc.fileName}
+                              >
+                                <FileStack size={14} />
+                                <span style={documentsFinderRowNameStyle}>{doc.fileName}</span>
+                                <span style={documentsFinderRowMetaStyle}>
+                                  {doc.fileKind === "spreadsheet"
+                                    ? "Hoja"
+                                    : doc.fileKind === "pdf"
+                                      ? "PDF"
+                                      : doc.fileKind === "image"
+                                        ? "Imagen"
+                                        : "Doc"}
+                                </span>
+                              </button>
+                            );
+                            const renderFolderRow = (folder: typeof workspaceFolders[number]) => (
+                              <button
+                                key={`folder:${folder.id}`}
+                                type="button"
+                                style={documentsFinderRowStyle}
+                                onClick={() => {
+                                  addPendingFolderRef({
+                                    id: folder.id,
+                                    name: folder.name,
+                                    fileCount: folder.fileCount,
+                                  });
+                                  setIsDocumentsFinderOpen(false);
+                                }}
+                                title={folder.name}
+                              >
+                                <span aria-hidden>📁</span>
+                                <span style={documentsFinderRowNameStyle}>{folder.name}</span>
+                                <span style={documentsFinderRowMetaStyle}>
+                                  {folder.fileCount} {folder.fileCount === 1 ? "archivo" : "archivos"}
+                                </span>
+                              </button>
+                            );
+                            if (
+                              isDocumentsLoading
+                              && workspaceDocuments.length === 0
+                              && workspaceFolders.length === 0
+                            ) {
+                              return (
+                                <p style={{ margin: 0, padding: 12, fontSize: 12, color: "var(--workspace-muted)" }}>
+                                  Cargando documentos...
+                                </p>
+                              );
+                            }
+                            if (workspaceDocuments.length === 0 && workspaceFolders.length === 0) {
+                              return (
+                                <p style={{ margin: 0, padding: 12, fontSize: 12, color: "var(--workspace-muted)" }}>
+                                  Aún no hay documentos en este workspace.
+                                </p>
+                              );
+                            }
+                            return (
+                              <>
+                                {folderVisible.length > 0 ? (
+                                  <>
+                                    <p style={documentsFinderSectionTitleStyle}>Carpetas</p>
+                                    {folderVisible.map(renderFolderRow)}
+                                  </>
+                                ) : null}
+                                {sessionVisible.length > 0 ? (
+                                  <>
+                                    <p style={documentsFinderSectionTitleStyle}>En este chat</p>
+                                    {sessionVisible.map(renderRow)}
+                                  </>
+                                ) : null}
+                                {otherVisible.length > 0 ? (
+                                  <>
+                                    <p style={documentsFinderSectionTitleStyle}>Workspace</p>
+                                    {otherVisible.map(renderRow)}
+                                  </>
+                                ) : null}
+                                {sessionVisible.length === 0
+                                && otherVisible.length === 0
+                                && folderVisible.length === 0 ? (
+                                  <p style={{ margin: 0, padding: 12, fontSize: 12, color: "var(--workspace-muted)" }}>
+                                    Ningún documento coincide con tu búsqueda.
+                                  </p>
+                                ) : null}
+                              </>
+                            );
+                          })()}
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
                 </div>
               </div>
 
-              <div style={chatRenameRowStyle}>
-                <input
-                  value={renameDraft}
-                  onChange={(event) => setRenameDraft(event.target.value)}
-                  onBlur={() => selectedSession && void renameSession(selectedSession.id, renameDraft)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      event.preventDefault();
-                      if (selectedSession) void renameSession(selectedSession.id, renameDraft);
-                    }
-                  }}
-                  style={chatRenameInputStyle}
-                  aria-label="Renombrar conversación actual"
-                />
-                <label style={chatUploadLabelStyle}>
-                  {isUploading ? "Subiendo..." : "Subir documento"}
-                  <input
-                    type="file"
-                    hidden
-                    onChange={(event) => {
-                      const file = event.target.files?.[0];
-                      if (file) {
-                        void uploadDocument(file);
-                      }
-                      event.currentTarget.value = "";
-                    }}
-                  />
-                </label>
-              </div>
+              {SHOW_HUMAN_TAKEOVER_BUTTON ? (
+                <div style={chatTakeoverRowStyle}>
+                  <button
+                    type="button"
+                    style={chatActionButtonStyle}
+                    onClick={() => void toggleHumanTakeover(!(selectedSession?.agentPaused ?? false))}
+                    disabled={!selectedSession || isTogglingTakeover}
+                  >
+                    {isTogglingTakeover
+                      ? "Actualizando..."
+                      : selectedSession?.agentPaused
+                        ? "Reanudar agente"
+                        : "Tomar control humano"}
+                  </button>
+                </div>
+              ) : null}
 
-              <div style={chatMessagesStyle}>
+              <div ref={chatMessagesRef} className="workspace-chat-messages" style={chatMessagesStyle}>
                 {selectedSession?.messages.length ? (
                   selectedSession.messages.map((message) => (
                     <div
@@ -1931,8 +3377,217 @@ export function ChatPanel({
                         color: message.role === "user" ? "#fff" : "var(--workspace-text)",
                       }}
                     >
-                      <p style={{ margin: 0, whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{message.content || "..."}</p>
+                      {message.role === "assistant" ? (
+                        <div style={assistantMessageContentStyle}>
+                          {renderAssistantMessageContent(message.content || "...")}
+                        </div>
+                      ) : (
+                        <p style={{ margin: 0, whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{message.content || "..."}</p>
+                      )}
+                      {Array.isArray(message.attachments) && message.attachments.length > 0 ? (
+                        <div style={chatAttachmentPillRowStyle}>
+                          {(message.attachments as Array<{ id?: string; fileName?: string; publicUrl?: string; fileKind?: DocumentPreview["kind"] }>).map((attachment, index) => {
+                            const attachmentId = typeof attachment?.id === "string" ? attachment.id : `${message.id}-att-${index}`;
+                            const fileName = typeof attachment?.fileName === "string" ? attachment.fileName : "Archivo";
+                            return (
+                              <button
+                                key={attachmentId}
+                                type="button"
+                                style={chatAttachmentPillStyle}
+                                onClick={() => {
+                                  setDocumentsFinderQuery(fileName);
+                                  setIsDocumentsFinderOpen(true);
+                                }}
+                                title={fileName}
+                              >
+                                <FileStack size={12} />
+                                <span style={chatAttachmentPillLabelStyle}>{fileName}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ) : null}
                       {message.blocks?.map((block, blockIndex) => {
+                        if (block.kind === "document_actions") {
+                          const firstSheet = block.preview?.sheets?.[0];
+                          const sheetHeaders = firstSheet?.headers ?? [];
+                          const headerCount = sheetHeaders.length;
+                          const sheetRowCount = firstSheet?.rowCount ?? 0;
+                          const kindLabel =
+                            block.fileKind === "spreadsheet"
+                              ? "Hoja de cálculo"
+                              : block.fileKind === "pdf"
+                                ? "PDF"
+                                : block.fileKind === "image"
+                                  ? "Imagen"
+                                  : "Documento";
+                          return (
+                            <div
+                              key={`${message.id}-doc-${block.recordId}-${blockIndex}`}
+                              style={documentActionsCardStyle}
+                            >
+                              <div style={documentActionsHeaderStyle}>
+                                <div style={documentActionsFileStyle}>
+                                  <FileStack size={14} />
+                                  <span style={documentActionsFileNameStyle} title={block.fileName}>
+                                    {block.fileName}
+                                  </span>
+                                </div>
+                                <span style={documentActionsKindStyle}>{kindLabel}</span>
+                              </div>
+
+                              {block.fileKind === "spreadsheet" && headerCount > 0 ? (
+                                <div style={documentActionsStatsRowStyle}>
+                                  <span>
+                                    <strong>{headerCount}</strong> columna{headerCount === 1 ? "" : "s"}
+                                  </span>
+                                  <span style={documentActionsDotStyle} />
+                                  <span>
+                                    <strong>{sheetRowCount}</strong> fila{sheetRowCount === 1 ? "" : "s"}
+                                  </span>
+                                  {firstSheet?.name ? (
+                                    <>
+                                      <span style={documentActionsDotStyle} />
+                                      <span>hoja &quot;{firstSheet.name}&quot;</span>
+                                    </>
+                                  ) : null}
+                                </div>
+                              ) : null}
+
+                              {block.fileKind === "spreadsheet" && headerCount > 0 ? (
+                                <div style={documentActionsColumnsBlockStyle}>
+                                  <p style={documentActionsColumnsLabelStyle}>Columnas detectadas</p>
+                                  <div style={documentActionsColumnsRowStyle}>
+                                    {sheetHeaders.slice(0, 12).map((header) => (
+                                      <span key={header} style={documentActionsColumnChipStyle} title={header}>
+                                        {header}
+                                      </span>
+                                    ))}
+                                    {headerCount > 12 ? (
+                                      <span style={documentActionsMoreLabelStyle}>+{headerCount - 12} más</span>
+                                    ) : null}
+                                  </div>
+                                </div>
+                              ) : (
+                                <p style={{ margin: 0, fontSize: 13, color: "var(--workspace-text)" }}>
+                                  {block.summary}
+                                </p>
+                              )}
+
+                              <div style={documentActionsButtonsRowStyle}>
+                                {block.actions.map((action) => {
+                                  const isWorking = block.resolutionState === "working" && block.resolvedAction === action.id;
+                                  const isDone = block.resolutionState === "done" && block.resolvedAction === action.id;
+                                  return (
+                                    <button
+                                      key={action.id}
+                                      type="button"
+                                      style={{
+                                        ...chatActionButtonStyle,
+                                        opacity: block.resolutionState === "working" && !isWorking ? 0.55 : 1,
+                                      }}
+                                      disabled={block.resolutionState === "working" && !isWorking}
+                                      onClick={() => void handleDocumentAction(message.id, block, action.id)}
+                                    >
+                                      {isWorking ? "Procesando..." : isDone ? `✓ ${action.label}` : action.label}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                              {block.resolutionMessage ? (
+                                <p style={{ margin: 0, fontSize: 12, color: block.resolutionState === "failed" ? "#b42318" : "var(--workspace-muted)" }}>
+                                  {block.resolutionMessage}
+                                </p>
+                              ) : null}
+                            </div>
+                          );
+                        }
+                        if (block.kind === "image_picker") {
+                          return (
+                            <div
+                              key={`${message.id}-images-${blockIndex}`}
+                              style={{ marginTop: 12 }}
+                            >
+                              <ImagePickerCard
+                                workspaceSlug={workspaceSlug}
+                                mode={block.mode}
+                                prompt={block.prompt}
+                                candidates={block.candidates}
+                                recordId={block.recordId ?? undefined}
+                                conversationId={selectedSession.runtimeConversationId}
+                                onSaved={(result) => {
+                                  updateSession(selectedSession.id, (session) => ({
+                                    ...session,
+                                    messages: session.messages.map((entry) =>
+                                      entry.id === message.id
+                                        ? {
+                                            ...entry,
+                                            blocks: (entry.blocks ?? []).map((existing, existingIndex) =>
+                                              existingIndex === blockIndex && existing.kind === "image_picker"
+                                                ? {
+                                                    ...existing,
+                                                    savedPath: result.path ?? null,
+                                                    savedUrl: result.signedUrl ?? result.publicUrl ?? null,
+                                                  }
+                                                : existing,
+                                            ),
+                                          }
+                                        : entry,
+                                    ),
+                                    updatedAt: new Date().toISOString(),
+                                  }));
+                                }}
+                              />
+                            </div>
+                          );
+                        }
+                        if (block.kind === "write_proposal") {
+                          const targetMessageId = message.id;
+                          const targetBlockIndex = blockIndex;
+                          const markState = (nextState: WriteProposalBlock["state"]) => {
+                            updateSession(selectedSession.id, (session) => ({
+                              ...session,
+                              messages: session.messages.map((entry) =>
+                                entry.id === targetMessageId
+                                  ? {
+                                      ...entry,
+                                      blocks: (entry.blocks ?? []).map((existing, existingIndex) =>
+                                        existingIndex === targetBlockIndex && existing.kind === "write_proposal"
+                                          ? { ...existing, state: nextState }
+                                          : existing,
+                                      ),
+                                    }
+                                  : entry,
+                              ),
+                              updatedAt: new Date().toISOString(),
+                            }));
+                          };
+                          const submitFollowUp = (text: string) => {
+                            setInput(text);
+                            requestAnimationFrame(() => {
+                              void sendMessage();
+                            });
+                          };
+                          return (
+                            <div key={`${message.id}-write-${blockIndex}`}>
+                              <WriteProposalCard
+                                toolName={block.toolName}
+                                proposal={block.proposal}
+                                confirmToken={block.confirmToken}
+                                expiresAt={block.expiresAt ?? null}
+                                state={block.state}
+                                onConfirm={(text) => {
+                                  markState("confirmed");
+                                  submitFollowUp(text);
+                                }}
+                                onCancel={(text) => {
+                                  markState("cancelled");
+                                  submitFollowUp(text);
+                                }}
+                              />
+                            </div>
+                          );
+                        }
                         if (block.kind !== "schema_proposal") {
                           return null;
                         }
@@ -2002,7 +3657,7 @@ export function ChatPanel({
                                 type="button"
                                 style={chatActionButtonStyle}
                                 disabled={!canApprove}
-                                onClick={() => void approveSchemaProposal(message.id, block.proposal)}
+                                onClick={() => void approveSchemaProposal(message.id, block.proposal, block.documentRecordId ?? null)}
                               >
                                 {isApplying
                                   ? "Aplicando..."
@@ -2043,6 +3698,15 @@ export function ChatPanel({
                         </span>
                       ))}
                     </div>
+
+                    <div style={chatModeHintRowStyle}>
+                      <span style={chatModeChipStyle}>Ingest data {ingestionCapabilityEnabled ? "✓" : "•"}</span>
+                      <span style={chatModeChipStyle}>Integrations {integrationsCapabilityEnabled ? "✓" : "pendiente"}</span>
+                      <span style={chatModeChipStyle}>Workspace actions {workspaceActionCapabilityEnabled ? "✓" : "•"}</span>
+                    </div>
+                    <p style={chatEmptyCopyStyle}>
+                      Usa el chat para tres frentes: ingestar datos (docs/sheets), ejecutar acciones del workspace y, cuando el agente lo permita, correr integraciones externas.
+                    </p>
 
                     <div style={chatEmptySectionStyle}>
                       <p style={chatEmptySectionTitleStyle}>Sugerido</p>
@@ -2098,552 +3762,421 @@ export function ChatPanel({
                 )}
               </div>
 
-              {selectedSession?.attachments.length ? (
-                <div style={chatAttachmentListStyle}>
-                  {selectedSession.attachments.map((attachment) => (
-                    <a
-                      key={attachment.id}
-                      href={attachment.publicUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      style={chatAttachmentCardStyle}
-                    >
-                      <div>
-                        <strong style={chatAttachmentTitleStyle}>{attachment.fileName}</strong>
-                        <p style={chatAttachmentMetaStyle}>Registro en documentos · {attachment.id.slice(0, 8)}…</p>
-                      </div>
-                      <ArrowRight size={16} color="var(--workspace-muted)" />
-                    </a>
-                  ))}
-                </div>
-              ) : null}
 
-              <div style={chatComposerStyle}>
-                <textarea
-                  value={input}
-                  onChange={(event) => setInput(event.target.value)}
-                  placeholder={`Escribe una pregunta para ${selectedAgent.name}...`}
-                  rows={4}
-                  style={chatTextareaStyle}
-                />
-                <div style={chatComposerFooterStyle}>
-                  <button type="button" onClick={sendMessage} disabled={isLoading || !input.trim()} style={chatSendButtonStyle}>
-                    {isLoading ? <LoaderCircle size={16} className="workspace-spin" /> : "Enviar"}
-                  </button>
+              <div style={workspaceChatComposerColumnStyle}>
+                <div style={workspaceChatComposerShellStyle}>
+                  <div style={workspaceChatComposerModesRowStyle}>
+                    <button
+                      type="button"
+                      style={composerMode === "chat" ? workspaceChatModeButtonActiveStyle : workspaceChatModeButtonStyle}
+                      onClick={() => setComposerMode("chat")}
+                    >
+                      Workspace actions
+                    </button>
+                    <button
+                      type="button"
+                      style={composerMode === "web" ? workspaceChatModeButtonActiveStyle : workspaceChatModeButtonStyle}
+                      onClick={enableWebLookupMode}
+                      disabled={!webCapabilityEnabled}
+                      title={
+                        webCapabilityEnabled
+                          ? "Modo integraciones web"
+                          : "Este agente no tiene web/browser habilitado"
+                      }
+                    >
+                      Integrations
+                    </button>
+                    <button
+                      type="button"
+                      style={workspaceChatModeButtonStyle}
+                      onClick={() =>
+                        handleToolPrompt(
+                          "Subi un documento y ayudame a validarlo, estructurarlo y vincularlo al record correcto.",
+                          "chat",
+                        )
+                      }
+                    >
+                      Ingest data
+                    </button>
+                  </div>
+                  {pendingAttachmentRefs.length > 0 ? (
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 6 }}>
+                      {pendingAttachmentRefs.map((ref) => {
+                        let label: string;
+                        let prefix: string;
+                        if (ref.kind === "folder") {
+                          label = `${ref.name} (${ref.fileCount} archivos)`;
+                          prefix = "📁 ";
+                        } else {
+                          const doc = workspaceDocuments.find((entry) => entry.id === ref.id);
+                          label = doc?.fileName ?? ref.id.slice(0, 8);
+                          prefix = "@";
+                        }
+                        const key = `${ref.kind}:${ref.id}`;
+                        return (
+                          <span
+                            key={key}
+                            style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              gap: 6,
+                              padding: "4px 8px",
+                              borderRadius: 999,
+                              background: "rgba(51, 92, 255, 0.12)",
+                              border: "1px solid rgba(51, 92, 255, 0.22)",
+                              color: "var(--workspace-text)",
+                              fontSize: 12,
+                            }}
+                            title={`Referenciado: ${label}`}
+                          >
+                            {prefix}{label}
+                            <button
+                              type="button"
+                              onClick={() =>
+                                removePendingRef((entry) => entry.kind === ref.kind && entry.id === ref.id)
+                              }
+                              aria-label="Quitar referencia"
+                              style={{
+                                all: "unset",
+                                cursor: "pointer",
+                                fontSize: 12,
+                                lineHeight: 1,
+                                padding: "0 2px",
+                              }}
+                            >
+                              ×
+                            </button>
+                          </span>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+                  <div style={workspaceChatTextareaRowStyle}>
+                    <textarea
+                      ref={composerTextareaRef}
+                      value={input}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        setInput(value);
+                        const cursor = event.target.selectionStart ?? value.length;
+                        const before = value.slice(0, cursor);
+                        const atIndex = before.lastIndexOf("@");
+                        if (atIndex >= 0) {
+                          const precedingChar = atIndex === 0 ? "" : before.charAt(atIndex - 1);
+                          const fragment = before.slice(atIndex + 1);
+                          const hasWhitespace = /\s/.test(fragment);
+                          if (!hasWhitespace && (precedingChar === "" || /\s/.test(precedingChar))) {
+                            setMentionPickerState({ open: true, query: fragment, triggerIndex: atIndex });
+                            if (workspaceDocuments.length === 0) {
+                              void loadWorkspaceDocuments();
+                            }
+                            return;
+                          }
+                        }
+                        if (mentionPickerState.open) {
+                          setMentionPickerState({ open: false, query: "", triggerIndex: -1 });
+                        }
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Escape" && mentionPickerState.open) {
+                          event.preventDefault();
+                          setMentionPickerState({ open: false, query: "", triggerIndex: -1 });
+                          return;
+                        }
+                        if (event.key !== "Enter") {
+                          return;
+                        }
+                        if (event.shiftKey) {
+                          return;
+                        }
+                        if (mentionPickerState.open) {
+                          return;
+                        }
+                        event.preventDefault();
+                        void sendMessage();
+                      }}
+                      placeholder={
+                        composerMode === "web"
+                          ? `Consulta web para ${selectedAgent.name} (integrations)...`
+                          : composerMode === "image_search"
+                            ? `Describe la imagen que buscas (ej. "2025 Ford Bronco Sport Outer Banks press photo")...`
+                            : `Escribe una pregunta para ${selectedAgent.name} (usa @ para referenciar documentos)...`
+                      }
+                      rows={2}
+                      style={workspaceChatTextareaCompactStyle}
+                    />
+                    {mentionPickerState.open ? (
+                      <div
+                        style={{
+                          position: "absolute",
+                          bottom: "calc(100% + 6px)",
+                          left: 0,
+                          width: "min(420px, 96%)",
+                          maxHeight: 260,
+                          overflow: "auto",
+                          background: "var(--workspace-panel)",
+                          border: "1px solid var(--workspace-border)",
+                          borderRadius: 12,
+                          padding: 6,
+                          boxShadow: "0 12px 28px rgba(15, 23, 42, 0.14)",
+                          zIndex: 80,
+                        }}
+                      >
+                        {(() => {
+                          const q = mentionPickerState.query.toLowerCase();
+                          const matches = workspaceDocuments
+                            .filter((doc) => !q || doc.fileName.toLowerCase().includes(q))
+                            .slice(0, 8);
+                          if (matches.length === 0) {
+                            return (
+                              <p style={{ margin: 0, padding: 10, fontSize: 12, color: "var(--workspace-muted)" }}>
+                                {isDocumentsLoading ? "Cargando documentos..." : "Sin coincidencias."}
+                              </p>
+                            );
+                          }
+                          return matches.map((doc) => (
+                            <button
+                              key={doc.id}
+                              type="button"
+                              style={documentsFinderRowStyle}
+                              onClick={() => {
+                                const trigger = mentionPickerState.triggerIndex;
+                                if (trigger < 0) return;
+                                const before = input.slice(0, trigger);
+                                const afterCursor = input.slice(
+                                  composerTextareaRef.current?.selectionStart ?? input.length,
+                                );
+                                const token = `@${doc.fileName} `;
+                                const nextValue = `${before}${token}${afterCursor}`;
+                                setInput(nextValue);
+                                addPendingRecordRef(doc.id);
+                                setMentionPickerState({ open: false, query: "", triggerIndex: -1 });
+                                window.requestAnimationFrame(() => {
+                                  const textarea = composerTextareaRef.current;
+                                  if (textarea) {
+                                    const caret = before.length + token.length;
+                                    textarea.focus();
+                                    textarea.setSelectionRange(caret, caret);
+                                  }
+                                });
+                              }}
+                            >
+                              <FileStack size={14} />
+                              <span style={documentsFinderRowNameStyle}>{doc.fileName}</span>
+                              <span style={documentsFinderRowMetaStyle}>
+                                {doc.fileKind === "spreadsheet"
+                                  ? "Hoja"
+                                  : doc.fileKind === "pdf"
+                                    ? "PDF"
+                                    : doc.fileKind === "image"
+                                      ? "Imagen"
+                                      : "Doc"}
+                              </span>
+                            </button>
+                          ));
+                        })()}
+                      </div>
+                    ) : null}
+                  </div>
+                  <div style={workspaceChatBottomRowStyle}>
+                    <div ref={toolsMenuRef} style={workspaceChatToolsLeftStyle}>
+                      <button
+                        type="button"
+                        style={{
+                          ...homeToolButtonIconStyle,
+                          opacity: isUploading ? 0.62 : 1,
+                          cursor: isUploading ? "wait" : "pointer",
+                        }}
+                        onClick={openUploadPicker}
+                        aria-label={isUploading ? "Subiendo documento" : "Subir documento"}
+                      >
+                        {isUploading ? <LoaderCircle size={14} className="workspace-spin" /> : <Plus size={14} />}
+                      </button>
+                      <button
+                        type="button"
+                        style={
+                          composerMode === "image_search"
+                            ? { ...homeToolButtonIconStyle, background: "rgba(51, 92, 255, 0.18)", borderColor: "rgba(51, 92, 255, 0.45)" }
+                            : homeToolButtonIconStyle
+                        }
+                        aria-label={
+                          composerMode === "image_search"
+                            ? "Salir de búsqueda de imágenes"
+                            : "Buscar imágenes en la web (SerpAPI)"
+                        }
+                        onClick={enableImageSearchMode}
+                        title={
+                          composerMode === "image_search"
+                            ? "Búsqueda de imágenes activa — escribe qué buscar y envía"
+                            : "Buscar imágenes en la web (SerpAPI)"
+                        }
+                      >
+                        <Globe size={14} />
+                      </button>
+                      <button type="button" style={chatToolButtonLabelStyle} onClick={() => setIsToolsOpen((current) => !current)}>
+                        Tools
+                      </button>
+                      {isToolsOpen ? (
+                        <div style={chatToolsPopoverStyle}>
+                          <p style={chatToolsSectionTitleStyle}>Tools de {selectedAgent.name}</p>
+                          <div style={chatToolsTokenWrapStyle}>
+                            {(selectedAgent.skills ?? []).length > 0 ? (
+                              selectedAgent.skills.map((skill) => (
+                                <span key={skill} style={chatToolsTokenStyle}>
+                                  {skill}
+                                </span>
+                              ))
+                            ) : (
+                              <span style={chatToolsMutedCopyStyle}>Sin tools declarados en este agente.</span>
+                            )}
+                          </div>
+                          <p style={chatToolsSectionTitleStyle}>Acciones rápidas</p>
+                          <div style={chatToolsActionListStyle}>
+                            <button
+                              type="button"
+                              style={chatToolsActionButtonStyle}
+                              onClick={() =>
+                                handleToolPrompt(
+                                  "Crea un lead en Deals con solo el nombre y dime que datos opcionales faltan.",
+                                  "chat",
+                                )
+                              }
+                            >
+                              Insertar prompt: crear lead
+                            </button>
+                            <button
+                              type="button"
+                              style={chatToolsActionButtonStyle}
+                              onClick={() =>
+                                handleToolPrompt(
+                                  "Busca en la web cambios recientes de mi industria y resume riesgos y oportunidades para esta semana.",
+                                  "web",
+                                )
+                              }
+                              disabled={!webCapabilityEnabled}
+                            >
+                              Insertar prompt web
+                            </button>
+                            <button
+                              type="button"
+                              style={chatToolsActionButtonStyle}
+                              onClick={() => runQuickActionFromTools("bootstrap-crm")}
+                            >
+                              Ejecutar: crear CRM base
+                            </button>
+                            <button
+                              type="button"
+                              style={chatToolsActionButtonStyle}
+                              onClick={() => runQuickActionFromTools("scenario-close-import")}
+                            >
+                              Ejecutar: escenario close import
+                            </button>
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+                    <div style={workspaceChatComposerFooterRightStyle}>
+                      <button type="button" style={chatToolButtonDisabledStyle} disabled aria-label="Micrófono (próximamente)">
+                        <Mic size={14} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={sendMessage}
+                        disabled={isLoading || !input.trim()}
+                        style={{
+                          ...homeChatButtonStyle,
+                          opacity: isLoading || !input.trim() ? 0.62 : 1,
+                          cursor: isLoading || !input.trim() ? "not-allowed" : "pointer",
+                        }}
+                        aria-label="Enviar mensaje"
+                      >
+                        {isLoading ? <LoaderCircle size={14} className="workspace-spin" /> : <ArrowUp size={14} />}
+                      </button>
+                    </div>
+                  </div>
                 </div>
+                <input
+                  ref={uploadInputRef}
+                  type="file"
+                  hidden
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (file) {
+                      void uploadDocument(file);
+                    }
+                    event.currentTarget.value = "";
+                  }}
+                />
                 {actionFeedback ? <p style={inlineSuccessStyle}>{actionFeedback}</p> : null}
                 {error ? <p style={chatErrorStyle}>{error}</p> : null}
               </div>
             </div>
           </div>
         )}
-      </Panel>
-    </div>
-  );
-}
-
-function BaseDataPanel({
-  objects,
-  fields,
-  views,
-  records,
-  workspaceSlug,
-  currentRole,
-  initialObjectId,
-  initialViewId,
-  recordBaseHref,
-  askHref,
-}: DataPanelProps) {
-  const [selectedObjectId, setSelectedObjectId] = useState<string>(initialObjectId ?? objects[0]?.id ?? "");
-  const [selectedViewId, setSelectedViewId] = useState<string>(initialViewId ?? "all");
-  const [viewMode, setViewMode] = useState<"table" | "board">("table");
-  const [query, setQuery] = useState("");
-  const [localRecords, setLocalRecords] = useState<PrismaWorkspaceRecord[]>(records);
-  const [draggingRecordId, setDraggingRecordId] = useState<string | null>(null);
-  const [isCreateOpen, setIsCreateOpen] = useState(false);
-  const [isCreatingRecord, setIsCreatingRecord] = useState(false);
-  const [recordDraft, setRecordDraft] = useState<Record<string, unknown>>({});
-  const [editingCell, setEditingCell] = useState<{ recordId: string; fieldKey: string } | null>(null);
-  const [editingValue, setEditingValue] = useState<unknown>("");
-  const [isSavingCell, setIsSavingCell] = useState(false);
-  const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
-  const [isDeletingRecord, setIsDeletingRecord] = useState(false);
-  const [tableError, setTableError] = useState("");
-  const [tableSuccess, setTableSuccess] = useState("");
-
-  const canWrite = currentRole === "admin" || currentRole === "operator";
-  const object = objects.find((entry) => entry.id === selectedObjectId) ?? objects[0] ?? null;
-  const objectFields = fields
-    .filter((field) => field.objectId === object?.id)
-    .sort((left, right) => left.sortOrder - right.sortOrder);
-  const objectViews = views.filter((view) => view.objectId === object?.id);
-  const currentView = selectedViewId === "all" ? null : objectViews.find((view) => view.id === selectedViewId) ?? null;
-  const scopedRecords = localRecords.filter((record) => record.objectId === object?.id);
-  const visibleRecords = applyViewToRecords(scopedRecords, currentView).filter((record) =>
-    query.trim()
-      ? Object.values(record.data).some((value) =>
-          String(value ?? "")
-            .toLowerCase()
-            .includes(query.trim().toLowerCase()),
-        )
-      : true,
-  );
-  const boardGroupField =
-    (currentView?.groupByFieldId
-      ? objectFields.find(
-          (field) =>
-            field.id === currentView.groupByFieldId &&
-            (field.type === "status" || field.type === "select"),
-        )
-      : null) ??
-    objectFields.find((field) => field.type === "status" || field.type === "select") ??
-    null;
-  const boardPrimaryField =
-    objectFields.find((field) => field.required && field.type === "text") ??
-    objectFields.find((field) => field.type === "text") ??
-    objectFields[0] ??
-    null;
-  const boardSecondaryFields = objectFields
-    .filter(
-      (field) =>
-        field.id !== boardPrimaryField?.id && field.id !== boardGroupField?.id,
-    )
-    .slice(0, 2);
-
-  function normalizeBoardValue(value: unknown) {
-    if (value === null || value === undefined || value === "") {
-      return null;
-    }
-    return String(value);
-  }
-
-  const boardColumns: BoardColumn[] = (() => {
-    if (!boardGroupField) {
-      return [];
-    }
-    const configuredOptions = parseSelectOptions(boardGroupField);
-    const valuesFromRecords = Array.from(
-      new Set(
-        visibleRecords
-          .map((record) =>
-            normalizeBoardValue(getRecordFieldValue(record, boardGroupField.key)),
-          )
-          .filter((value): value is string => Boolean(value)),
-      ),
-    );
-    const allValues = [...configuredOptions];
-    for (const value of valuesFromRecords) {
-      if (!allValues.includes(value)) {
-        allValues.push(value);
-      }
-    }
-    const baseColumns: BoardColumn[] = [
-      {
-        key: "board-empty",
-        value: null,
-        label: "Sin estado",
-        records: [],
-      },
-      ...allValues.map((value) => ({
-        key: `board-${value}`,
-        value,
-        label: formatStatusLabel(value),
-        records: [],
-      })),
-    ];
-    return baseColumns.map((column) => ({
-      ...column,
-      records: visibleRecords.filter(
-        (record) =>
-          normalizeBoardValue(getRecordFieldValue(record, boardGroupField.key)) ===
-          column.value,
-      ),
-    }));
-  })();
-
-  useEffect(() => {
-    setLocalRecords(records);
-  }, [records]);
-
-  useEffect(() => {
-    if (!object) {
-      return;
-    }
-    if (selectedObjectId) {
-      return;
-    }
-    setSelectedObjectId(object.id);
-  }, [object, selectedObjectId]);
-
-  useEffect(() => {
-    if (!initialObjectId || initialObjectId === selectedObjectId) {
-      return;
-    }
-    setSelectedObjectId(initialObjectId);
-    setSelectedViewId("all");
-    setEditingCell(null);
-    setTableError("");
-    setTableSuccess("");
-  }, [initialObjectId, selectedObjectId]);
-
-  useEffect(() => {
-    if (!initialViewId) {
-      if (selectedViewId !== "all") {
-        setSelectedViewId("all");
-      }
-      return;
-    }
-    if (initialViewId !== selectedViewId) {
-      setSelectedViewId(initialViewId);
-    }
-  }, [initialViewId, selectedViewId]);
-
-  useEffect(() => {
-    if (viewMode === "board" && !boardGroupField) {
-      setViewMode("table");
-    }
-  }, [viewMode, boardGroupField]);
-
-  function parseSelectOptions(field: PrismaWorkspaceField) {
-    const rawValues =
-      Array.isArray(field.options.values) ? field.options.values : Array.isArray(field.options.options) ? field.options.options : [];
-    return rawValues
-      .map((entry) => String(entry ?? "").trim())
-      .filter(Boolean);
-  }
-
-  function initialValueForField(field: PrismaWorkspaceField) {
-    if (field.defaultValue !== null && field.defaultValue !== undefined) {
-      if (field.type === "boolean") {
-        return field.defaultValue === "true";
-      }
-      return field.defaultValue;
-    }
-    if (field.type === "boolean") {
-      return false;
-    }
-    return "";
-  }
-
-  function normalizeFieldValue(field: PrismaWorkspaceField, value: unknown) {
-    if (field.type === "boolean") {
-      if (typeof value === "boolean") return value;
-      if (typeof value === "string") return value.toLowerCase() === "true";
-      return Boolean(value);
-    }
-
-    if (value === null || value === undefined) {
-      return field.required ? "" : null;
-    }
-
-    if (typeof value === "string") {
-      const trimmed = value.trim();
-      if (trimmed.length === 0) {
-        return field.required ? "" : null;
-      }
-      if (field.type === "number") {
-        const parsed = Number(trimmed);
-        return Number.isFinite(parsed) ? parsed : trimmed;
-      }
-      return trimmed;
-    }
-
-    if (field.type === "number" && typeof value === "number") {
-      return Number.isFinite(value) ? value : field.required ? "" : null;
-    }
-
-    return value;
-  }
-
-  function buildRecordDataFromDraft(draft: Record<string, unknown>) {
-    return objectFields.reduce<Record<string, unknown>>((accumulator, field) => {
-      accumulator[field.key] = normalizeFieldValue(field, draft[field.key]);
-      return accumulator;
-    }, {});
-  }
-
-  function isMissingRequiredValue(value: unknown) {
-    return value === null || value === undefined || value === "";
-  }
-
-  function resetDraftForCurrentObject() {
-    const nextDraft = objectFields.reduce<Record<string, unknown>>((accumulator, field) => {
-      accumulator[field.key] = initialValueForField(field);
-      return accumulator;
-    }, {});
-    setRecordDraft(nextDraft);
-  }
-
-  function openCreatePanel() {
-    if (!canWrite || !object) {
-      return;
-    }
-    resetDraftForCurrentObject();
-    setTableError("");
-    setTableSuccess("");
-    setIsCreateOpen(true);
-  }
-
-  function openCreatePanelForBoardColumn(targetValue: string | null) {
-    if (!canWrite || !object) {
-      return;
-    }
-    const nextDraft = objectFields.reduce<Record<string, unknown>>((accumulator, field) => {
-      accumulator[field.key] = initialValueForField(field);
-      return accumulator;
-    }, {});
-    if (boardGroupField) {
-      nextDraft[boardGroupField.key] = targetValue ?? "";
-    }
-    setRecordDraft(nextDraft);
-    setTableError("");
-    setTableSuccess("");
-    setIsCreateOpen(true);
-  }
-
-  function getBoardDropTarget(payload: string): BoardDropTarget | null {
-    try {
-      const parsed = JSON.parse(payload) as BoardDropTarget;
-      if (!parsed || typeof parsed.recordId !== "string") {
-        return null;
-      }
-      if (parsed.toValue !== null && parsed.toValue !== undefined && typeof parsed.toValue !== "string") {
-        return null;
-      }
-      return {
-        recordId: parsed.recordId,
-        toValue: parsed.toValue ?? null,
-      };
-    } catch {
-      return null;
-    }
-  }
-
-  async function moveRecordToBoardColumn(
-    record: PrismaWorkspaceRecord,
-    targetValue: string | null,
-  ) {
-    if (!canWrite || !boardGroupField) {
-      return;
-    }
-
-    const currentValue = normalizeBoardValue(getRecordFieldValue(record, boardGroupField.key));
-    if (currentValue === targetValue) {
-      return;
-    }
-
-    const nextData = {
-      ...record.data,
-      [boardGroupField.key]: targetValue ?? null,
-    };
-    const previousSnapshot = localRecords;
-
-    setTableError("");
-    setTableSuccess("");
-    setLocalRecords((current) =>
-      current.map((entry) =>
-        entry.id === record.id
-          ? {
-              ...entry,
-              data: nextData,
-            }
-          : entry,
-      ),
-    );
-    try {
-      const response = await fetch(`/api/workspaces/${workspaceSlug}/records/${record.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ data: nextData }),
-      });
-      const payload = (await response.json().catch(() => ({}))) as {
-        error?: string;
-        record?: PrismaWorkspaceRecord;
-      };
-      if (!response.ok || !payload.record) {
-        throw new Error(payload.error ?? "No se pudo mover la tarjeta.");
-      }
-      setLocalRecords((current) =>
-        current.map((entry) => (entry.id === payload.record!.id ? payload.record! : entry)),
-      );
-      setTableSuccess("Estado actualizado.");
-    } catch (error) {
-      setLocalRecords(previousSnapshot);
-      setTableError(error instanceof Error ? error.message : "No se pudo mover la tarjeta.");
-    }
-  }
-
-  async function createRecord() {
-    if (!object || !canWrite || isCreatingRecord) {
-      return;
-    }
-
-    const data = buildRecordDataFromDraft(recordDraft);
-    const missingRequiredFields = objectFields.filter(
-      (field) => field.required && isMissingRequiredValue(data[field.key]),
-    );
-    if (missingRequiredFields.length > 0) {
-      setTableError(`Completa los campos obligatorios: ${missingRequiredFields.map((field) => field.name).join(", ")}.`);
-      return;
-    }
-
-    setIsCreatingRecord(true);
-    setTableError("");
-    try {
-      const response = await fetch(`/api/workspaces/${workspaceSlug}/records`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          objectId: object.id,
-          data,
-        }),
-      });
-      const payload = (await response.json().catch(() => ({}))) as {
-        error?: string;
-        record?: PrismaWorkspaceRecord;
-      };
-
-      if (!response.ok || !payload.record) {
-        throw new Error(payload.error ?? "No se pudo crear el registro.");
-      }
-
-      setLocalRecords((current) => [payload.record!, ...current.filter((entry) => entry.id !== payload.record!.id)]);
-      setTableSuccess("Registro creado.");
-      setIsCreateOpen(false);
-      setRecordDraft({});
-    } catch (error) {
-      setTableError(error instanceof Error ? error.message : "No se pudo crear el registro.");
-    } finally {
-      setIsCreatingRecord(false);
-    }
-  }
-
-  function startInlineEdit(record: PrismaWorkspaceRecord, field: PrismaWorkspaceField) {
-    if (!canWrite) {
-      return;
-    }
-    const rawValue = getRecordFieldValue(record, field.key);
-    setEditingCell({ recordId: record.id, fieldKey: field.key });
-    if (field.type === "boolean") {
-      setEditingValue(Boolean(rawValue));
-      return;
-    }
-    setEditingValue(rawValue === null || rawValue === undefined ? "" : String(rawValue));
-  }
-
-  function cancelInlineEdit() {
-    setEditingCell(null);
-    setEditingValue("");
-  }
-
-  async function saveInlineEdit(record: PrismaWorkspaceRecord, field: PrismaWorkspaceField) {
-    if (!canWrite || isSavingCell) {
-      return;
-    }
-
-    const nextValue = normalizeFieldValue(field, editingValue);
-    const existingValue = record.data[field.key];
-    if (JSON.stringify(existingValue) === JSON.stringify(nextValue)) {
-      cancelInlineEdit();
-      return;
-    }
-
-    const nextData = { ...record.data, [field.key]: nextValue };
-    const previousSnapshot = localRecords;
-
-    setIsSavingCell(true);
-    setTableError("");
-    setLocalRecords((current) =>
-      current.map((entry) =>
-        entry.id === record.id
-          ? {
-              ...entry,
-              data: nextData,
-            }
-          : entry,
-      ),
-    );
-
-    try {
-      const response = await fetch(`/api/workspaces/${workspaceSlug}/records/${record.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ data: nextData }),
-      });
-
-      const payload = (await response.json().catch(() => ({}))) as {
-        error?: string;
-        record?: PrismaWorkspaceRecord;
-      };
-
-      if (!response.ok || !payload.record) {
-        throw new Error(payload.error ?? "No se pudo actualizar el registro.");
-      }
-
-      setLocalRecords((current) =>
-        current.map((entry) => (entry.id === payload.record!.id ? payload.record! : entry)),
-      );
-      setTableSuccess("Registro actualizado.");
-    } catch (error) {
-      setLocalRecords(previousSnapshot);
-      setTableError(error instanceof Error ? error.message : "No se pudo actualizar el registro.");
-    } finally {
-      setIsSavingCell(false);
-      cancelInlineEdit();
-    }
-  }
-
-  async function deleteRecord(recordId: string) {
-    if (!canWrite || isDeletingRecord) {
-      return;
-    }
-    const previousSnapshot = localRecords;
-
-    setIsDeletingRecord(true);
-    setTableError("");
-    setLocalRecords((current) => current.filter((entry) => entry.id !== recordId));
-    try {
-      const response = await fetch(`/api/workspaces/${workspaceSlug}/records/${recordId}`, {
-        method: "DELETE",
-      });
-      const payload = (await response.json().catch(() => ({}))) as { error?: string };
-      if (!response.ok) {
-        throw new Error(payload.error ?? "No se pudo eliminar el registro.");
-      }
-      setDeleteTargetId(null);
-      setTableSuccess("Registro eliminado.");
-    } catch (error) {
-      setLocalRecords(previousSnapshot);
-      setTableError(error instanceof Error ? error.message : "No se pudo eliminar el registro.");
-    } finally {
-      setIsDeletingRecord(false);
-    }
-  }
-
-  const summary = object
-    ? `${visibleRecords.length} registros visibles · ${objectFields.length} campos activos · ${objectViews.length} vistas guardadas`
-    : "Selecciona un objeto para empezar.";
-
-  return (
-    <div style={stackStyle}>
-      <Panel
-        eyebrow="Data"
-        title={object?.name ?? "Datos"}
-        description={object ? `${visibleRecords.length} registros visibles en esta vista.` : "Selecciona un objeto para empezar."}
-      >
-        <div style={toolbarStyle}>
-          <div style={pickerGroupStyle}>
-            <label style={inputLabelStyle}>
-              Objeto
+      {existingTableImport ? (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(15, 23, 42, 0.55)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 120,
+          }}
+          onClick={() => {
+            if (!isRunningExistingImport) setExistingTableImport(null);
+          }}
+        >
+          <div
+            onClick={(event) => event.stopPropagation()}
+            style={{
+              width: "min(640px, 94vw)",
+              maxHeight: "86vh",
+              background: "var(--workspace-panel)",
+              borderRadius: 16,
+              border: "1px solid var(--workspace-border)",
+              padding: 20,
+              display: "flex",
+              flexDirection: "column",
+              gap: 14,
+              overflow: "auto",
+            }}
+          >
+            <div>
+              <p style={eyebrowStyle}>Importar documento</p>
+              <h3 style={{ margin: "4px 0 0", fontSize: 20 }}>{existingTableImport.fileName}</h3>
+              <p style={{ margin: "4px 0 0", fontSize: 13, color: "var(--workspace-muted)" }}>
+                Selecciona la tabla destino y mapea cada columna del archivo.
+              </p>
+            </div>
+            <label style={{ display: "grid", gap: 6 }}>
+              <span style={{ fontSize: 12, color: "var(--workspace-muted)" }}>Tabla destino</span>
               <select
-                value={selectedObjectId}
-                onChange={(event) => {
-                  setSelectedObjectId(event.target.value);
-                  setSelectedViewId("all");
-                  setEditingCell(null);
-                }}
-                style={inputStyle}
+                value={existingTableImport.objectId}
+                onChange={(event) =>
+                  setExistingTableImport((current) => {
+                    if (!current) return current;
+                    const nextObjectId = event.target.value;
+                    const objectFieldList = fields.filter((entry) => entry.objectId === nextObjectId);
+                    const nextMapping: Record<string, string> = {};
+                    for (const header of current.headers) {
+                      const normalized = header
+                        .trim()
+                        .toLowerCase()
+                        .replace(/[^a-z0-9_]+/g, "_")
+                        .replace(/^_+|_+$/g, "");
+                      const match = objectFieldList.find(
+                        (entry) => entry.key === normalized || entry.name.toLowerCase() === header.toLowerCase(),
+                      );
+                      nextMapping[header] = match?.key ?? "skip";
+                    }
+                    return { ...current, objectId: nextObjectId, mapping: nextMapping };
+                  })
+                }
+                style={chatRenameInputStyle}
               >
+                <option value="">Selecciona una tabla</option>
                 {objects.map((entry) => (
                   <option key={entry.id} value={entry.id}>
                     {entry.name}
@@ -2651,420 +4184,67 @@ function BaseDataPanel({
                 ))}
               </select>
             </label>
-
-            <label style={inputLabelStyle}>
-              Vista
-              <select value={selectedViewId} onChange={(event) => setSelectedViewId(event.target.value)} style={inputStyle}>
-                <option value="all">Todas</option>
-                {objectViews.map((view) => (
-                  <option key={view.id} value={view.id}>
-                    {view.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            {canWrite ? (
-              <div style={{ display: "inline-flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                <button type="button" style={primaryButtonStyle} onClick={openCreatePanel}>
-                  Nuevo registro
-                </button>
-                {currentRole === "admin" ? (
-                  <a href={`/workspaces/${workspaceSlug}?tab=fields&object=${selectedObjectId}`} style={metaActionLinkStyle}>
-                    ⚙ Gestionar campos
-                  </a>
-                ) : null}
-              </div>
-            ) : null}
-          </div>
-
-          <div style={viewModeToggleStyle}>
-            <button
-              type="button"
-              style={viewMode === "table" ? viewModeButtonActiveStyle : viewModeButtonStyle}
-              onClick={() => setViewMode("table")}
-            >
-              Tabla
-            </button>
-            <button
-              type="button"
-              style={{
-                ...(viewMode === "board" ? viewModeButtonActiveStyle : viewModeButtonStyle),
-                borderRight: "none",
-              }}
-              onClick={() => setViewMode("board")}
-              disabled={!boardGroupField}
-            >
-              Tablero
-            </button>
-          </div>
-
-          <label style={{ ...inputLabelStyle, minWidth: 280 }}>
-            Buscar
-            <div style={searchWrapStyle}>
-              <Search size={16} color="var(--workspace-muted)" />
-              <input
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder="Buscar por cualquier campo"
-                style={searchInputStyle}
-              />
-            </div>
-          </label>
-        </div>
-
-        <div style={metaBarStyle}>
-          <div style={metaLeftStyle}>
-            <StatusPill tone="info">{object?.name ?? "Objeto"}</StatusPill>
-            {currentView ? (
-              <StatusPill tone="neutral">
-                <Filter size={12} />
-                {currentView.name}
-              </StatusPill>
-            ) : null}
-            {askHref ? (
-              <a href={askHref} style={metaActionLinkStyle}>
-                Consultar con CEO
-              </a>
-            ) : null}
-            {!canWrite ? <StatusPill tone="neutral">Solo lectura</StatusPill> : null}
-          </div>
-          <p style={metaCopyStyle}>{summary.replace("campos activos", "columnas").replace("1 vistas guardadas", "1 vista guardada")}</p>
-        </div>
-
-        {tableError ? <p style={inlineErrorStyle}>{tableError}</p> : null}
-        {tableSuccess ? <p style={inlineSuccessStyle}>{tableSuccess}</p> : null}
-
-        {object ? (
-          viewMode === "table" ? (
-            visibleRecords.length > 0 ? (
-              <div style={tableWrapStyle}>
-                <table style={tableStyle}>
-                  <thead>
-                    <tr>
-                      {objectFields.map((field) => (
-                        <th key={field.id} style={tableHeadStyle}>
-                          <span>{field.name}</span>
-                        </th>
-                      ))}
-                      {canWrite ? <th style={tableHeadStyle}>Acciones</th> : null}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {visibleRecords.map((record) => (
-                      <tr
-                        key={record.id}
-                        style={recordBaseHref ? clickableRowStyle : undefined}
-                        onClick={() => {
-                          if (editingCell) {
-                            return;
-                          }
-                          if (!recordBaseHref || !object?.id) {
-                            return;
-                          }
-                          window.location.href = `${recordBaseHref}&object=${object.id}&record=${record.id}`;
-                        }}
-                      >
-                        {objectFields.map((field) => {
-                          const value = getRecordFieldValue(record, field.key);
-                          const isEditing =
-                            editingCell?.recordId === record.id && editingCell.fieldKey === field.key;
-                          const options = parseSelectOptions(field);
-
-                          return (
-                            <td
-                              key={`${record.id}-${field.id}`}
-                              style={tableCellStyle}
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                if (!canWrite) return;
-                                startInlineEdit(record, field);
-                              }}
-                            >
-                              {isEditing ? (
-                                field.type === "status" || field.type === "select" ? (
-                                  <select
-                                    autoFocus
-                                    value={String(editingValue ?? "")}
-                                    onChange={(event) => setEditingValue(event.target.value)}
-                                    onBlur={() => void saveInlineEdit(record, field)}
-                                    style={inlineInputStyle}
-                                  >
-                                    <option value="">Selecciona</option>
-                                    {options.map((option) => (
-                                      <option key={option} value={option}>
-                                        {formatStatusLabel(option)}
-                                      </option>
-                                    ))}
-                                  </select>
-                                ) : field.type === "boolean" ? (
-                                  <select
-                                    autoFocus
-                                    value={String(Boolean(editingValue))}
-                                    onChange={(event) => setEditingValue(event.target.value === "true")}
-                                    onBlur={() => void saveInlineEdit(record, field)}
-                                    style={inlineInputStyle}
-                                  >
-                                    <option value="true">Sí</option>
-                                    <option value="false">No</option>
-                                  </select>
-                                ) : (
-                                  <input
-                                    autoFocus
-                                    type={field.type === "number" ? "number" : field.type === "date" ? "date" : "text"}
-                                    value={String(editingValue ?? "")}
-                                    onChange={(event) => setEditingValue(event.target.value)}
-                                    onBlur={() => void saveInlineEdit(record, field)}
-                                    onKeyDown={(event) => {
-                                      if (event.key === "Escape") {
-                                        cancelInlineEdit();
-                                      }
-                                      if (event.key === "Enter") {
-                                        event.currentTarget.blur();
-                                      }
-                                    }}
-                                    style={inlineInputStyle}
-                                  />
-                                )
-                              ) : field.key === "status" ? (
-                                <StatusPill tone={String(value ?? "").toLowerCase()}>
-                                  {formatStatusLabel(String(value ?? "—"))}
-                                </StatusPill>
-                              ) : field.type === "boolean" ? (
-                                <span>{Boolean(value) ? "Sí" : "No"}</span>
-                              ) : (
-                                <span>
-                                  {value !== null && value !== undefined && String(value).length > 0 ? String(value) : "—"}
-                                </span>
-                              )}
-                            </td>
-                          );
-                        })}
-                        {canWrite ? (
-                          <td style={tableCellStyle} onClick={(event) => event.stopPropagation()}>
-                            <button
-                              type="button"
-                              style={dangerButtonStyle}
-                              onClick={() => setDeleteTargetId(record.id)}
-                              disabled={isDeletingRecord}
-                            >
-                              Eliminar
-                            </button>
-                          </td>
-                        ) : null}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : (
-              <EmptyState
-                icon={FileStack}
-                title="No hay registros visibles"
-                description="Ajusta la vista o la búsqueda, o usa el copilot para crear los primeros registros."
-              />
-            )
-          ) : boardGroupField ? (
-            <div style={boardColumnsWrapStyle}>
-              {boardColumns.map((column) => (
-                <section
-                  key={column.key}
-                  style={{
-                    ...boardColumnStyle,
-                    borderColor:
-                      draggingRecordId && canWrite
-                        ? "rgba(51, 92, 255, 0.35)"
-                        : "var(--workspace-border)",
-                  }}
-                  onDragOver={(event) => {
-                    if (!canWrite) return;
-                    event.preventDefault();
-                  }}
-                  onDrop={(event) => {
-                    if (!canWrite) return;
-                    event.preventDefault();
-                    const payload = getBoardDropTarget(event.dataTransfer.getData("text/plain"));
-                    setDraggingRecordId(null);
-                    if (!payload) {
-                      return;
-                    }
-                    const record = visibleRecords.find((entry) => entry.id === payload.recordId);
-                    if (!record) {
-                      return;
-                    }
-                    void moveRecordToBoardColumn(record, column.value);
-                  }}
-                >
-                  <header style={boardColumnHeaderStyle}>
-                    <h3 style={boardColumnTitleStyle}>{column.label}</h3>
-                    <p style={boardColumnCountStyle}>{column.records.length}</p>
-                  </header>
-
-                  <div style={boardCardListStyle}>
-                    {column.records.map((record) => (
-                      <article
-                        key={record.id}
-                        draggable={canWrite}
-                        onDragStart={(event) => {
-                          if (!canWrite || !boardGroupField) {
-                            return;
-                          }
-                          const payload: BoardDropTarget = {
-                            recordId: record.id,
-                            toValue: normalizeBoardValue(getRecordFieldValue(record, boardGroupField.key)),
-                          };
-                          event.dataTransfer.setData("text/plain", JSON.stringify(payload));
-                          setDraggingRecordId(record.id);
-                        }}
-                        onDragEnd={() => setDraggingRecordId(null)}
-                        style={{
-                          ...boardCardStyle,
-                          opacity: draggingRecordId === record.id ? 0.65 : 1,
-                        }}
-                        onClick={() => {
-                          if (!recordBaseHref || !object?.id) {
-                            return;
-                          }
-                          window.location.href = `${recordBaseHref}&object=${object.id}&record=${record.id}`;
-                        }}
-                      >
-                        <p style={boardCardTitleStyle}>
-                          {boardPrimaryField
-                            ? String(getRecordFieldValue(record, boardPrimaryField.key) ?? "Sin título")
-                            : "Sin título"}
-                        </p>
-                        {boardSecondaryFields.map((field) => (
-                          <p key={field.id} style={boardCardMetaStyle}>
-                            {field.name}: {String(getRecordFieldValue(record, field.key) ?? "—")}
-                          </p>
-                        ))}
-                      </article>
-                    ))}
-                  </div>
-
-                  {canWrite ? (
-                    <button
-                      type="button"
-                      style={primaryButtonStyle}
-                      onClick={() => openCreatePanelForBoardColumn(column.value)}
+            <div style={{ display: "grid", gap: 6 }}>
+              <p style={{ margin: 0, fontSize: 12, color: "var(--workspace-muted)" }}>Mapeo de columnas</p>
+              <div style={{ display: "grid", gap: 6, maxHeight: 260, overflow: "auto" }}>
+                {existingTableImport.headers.map((header) => {
+                  const objectFieldList = fields.filter((entry) => entry.objectId === existingTableImport.objectId);
+                  return (
+                    <div
+                      key={header}
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: "1fr 1fr",
+                        gap: 10,
+                        alignItems: "center",
+                      }}
                     >
-                      + Nuevo
-                    </button>
-                  ) : null}
-                </section>
-              ))}
-            </div>
-          ) : (
-            <EmptyState
-              icon={Layers3}
-              title="Tablero no disponible"
-              description="Este objeto no tiene un campo de tipo estado o selección para agrupar las columnas."
-            />
-          )
-        ) : (
-          <EmptyState
-            icon={FileStack}
-            title="No hay objetos configurados"
-            description="Primero crea objetos y campos para que la vista dinámica tenga estructura."
-          />
-        )}
-      </Panel>
-
-      {isCreateOpen && object ? (
-        <div style={modalOverlayStyle} role="presentation" onClick={() => setIsCreateOpen(false)}>
-          <div style={modalCardStyle} role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
-            <div style={modalHeaderStyle}>
-              <div>
-                <p style={eyebrowStyle}>Nuevo registro</p>
-                <h3 style={agentDetailTitleStyle}>{object.name}</h3>
-              </div>
-              <button type="button" style={chatActionButtonStyle} onClick={() => setIsCreateOpen(false)}>
-                Cerrar
-              </button>
-            </div>
-
-            <div style={modalFieldsGridStyle}>
-              {objectFields.map((field) => {
-                const options = parseSelectOptions(field);
-                const value = recordDraft[field.key] ?? "";
-                const draftOptionValue = String(value ?? "");
-                const createSelectOptions =
-                  draftOptionValue.length > 0 && !options.includes(draftOptionValue)
-                    ? [draftOptionValue, ...options]
-                    : options;
-                return (
-                  <label key={field.id} style={fieldStyle}>
-                    {field.name}
-                    {field.required ? " *" : ""}
-                    {field.type === "status" || field.type === "select" ? (
+                      <span style={{ fontSize: 13, fontWeight: 600 }}>{header}</span>
                       <select
-                        value={String(value ?? "")}
+                        value={existingTableImport.mapping[header] ?? "skip"}
                         onChange={(event) =>
-                          setRecordDraft((current) => ({ ...current, [field.key]: event.target.value }))
+                          setExistingTableImport((current) =>
+                            current
+                              ? {
+                                  ...current,
+                                  mapping: { ...current.mapping, [header]: event.target.value },
+                                }
+                              : current,
+                          )
                         }
-                        style={inputStyle}
+                        style={chatRenameInputStyle}
                       >
-                        <option value="">{field.required ? "Selecciona una opción" : "Sin valor"}</option>
-                        {createSelectOptions.map((option) => (
-                          <option key={option} value={option}>
-                            {formatStatusLabel(option)}
+                        <option value="skip">Omitir columna</option>
+                        {objectFieldList.map((field) => (
+                          <option key={field.key} value={field.key}>
+                            {field.name} ({field.type})
                           </option>
                         ))}
                       </select>
-                    ) : field.type === "boolean" ? (
-                      <label style={toggleStyle}>
-                        <input
-                          type="checkbox"
-                          checked={Boolean(value)}
-                          onChange={(event) =>
-                            setRecordDraft((current) => ({ ...current, [field.key]: event.target.checked }))
-                          }
-                        />
-                        Activo
-                      </label>
-                    ) : (
-                      <input
-                        type={field.type === "number" ? "number" : field.type === "date" ? "date" : "text"}
-                        value={String(value ?? "")}
-                        onChange={(event) =>
-                          setRecordDraft((current) => ({ ...current, [field.key]: event.target.value }))
-                        }
-                        style={inputStyle}
-                      />
-                    )}
-                  </label>
-                );
-              })}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
-
-            <div style={actionsStyle}>
-              <button type="button" style={primaryButtonStyle} onClick={() => void createRecord()} disabled={isCreatingRecord}>
-                {isCreatingRecord ? "Guardando..." : "Guardar"}
-              </button>
-              <button type="button" style={chatActionButtonStyle} onClick={() => setIsCreateOpen(false)} disabled={isCreatingRecord}>
-                Cancelar
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {deleteTargetId ? (
-        <div style={modalOverlayStyle} role="presentation" onClick={() => setDeleteTargetId(null)}>
-          <div style={confirmCardStyle} role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
-            <p style={agentNameStyle}>¿Eliminar este registro?</p>
-            <p style={queueSubtitleStyle}>Esta acción no se puede deshacer.</p>
-            <div style={actionsStyle}>
+            <p style={{ margin: 0, fontSize: 12, color: "var(--workspace-muted)" }}>
+              Filas detectadas: {existingTableImport.rows.length}
+            </p>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
               <button
                 type="button"
-                style={dangerButtonStyle}
-                onClick={() => void deleteRecord(deleteTargetId)}
-                disabled={isDeletingRecord}
+                style={chatActionButtonStyle}
+                disabled={isRunningExistingImport}
+                onClick={() => setExistingTableImport(null)}
               >
-                {isDeletingRecord ? "Eliminando..." : "Eliminar"}
-              </button>
-              <button type="button" style={chatActionButtonStyle} onClick={() => setDeleteTargetId(null)} disabled={isDeletingRecord}>
                 Cancelar
+              </button>
+              <button
+                type="button"
+                style={chatActionButtonStyle}
+                disabled={isRunningExistingImport || !existingTableImport.objectId}
+                onClick={() => void commitExistingTableImport()}
+              >
+                {isRunningExistingImport ? "Importando..." : "Importar filas"}
               </button>
             </div>
           </div>
@@ -3074,9 +4254,9 @@ function BaseDataPanel({
   );
 }
 
-export function DataPanel(props: DataPanelProps) {
-  return <BaseDataPanel {...props} />;
-}
+// BaseDataPanel has been moved to components/workspace/data/DataPanel.tsx.
+// Re-exported below so existing imports of DatasetPanel / DataPanel keep working.
+export { DataPanel } from "@/components/workspace/data/DataPanel";
 
 export function AgentsPanel({
   workspaceId,
@@ -4068,7 +5248,7 @@ export function RecordDetailPanel({
 }
 
 export const HomeOverviewPanel = OverviewPanel;
-export const DatasetPanel = DataPanel;
+export { DataPanel as DatasetPanel } from "@/components/workspace/data/DataPanel";
 export const AgentOverviewPanel = AgentsPanel;
 
 function formatStatusLabel(status: string) {
@@ -4421,11 +5601,11 @@ const stackStyle: React.CSSProperties = {
 };
 
 const panelStyle: React.CSSProperties = {
-  border: "1px solid rgba(15, 23, 42, 0.08)",
+  border: "1px solid var(--workspace-border)",
   borderRadius: 24,
-  background: "rgba(255, 255, 255, 0.96)",
+  background: "var(--workspace-surface)",
   padding: 22,
-  boxShadow: "0 10px 26px rgba(15, 23, 42, 0.06)",
+  boxShadow: "var(--workspace-shadow)",
   display: "grid",
   gap: 18,
 };
@@ -4612,7 +5792,7 @@ const chatCapabilityChipStyle: React.CSSProperties = {
 const chatSearchCardStyle: React.CSSProperties = {
   border: "1px dashed var(--workspace-border)",
   borderRadius: 18,
-  background: "rgba(255,255,255,0.55)",
+  background: "var(--workspace-well)",
   padding: "14px 16px",
   color: "var(--workspace-muted)",
   fontSize: 14,
@@ -4664,9 +5844,12 @@ const teamChatMainStyle: React.CSSProperties = {
   border: "1px solid var(--workspace-border)",
   background: "var(--workspace-panel)",
   padding: 18,
-  display: "grid",
+  display: "flex",
+  flexDirection: "column",
   gap: 16,
-  minHeight: 620,
+  minHeight: 460,
+  height: "calc(100dvh - 160px)",
+  maxHeight: "calc(100dvh - 120px)",
 };
 
 const teamChatHeaderMetaStyle: React.CSSProperties = {
@@ -4678,8 +5861,8 @@ const teamChatHeaderMetaStyle: React.CSSProperties = {
 const teamChatMessageListStyle: React.CSSProperties = {
   borderRadius: 18,
   border: "1px solid var(--workspace-border)",
-  background: "rgba(247, 247, 242, 0.6)",
-  padding: 16,
+  background: "var(--workspace-well)",
+  padding: "16px",
   minHeight: 360,
   display: "grid",
   gap: 10,
@@ -4701,9 +5884,9 @@ const teamChatComposerBoxStyle: React.CSSProperties = {
 };
 
 const metricCardStyle: React.CSSProperties = {
-  border: "1px solid rgba(15, 23, 42, 0.08)",
+  border: "1px solid var(--workspace-border)",
   borderRadius: 20,
-  background: "rgba(255, 255, 255, 0.98)",
+  background: "var(--workspace-surface)",
   padding: 18,
   display: "grid",
   gap: 10,
@@ -4741,10 +5924,10 @@ const metricHintStyle: React.CSSProperties = {
 };
 
 const homeHeroCardStyle: React.CSSProperties = {
-  border: "1px solid rgba(15, 23, 42, 0.08)",
+  border: "1px solid var(--workspace-border)",
   borderRadius: 28,
-  background: "rgba(255, 255, 255, 0.98)",
-  boxShadow: "0 14px 30px rgba(15, 23, 42, 0.05)",
+  background: "var(--workspace-surface)",
+  boxShadow: "var(--workspace-shadow)",
   padding: 26,
   display: "grid",
   gap: 16,
@@ -4777,9 +5960,9 @@ const homeHeroMetaStyle: React.CSSProperties = {
 };
 
 const homeChatComposerStyle: React.CSSProperties = {
-  border: "1px solid rgba(15, 23, 42, 0.08)",
+  border: "1px solid var(--workspace-border)",
   borderRadius: 30,
-  background: "rgba(255, 255, 255, 0.98)",
+  background: "var(--workspace-surface)",
   padding: "10px 12px",
   display: "grid",
   gap: 8,
@@ -4792,6 +5975,57 @@ const homeChatTopRowStyle: React.CSSProperties = {
   gap: 8,
 };
 
+const workspaceChatTextareaRowStyle: React.CSSProperties = {
+  display: "block",
+  position: "relative",
+};
+
+const workspaceChatComposerFooterRightStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 6,
+};
+
+/** ChatPanel-only: tighter composer chrome than `homeChatComposerStyle` (home page unchanged). */
+const workspaceChatComposerColumnStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 6,
+};
+
+const workspaceChatComposerShellStyle: React.CSSProperties = {
+  border: "1px solid var(--workspace-border)",
+  borderRadius: 22,
+  background: "var(--workspace-surface)",
+  padding: "6px 10px",
+  display: "grid",
+  gap: 6,
+};
+
+const workspaceChatComposerModesRowStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 6,
+  flexWrap: "wrap",
+};
+
+const workspaceChatModeButtonStyle: React.CSSProperties = {
+  borderRadius: 999,
+  border: "1px solid var(--workspace-border)",
+  background: "var(--workspace-surface)",
+  color: "var(--workspace-muted)",
+  fontSize: 11,
+  fontWeight: 600,
+  padding: "4px 8px",
+  cursor: "pointer",
+};
+
+const workspaceChatModeButtonActiveStyle: React.CSSProperties = {
+  ...workspaceChatModeButtonStyle,
+  color: "var(--workspace-text)",
+  borderColor: "var(--workspace-accent-strong)",
+  background: "var(--workspace-accent-soft)",
+};
+
 const homeChatBottomRowStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
@@ -4799,10 +6033,21 @@ const homeChatBottomRowStyle: React.CSSProperties = {
   gap: 8,
 };
 
+const workspaceChatBottomRowStyle: React.CSSProperties = {
+  ...homeChatBottomRowStyle,
+  gap: 6,
+};
+
 const homeChatToolsLeftStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
   gap: 8,
+  position: "relative",
+};
+
+const workspaceChatToolsLeftStyle: React.CSSProperties = {
+  ...homeChatToolsLeftStyle,
+  gap: 6,
 };
 
 const homeChatInputStyle: React.CSSProperties = {
@@ -4832,8 +6077,8 @@ const homeChatButtonStyle: React.CSSProperties = {
 
 const homeToolButtonStyle: React.CSSProperties = {
   borderRadius: 999,
-  border: "1px solid rgba(15, 23, 42, 0.12)",
-  background: "rgba(255, 255, 255, 0.98)",
+  border: "1px solid var(--workspace-border-strong)",
+  background: "var(--workspace-surface)",
   color: "var(--workspace-text)",
   font: "inherit",
   fontSize: 12,
@@ -4860,9 +6105,9 @@ const homeStatusStripStyle: React.CSSProperties = {
 };
 
 const homeStatusCardStyle: React.CSSProperties = {
-  border: "1px solid rgba(15, 23, 42, 0.08)",
+  border: "1px solid var(--workspace-border)",
   borderRadius: 18,
-  background: "rgba(255, 255, 255, 0.98)",
+  background: "var(--workspace-surface)",
   padding: 16,
   display: "flex",
   alignItems: "center",
@@ -5063,14 +6308,31 @@ const chatLayoutStyle: React.CSSProperties = {
   gap: 20,
 };
 
+const chatWorkspaceShellStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 14,
+  minWidth: 0,
+};
+
+const chatWorkspaceHeaderStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 8,
+};
+
 const chatSidebarStyle: React.CSSProperties = {
   borderRadius: 22,
   border: "1px solid var(--workspace-border)",
-  background: "var(--workspace-panel-soft)",
+  background: "var(--workspace-surface)",
+  boxShadow: "var(--workspace-shadow)",
   padding: 16,
   display: "grid",
   gap: 14,
   alignContent: "start",
+  minHeight: 460,
+  height: "calc(100dvh - 160px)",
+  maxHeight: "calc(100dvh - 120px)",
+  overflowY: "auto",
+  overscrollBehavior: "contain",
 };
 
 const chatSidebarHeaderStyle: React.CSSProperties = {
@@ -5172,6 +6434,11 @@ const chatRenameRowStyle: React.CSSProperties = {
   gap: 10,
 };
 
+const chatTakeoverRowStyle: React.CSSProperties = {
+  ...chatRenameRowStyle,
+  justifyContent: "flex-end",
+};
+
 const chatRenameInputStyle: React.CSSProperties = {
   flex: 1,
   borderRadius: 12,
@@ -5180,17 +6447,6 @@ const chatRenameInputStyle: React.CSSProperties = {
   color: "var(--workspace-text)",
   padding: "8px 10px",
   font: "inherit",
-};
-
-const chatUploadLabelStyle: React.CSSProperties = {
-  borderRadius: 999,
-  border: "1px solid var(--workspace-border)",
-  background: "var(--workspace-panel)",
-  color: "var(--workspace-text)",
-  padding: "8px 12px",
-  fontSize: 12,
-  fontWeight: 700,
-  cursor: "pointer",
 };
 
 const chatAttachmentListStyle: React.CSSProperties = {
@@ -5222,6 +6478,266 @@ const chatAttachmentMetaStyle: React.CSSProperties = {
   fontSize: 12,
 };
 
+const chatAttachmentPillRowStyle: React.CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  gap: 6,
+  marginTop: 8,
+};
+
+const chatAttachmentPillStyle: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 6,
+  padding: "4px 10px",
+  borderRadius: 999,
+  border: "1px solid rgba(15, 23, 42, 0.12)",
+  background: "rgba(255, 255, 255, 0.72)",
+  color: "var(--workspace-text)",
+  fontSize: 12,
+  cursor: "pointer",
+  maxWidth: 220,
+};
+
+const chatAttachmentPillLabelStyle: React.CSSProperties = {
+  whiteSpace: "nowrap",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  maxWidth: 180,
+};
+
+const documentActionsCardStyle: React.CSSProperties = {
+  marginTop: 12,
+  border: "1px solid rgba(15, 23, 42, 0.1)",
+  borderRadius: 14,
+  background: "#ffffff",
+  padding: 14,
+  display: "grid",
+  gap: 12,
+  boxShadow: "0 1px 0 rgba(15, 23, 42, 0.04)",
+};
+
+const documentActionsHeaderStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 10,
+};
+
+const documentActionsFileStyle: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 8,
+  color: "var(--workspace-text)",
+  fontWeight: 600,
+  fontSize: 13,
+  minWidth: 0,
+  flex: 1,
+};
+
+const documentActionsFileNameStyle: React.CSSProperties = {
+  whiteSpace: "nowrap",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  maxWidth: 260,
+};
+
+const documentActionsKindStyle: React.CSSProperties = {
+  fontSize: 10,
+  textTransform: "uppercase",
+  letterSpacing: "0.08em",
+  color: "var(--workspace-muted)",
+  background: "rgba(15, 23, 42, 0.04)",
+  padding: "2px 8px",
+  borderRadius: 999,
+  whiteSpace: "nowrap",
+};
+
+const documentActionsStatsRowStyle: React.CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  alignItems: "center",
+  gap: 8,
+  fontSize: 12,
+  color: "var(--workspace-muted)",
+};
+
+const documentActionsDotStyle: React.CSSProperties = {
+  width: 3,
+  height: 3,
+  borderRadius: "50%",
+  background: "rgba(15, 23, 42, 0.28)",
+  display: "inline-block",
+};
+
+const documentActionsColumnsBlockStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 6,
+};
+
+const documentActionsColumnsLabelStyle: React.CSSProperties = {
+  margin: 0,
+  fontSize: 10,
+  textTransform: "uppercase",
+  letterSpacing: "0.08em",
+  color: "var(--workspace-muted)",
+};
+
+const documentActionsColumnsRowStyle: React.CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  gap: 4,
+};
+
+const documentActionsColumnChipStyle: React.CSSProperties = {
+  display: "inline-block",
+  padding: "2px 8px",
+  fontSize: 12,
+  color: "var(--workspace-text)",
+  background: "rgba(15, 23, 42, 0.05)",
+  borderRadius: 6,
+  maxWidth: 220,
+  whiteSpace: "nowrap",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  cursor: "default",
+};
+
+const documentActionsMoreLabelStyle: React.CSSProperties = {
+  fontSize: 11,
+  color: "var(--workspace-muted)",
+  alignSelf: "center",
+  padding: "0 4px",
+};
+
+const documentActionsButtonsRowStyle: React.CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  gap: 8,
+  paddingTop: 2,
+};
+
+const documentsFinderTriggerStyle: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 6,
+  padding: "6px 10px",
+  borderRadius: 999,
+  border: "1px solid var(--workspace-border)",
+  background: "var(--workspace-panel-soft)",
+  color: "var(--workspace-text)",
+  fontSize: 12,
+  fontWeight: 600,
+  cursor: "pointer",
+};
+
+const documentsFinderPopoverStyle: React.CSSProperties = {
+  position: "absolute",
+  top: 36,
+  left: 0,
+  width: 360,
+  maxWidth: "min(96vw, 420px)",
+  background: "var(--workspace-panel)",
+  border: "1px solid var(--workspace-border)",
+  borderRadius: 14,
+  boxShadow: "0 24px 52px rgba(15, 23, 42, 0.18)",
+  padding: 12,
+  zIndex: 40,
+  display: "flex",
+  flexDirection: "column",
+  gap: 10,
+  maxHeight: 420,
+  overflow: "hidden",
+};
+
+const documentsFinderSearchStyle: React.CSSProperties = {
+  width: "100%",
+  padding: "8px 10px",
+  borderRadius: 8,
+  border: "1px solid var(--workspace-border)",
+  background: "var(--workspace-panel-soft)",
+  fontSize: 13,
+  color: "var(--workspace-text)",
+  outline: "none",
+};
+
+const documentsFinderSectionTitleStyle: React.CSSProperties = {
+  margin: "6px 0 2px",
+  fontSize: 10,
+  letterSpacing: "0.08em",
+  textTransform: "uppercase",
+  color: "var(--workspace-muted)",
+};
+
+const documentsFinderRowStyle: React.CSSProperties = {
+  display: "flex",
+  gap: 10,
+  padding: "8px 10px",
+  borderRadius: 10,
+  border: "1px solid transparent",
+  background: "transparent",
+  color: "var(--workspace-text)",
+  textAlign: "left" as const,
+  cursor: "pointer",
+  alignItems: "flex-start",
+};
+
+const documentsFinderRowNameStyle: React.CSSProperties = {
+  display: "block",
+  fontSize: 13,
+  fontWeight: 600,
+  color: "var(--workspace-text)",
+  lineHeight: 1.3,
+  whiteSpace: "nowrap",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  maxWidth: 260,
+};
+
+const documentsFinderRowMetaStyle: React.CSSProperties = {
+  display: "block",
+  fontSize: 11,
+  color: "var(--workspace-muted)",
+  marginTop: 2,
+};
+
+const documentsFinderListStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 4,
+  overflow: "auto",
+  paddingRight: 4,
+};
+
+const mentionPickerStyle: React.CSSProperties = {
+  position: "absolute",
+  bottom: 64,
+  left: 16,
+  width: 320,
+  maxHeight: 220,
+  overflow: "auto",
+  background: "var(--workspace-panel)",
+  border: "1px solid var(--workspace-border)",
+  borderRadius: 12,
+  boxShadow: "0 12px 36px rgba(15, 23, 42, 0.18)",
+  padding: 6,
+  zIndex: 50,
+};
+
+const mentionPickerRowStyle: React.CSSProperties = {
+  display: "flex",
+  gap: 8,
+  alignItems: "center",
+  padding: "6px 10px",
+  borderRadius: 8,
+  border: "none",
+  background: "transparent",
+  color: "var(--workspace-text)",
+  cursor: "pointer",
+  width: "100%",
+  textAlign: "left" as const,
+};
+
 const chatDeleteButtonStyle: React.CSSProperties = {
   border: "none",
   background: "transparent",
@@ -5238,9 +6754,12 @@ const chatMainStyle: React.CSSProperties = {
   border: "1px solid var(--workspace-border)",
   background: "var(--workspace-panel)",
   padding: 18,
-  display: "grid",
+  display: "flex",
+  flexDirection: "column",
   gap: 16,
-  minHeight: 640,
+  minHeight: 460,
+  height: "calc(100dvh - 160px)",
+  maxHeight: "calc(100dvh - 120px)",
 };
 
 const chatHeaderStyle: React.CSSProperties = {
@@ -5266,16 +6785,52 @@ const chatTitleStyle: React.CSSProperties = {
   color: "var(--workspace-text)",
 };
 
+const chatTitleRowStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  marginTop: 4,
+};
+
+const chatInlineTitleInputStyle: React.CSSProperties = {
+  ...chatRenameInputStyle,
+  minWidth: 220,
+  maxWidth: "min(640px, 70vw)",
+  fontFamily: "var(--font-display)",
+  fontSize: 22,
+  lineHeight: 1.1,
+  padding: "6px 10px",
+};
+
+const chatTitleEditButtonStyle: React.CSSProperties = {
+  border: "1px solid var(--workspace-border)",
+  background: "var(--workspace-surface)",
+  color: "var(--workspace-text)",
+  borderRadius: 999,
+  width: 30,
+  height: 30,
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  cursor: "pointer",
+  fontSize: 11,
+  fontWeight: 700,
+  padding: 0,
+  flexShrink: 0,
+};
+
 const chatMessagesStyle: React.CSSProperties = {
   borderRadius: 18,
   border: "1px solid var(--workspace-border)",
-  background: "rgba(247, 247, 242, 0.6)",
+  background: "var(--workspace-well)",
   padding: 16,
-  minHeight: 360,
+  flex: "1 1 auto",
+  minHeight: 0,
   display: "flex",
   flexDirection: "column",
   gap: 12,
   overflowY: "auto",
+  overscrollBehavior: "contain",
 };
 
 const chatBubbleStyle: React.CSSProperties = {
@@ -5287,6 +6842,33 @@ const chatBubbleStyle: React.CSSProperties = {
   boxShadow: "0 12px 28px rgba(15, 23, 42, 0.06)",
 };
 
+const assistantMessageContentStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 8,
+};
+
+const assistantMessageParagraphStyle: React.CSSProperties = {
+  margin: 0,
+  whiteSpace: "pre-wrap",
+  lineHeight: 1.6,
+};
+
+const assistantMessageListStyle: React.CSSProperties = {
+  margin: "0 0 0 18px",
+  padding: 0,
+  display: "grid",
+  gap: 4,
+  lineHeight: 1.6,
+};
+
+const chatInlineCodeStyle: React.CSSProperties = {
+  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+  fontSize: "0.92em",
+  background: "rgba(15, 23, 42, 0.08)",
+  borderRadius: 6,
+  padding: "1px 6px",
+};
+
 const chatTimestampStyle: React.CSSProperties = {
   fontSize: 11,
   color: "var(--workspace-muted)",
@@ -5295,6 +6877,128 @@ const chatTimestampStyle: React.CSSProperties = {
 const chatComposerStyle: React.CSSProperties = {
   display: "grid",
   gap: 10,
+};
+
+const chatComposerModesRowStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  flexWrap: "wrap",
+};
+
+const chatModeButtonStyle: React.CSSProperties = {
+  borderRadius: 999,
+  border: "1px solid var(--workspace-border)",
+  background: "var(--workspace-surface)",
+  color: "var(--workspace-muted)",
+  fontSize: 12,
+  fontWeight: 600,
+  padding: "6px 10px",
+  cursor: "pointer",
+};
+
+const chatModeButtonActiveStyle: React.CSSProperties = {
+  ...chatModeButtonStyle,
+  color: "var(--workspace-text)",
+  borderColor: "var(--workspace-accent-strong)",
+  background: "var(--workspace-accent-soft)",
+};
+
+const chatHomeTextareaStyle: React.CSSProperties = {
+  ...homeChatInputStyle,
+  minHeight: 68,
+  maxHeight: 180,
+  resize: "none",
+  fontSize: 15,
+  lineHeight: 1.45,
+};
+
+const workspaceChatTextareaCompactStyle: React.CSSProperties = {
+  ...chatHomeTextareaStyle,
+  minHeight: 56,
+  maxHeight: 160,
+  fontSize: 14,
+  lineHeight: 1.4,
+  padding: "6px 8px",
+};
+
+const chatToolButtonDisabledStyle: React.CSSProperties = {
+  ...homeToolButtonIconStyle,
+  opacity: 0.62,
+  cursor: "not-allowed",
+};
+
+const chatToolButtonLabelDisabledStyle: React.CSSProperties = {
+  ...homeToolButtonStyle,
+  opacity: 0.62,
+  cursor: "not-allowed",
+};
+
+const chatToolButtonLabelStyle: React.CSSProperties = {
+  ...homeToolButtonStyle,
+  cursor: "pointer",
+};
+
+const chatToolsPopoverStyle: React.CSSProperties = {
+  position: "absolute",
+  bottom: "calc(100% + 10px)",
+  left: 0,
+  zIndex: 20,
+  width: 320,
+  maxWidth: "min(88vw, 320px)",
+  borderRadius: 14,
+  border: "1px solid var(--workspace-border)",
+  background: "var(--workspace-surface)",
+  boxShadow: "0 16px 38px rgba(15, 23, 42, 0.14)",
+  padding: 12,
+  display: "grid",
+  gap: 10,
+};
+
+const chatToolsSectionTitleStyle: React.CSSProperties = {
+  margin: 0,
+  fontSize: 12,
+  fontWeight: 700,
+  textTransform: "uppercase",
+  letterSpacing: "0.04em",
+  color: "var(--workspace-muted)",
+};
+
+const chatToolsTokenWrapStyle: React.CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  gap: 6,
+};
+
+const chatToolsTokenStyle: React.CSSProperties = {
+  borderRadius: 999,
+  border: "1px solid rgba(15, 23, 42, 0.12)",
+  background: "rgba(15, 23, 42, 0.04)",
+  padding: "4px 8px",
+  fontSize: 12,
+};
+
+const chatToolsMutedCopyStyle: React.CSSProperties = {
+  margin: 0,
+  fontSize: 12,
+  color: "var(--workspace-muted)",
+};
+
+const chatToolsActionListStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 6,
+};
+
+const chatToolsActionButtonStyle: React.CSSProperties = {
+  borderRadius: 10,
+  border: "1px solid var(--workspace-border)",
+  background: "var(--workspace-surface)",
+  color: "var(--workspace-text)",
+  fontSize: 12,
+  fontWeight: 600,
+  textAlign: "left",
+  padding: "7px 10px",
+  cursor: "pointer",
 };
 
 const chatTextareaStyle: React.CSSProperties = {
@@ -5341,6 +7045,21 @@ const chatErrorStyle: React.CSSProperties = {
   fontSize: 13,
 };
 
+const chatModeHintRowStyle: React.CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  gap: 8,
+};
+
+const chatModeChipStyle: React.CSSProperties = {
+  borderRadius: 999,
+  border: "1px solid rgba(15, 23, 42, 0.12)",
+  background: "rgba(15, 23, 42, 0.04)",
+  padding: "4px 10px",
+  fontSize: 12,
+  color: "var(--workspace-muted)",
+};
+
 const agentChatErrorStyle: React.CSSProperties = {
   margin: 0,
   color: "#b42318",
@@ -5368,8 +7087,8 @@ const activityIconStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
-  background: "rgba(15, 23, 42, 0.06)",
-  color: "var(--workspace-text)",
+  background: "var(--workspace-accent-soft)",
+  color: "var(--workspace-accent-strong)",
 };
 
 const activityActionStyle: React.CSSProperties = {
@@ -5979,7 +7698,7 @@ const emptyStateStyle: React.CSSProperties = {
   border: "1px dashed var(--workspace-border)",
   borderRadius: 18,
   padding: 18,
-  background: "rgba(255,255,255,0.35)",
+  background: "var(--workspace-well)",
 };
 
 const emptyIconStyle: React.CSSProperties = {
@@ -5989,8 +7708,8 @@ const emptyIconStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
-  background: "rgba(15, 23, 42, 0.06)",
-  color: "var(--workspace-text)",
+  background: "var(--workspace-accent-soft)",
+  color: "var(--workspace-accent-strong)",
 };
 
 const emptyTitleStyle: React.CSSProperties = {

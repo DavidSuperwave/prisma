@@ -7,6 +7,8 @@ export default [
     ignores: [
       ".next/**",
       "prisma/**",
+      "hermes-sidecar/**",
+      "docs/gb-automotriz-web-patch/**",
     ],
   },
   ...nextConfig,

@@ -7,6 +7,9 @@ import {
   type ConversationRow,
 } from "@/app/api/workspaces/[workspaceSlug]/conversations/_shared";
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 type Context = {
   params: Promise<{ workspaceSlug: string }>;
 };
@@ -69,7 +72,7 @@ export async function GET(request: Request, context: Context) {
 
     let query = supabase
       .from("workspace_conversations")
-      .select("id, workspace_id, agent_id, title, source, runtime_conversation_id, channel_type, channel_identity, metadata, message_count, last_message_at, created_by, created_at, updated_at")
+      .select("id, workspace_id, agent_id, title, source, runtime_conversation_id, channel_type, channel_identity, metadata, agent_paused, message_count, last_message_at, created_by, created_at, updated_at")
       .eq("workspace_id", workspaceContext.workspaceId)
       .order("updated_at", { ascending: false })
       .limit(limit);
@@ -182,7 +185,7 @@ export async function POST(request: Request, context: Context) {
         metadata,
         created_by: workspaceContext.user.id,
       })
-      .select("id, workspace_id, agent_id, title, source, runtime_conversation_id, channel_type, channel_identity, metadata, message_count, last_message_at, created_by, created_at, updated_at")
+      .select("id, workspace_id, agent_id, title, source, runtime_conversation_id, channel_type, channel_identity, metadata, agent_paused, message_count, last_message_at, created_by, created_at, updated_at")
       .single();
 
     if (insertError) {

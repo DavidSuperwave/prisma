@@ -1,8 +1,11 @@
+import { redirect } from "next/navigation";
 import {
   applyViewToRecords,
   deriveQueueItems,
+  getCrmObject,
   getWorkspaceSnapshotForUser,
   getRecordFieldValue,
+  listWorkspaceViews,
 } from "@/lib/workspaceStore";
 import { listAgentTemplates, listDashboardCardsForWorkspace } from "@/lib/platformStore";
 import { listDirectThreadsForUser, listMessagesForScope, listWorkspaceChannelsForUser } from "@/lib/teamChatStore";
@@ -16,11 +19,13 @@ import {
   FieldsPanel,
   HomeOverviewPanel,
   ImportPanel,
-  QueuePanel,
   RecordDetailPanel,
   TeamChatPanel,
 } from "@/components/workspace/panels";
+import { DocumentsLibraryPanel } from "@/components/workspace/documents/DocumentsLibraryPanel";
 import { requireAuthenticatedUser } from "@/lib/auth";
+import { buildWorkspaceNavItems } from "@/lib/workspaceNav";
+import { bootstrapDocuments } from "@/lib/documentsBootstrap";
 
 type PageProps = {
   params: Promise<{ workspaceSlug: string }>;
@@ -32,6 +37,8 @@ type PageProps = {
     ask?: string;
     prompt?: string;
     agent?: string;
+    folder?: string;
+    file?: string;
   }>;
 };
 
@@ -85,6 +92,37 @@ function formatAgentSummary(agents: Array<{
         ? agent.knowledgeScope.last_cron_run_at
         : null,
   }));
+}
+
+function normalizeAgentSkillToken(value: string) {
+  return value.trim().toLowerCase().replace(/[\s._-]+/g, "");
+}
+
+function deriveChatAgentCapabilities(agent: {
+  skills: string[];
+  knowledgeScope: Record<string, unknown>;
+}) {
+  const normalizedSkillTokens = (agent.skills ?? []).map(normalizeAgentSkillToken);
+  const webSearch =
+    normalizedSkillTokens.includes("web") ||
+    normalizedSkillTokens.includes("websearch") ||
+    normalizedSkillTokens.includes("webextract");
+  const browser =
+    normalizedSkillTokens.includes("browser") ||
+    normalizedSkillTokens.includes("browsernavigate") ||
+    normalizedSkillTokens.includes("browservision");
+  return {
+    webSearch,
+    browser,
+    integration:
+      webSearch ||
+      browser ||
+      normalizedSkillTokens.some((token) => token.includes("integration") || token.startsWith("mcp")),
+    ingestion:
+      normalizedSkillTokens.some((token) => token.includes("import") || token.includes("document")) ||
+      Array.isArray(agent.knowledgeScope.read),
+    workspaceActions: true,
+  };
 }
 
 function humanizeStatus(status: string) {
@@ -187,9 +225,32 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
       directMessageId: undefined,
     }),
   ]);
+  let documentsObject = snapshot.objects.find((object) => object.name === "Documents") ?? null;
+  if (!documentsObject) {
+    try {
+      const result = await bootstrapDocuments(snapshot.workspace.id);
+      if (result.documentsObjectId) {
+        documentsObject = {
+          id: result.documentsObjectId,
+          workspaceId: snapshot.workspace.id,
+          name: "Documents",
+          slug: "documents",
+          singularName: "Documento",
+          pluralName: "Documentos",
+          description: "Biblioteca de archivos del workspace.",
+          icon: "folder",
+          kind: null,
+          isSystem: false,
+          createdAt: new Date().toISOString(),
+        };
+        snapshot.objects.push(documentsObject);
+      }
+    } catch (error) {
+      console.error("bootstrapDocuments (page render) failed", error);
+    }
+  }
   const currentObject =
     snapshot.objects.find((object) => object.id === query.object) ?? snapshot.objects[0] ?? null;
-  const documentsObject = snapshot.objects.find((object) => object.name === "Documents") ?? null;
   const currentView =
     snapshot.views.find((view) => view.id === query.view && view.objectId === currentObject?.id) ??
     snapshot.views.find((view) => view.objectId === currentObject?.id) ??
@@ -233,29 +294,45 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
 
   const queueItems = deriveQueueItems(snapshot.objects, snapshot.records, snapshot.tasks);
   const selectedTab = query.tab ?? "home";
-  const objectNameCounts = snapshot.objects.reduce<Map<string, number>>((counts, object) => {
-    counts.set(object.name, (counts.get(object.name) ?? 0) + 1);
-    return counts;
-  }, new Map<string, number>());
-  const objectNameSeen = new Map<string, number>();
-  const objectNavItems = snapshot.objects.map((object) => {
-    const seenCount = (objectNameSeen.get(object.name) ?? 0) + 1;
-    objectNameSeen.set(object.name, seenCount);
-    const totalWithSameName = objectNameCounts.get(object.name) ?? 1;
-    return {
-      id: `object-${object.id}`,
-      label: totalWithSameName > 1 ? `${object.name} ${seenCount}` : object.name,
-      href: `/workspaces/${snapshot.workspace.subdomain}?tab=data&object=${object.id}`,
-      meta:
-        object.description ??
-        (totalWithSameName > 1 ? `Objeto ${seenCount} de ${totalWithSameName}` : "Vista operativa"),
-      active: selectedTab === "data" && currentObject?.id === object.id,
-      hidden:
-        object.name === "Documents" ||
-        object.name === "Companies" ||
-        object.name === "Leads" ||
-        object.name === "Receivables",
-    };
+
+  if (selectedTab === "queue") {
+    redirect(`/workspaces/${snapshot.workspace.subdomain}/tasks?view=queue`);
+  }
+  if (selectedTab === "activity") {
+    redirect(`/workspaces/${snapshot.workspace.subdomain}?tab=agents`);
+  }
+  const [peopleObjForNav, companiesObjForNav, dealsObjForNav] = await Promise.all([
+    getCrmObject(snapshot.workspace.id, "crm_people"),
+    getCrmObject(snapshot.workspace.id, "crm_companies"),
+    getCrmObject(snapshot.workspace.id, "crm_deals"),
+  ]);
+  const crmEntityByObjectId = new Map<string, "people" | "companies" | "deals">();
+  if (peopleObjForNav) crmEntityByObjectId.set(peopleObjForNav.id, "people");
+  if (companiesObjForNav) crmEntityByObjectId.set(companiesObjForNav.id, "companies");
+  if (dealsObjForNav) crmEntityByObjectId.set(dealsObjForNav.id, "deals");
+  const allWorkspaceViews = crmEntityByObjectId.size > 0 ? await listWorkspaceViews(snapshot.workspace.id) : [];
+  const pinnedSmartViews = allWorkspaceViews
+    .filter((view) => view.isPinned && crmEntityByObjectId.has(view.objectId))
+    .filter((view) => view.scope !== "private" || view.createdByUserId === user.id)
+    .map((view) => ({
+      id: view.id,
+      name: view.name,
+      entity: crmEntityByObjectId.get(view.objectId)!,
+    }));
+
+  const navItems = buildWorkspaceNavItems({
+    workspaceSlug: snapshot.workspace.subdomain,
+    selectedTab,
+    snapshot: {
+      objects: snapshot.objects,
+      agents: snapshot.agents,
+    },
+    queueCount: queueItems.length,
+    documentsObjectId: documentsObject?.id ?? null,
+    teamChatChannelsCount: teamChatChannels.length,
+    currentObjectId: currentObject?.id ?? null,
+    currentRole: membership.role,
+    pinnedSmartViews,
   });
   const copilot =
     (() => {
@@ -326,19 +403,53 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
   );
 
   if (selectedTab === "data") {
-    content = (
-      <DatasetPanel
-        objects={snapshot.objects}
-        fields={snapshot.fields}
-        views={snapshot.views}
-        records={snapshot.records}
-        workspaceSlug={snapshot.workspace.subdomain}
-        currentRole={membership.role}
-        initialObjectId={query.object}
-        initialViewId={query.view}
-        recordBaseHref={`/workspaces/${snapshot.workspace.subdomain}?tab=record`}
-      />
-    );
+    if (documentsObject && currentObject?.id === documentsObject.id) {
+      content = (
+        <DocumentsLibraryPanel
+          workspaceId={snapshot.workspace.id}
+          workspaceSlug={snapshot.workspace.subdomain}
+          documentsObjectId={documentsObject.id}
+          currentRole={membership.role}
+          initialFolderId={query.folder ?? null}
+          initialFileId={query.file ?? null}
+        />
+      );
+    } else {
+      content = (
+        <DatasetPanel
+          objects={snapshot.objects}
+          fields={snapshot.fields}
+          views={snapshot.views}
+          records={snapshot.records}
+          workspaceSlug={snapshot.workspace.subdomain}
+          currentRole={membership.role}
+          initialObjectId={query.object}
+          initialViewId={query.view}
+          recordBaseHref={`/workspaces/${snapshot.workspace.subdomain}?tab=record`}
+          askHref={
+            currentObject
+              ? `/workspaces/${snapshot.workspace.subdomain}?tab=chat&ask=dataset&object=${currentObject.id}`
+              : undefined
+          }
+          workspaceId={snapshot.workspace.id}
+          userId={user.id}
+          agents={snapshot.agents.map((agent) => ({
+            id: agent.id,
+            name: agent.name,
+            type: agent.type,
+            status: agent.status,
+            isPrimaryCopilot:
+              typeof snapshot.workspace.metadata?.primary_copilot_agent_id === "string" &&
+              snapshot.workspace.metadata.primary_copilot_agent_id === agent.id,
+          }))}
+          primaryAgentId={
+            typeof snapshot.workspace.metadata?.primary_copilot_agent_id === "string"
+              ? snapshot.workspace.metadata.primary_copilot_agent_id
+              : copilot?.id ?? null
+          }
+        />
+      );
+    }
   }
 
   if (selectedTab === "import") {
@@ -368,25 +479,6 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
         workspaceSlug={snapshot.workspace.subdomain}
         currentRole={membership.role}
         agents={formatAgentSummary(snapshot.agents)}
-      />
-    );
-  }
-
-  if (selectedTab === "activity") {
-    content = (
-      <ActivityPanel
-        workspaceSlug={snapshot.workspace.subdomain}
-        agents={snapshot.agents}
-        initialActivity={snapshot.activity}
-      />
-    );
-  }
-
-  if (selectedTab === "queue") {
-    content = (
-      <QueuePanel
-        queueItems={queueItems}
-        recordBaseHref={`/workspaces/${snapshot.workspace.subdomain}?tab=record`}
       />
     );
   }
@@ -449,7 +541,9 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
         ]}
         contextSummary={{
           activeTab: selectedTab,
-          activeObjectName: currentObject?.name ?? null,
+          // Only surface a "current dataset" when the user explicitly navigated to one via ?object=.
+          // Falling back to snapshot.objects[0] mislead the agent (e.g. "current dataset: Documents").
+          activeObjectName: query.object ? currentObject?.name ?? null : null,
           activeViewName: currentView?.name ?? null,
           activeRecordName:
             selectedRecord
@@ -464,6 +558,8 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
           queueTitles: queueItems.slice(0, 5).map((item) => `${item.title} (${item.status})`),
         }}
         askPrompt={askPrompt}
+        objects={snapshot.objects}
+        fields={snapshot.fields}
         chatAgents={snapshot.agents.map((agent) => ({
           ...(() => {
             const explicitReadinessState =
@@ -494,6 +590,8 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
           type: agent.type,
           status: agent.status,
           description: agent.description,
+          skills: agent.skills ?? [],
+          capabilities: deriveChatAgentCapabilities(agent),
           isPrimaryCopilot:
             typeof snapshot.workspace.metadata?.primary_copilot_agent_id === "string" &&
             snapshot.workspace.metadata.primary_copilot_agent_id === agent.id,
@@ -550,16 +648,22 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
 
   if (selectedTab === "agents") {
     content = (
-      <AgentOverviewPanel
-        workspaceId={snapshot.workspace.id}
-        workspaceSlug={snapshot.workspace.subdomain}
-        currentRole={membership.role}
-        currentUserEmail={user.email}
-        agentLimit={snapshot.workspace.agentLimit}
-        agentTemplates={agentTemplates}
-        agents={formatAgentSummary(snapshot.agents)}
-        activity={snapshot.activity}
-      />
+      <>
+        <AgentOverviewPanel
+          workspaceId={snapshot.workspace.id}
+          workspaceSlug={snapshot.workspace.subdomain}
+          currentRole={membership.role}
+          currentUserEmail={user.email}
+          agentLimit={snapshot.workspace.agentLimit}
+          agentTemplates={agentTemplates}
+          agents={formatAgentSummary(snapshot.agents)}
+        />
+        <ActivityPanel
+          workspaceSlug={snapshot.workspace.subdomain}
+          agents={snapshot.agents}
+          initialActivity={snapshot.activity}
+        />
+      </>
     );
   }
 
@@ -584,92 +688,7 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
       accentColor={snapshot.workspace.primaryColor}
       currentUserEmail={user.email}
       currentRole={membership.role}
-      navItems={[
-        {
-          id: "home",
-          label: "Inicio",
-          href: `/workspaces/${snapshot.workspace.subdomain}?tab=home`,
-          meta: "Resumen del dia",
-          active: selectedTab === "home",
-        },
-        {
-          id: "chat",
-          label: "Chat",
-          href: `/workspaces/${snapshot.workspace.subdomain}?tab=chat`,
-          meta: "Conversaciones con agentes",
-          active: selectedTab === "chat",
-        },
-        {
-          id: "inbox",
-          label: "Inbox",
-          href: `/workspaces/${snapshot.workspace.subdomain}?tab=inbox`,
-          meta: "Proximamente",
-          disabled: true,
-        },
-        {
-          id: "agents",
-          label: "Agentes",
-          href: `/workspaces/${snapshot.workspace.subdomain}?tab=agents`,
-          meta: `${snapshot.agents.length} configurados`,
-          active: selectedTab === "agents",
-          hidden: membership.role === "viewer",
-        },
-        {
-          id: "queue",
-          label: "Cola operativa",
-          href: `/workspaces/${snapshot.workspace.subdomain}?tab=queue`,
-          badge: queueItems.length,
-          meta: "Tareas que requieren accion",
-          active: selectedTab === "queue",
-        },
-        {
-          id: "documents",
-          label: "Documentos",
-          href: `/workspaces/${snapshot.workspace.subdomain}?tab=data&object=${documentsObject?.id ?? ""}`,
-          meta: "Biblioteca y seguimiento documental",
-          hidden: !documentsObject,
-          active: selectedTab === "data" && currentObject?.id === (documentsObject?.id ?? ""),
-        },
-        {
-          id: "fields",
-          label: "Campos",
-          href: `/workspaces/${snapshot.workspace.subdomain}?tab=fields`,
-          meta: "Gestionar esquema",
-          hidden: membership.role !== "admin",
-          active: selectedTab === "fields",
-        },
-        {
-          id: "channels",
-          label: "Canales",
-          href: `/workspaces/${snapshot.workspace.subdomain}?tab=channels`,
-          meta: "WhatsApp",
-          hidden: membership.role === "viewer",
-          active: selectedTab === "channels",
-        },
-        {
-          id: "activity",
-          label: "Actividad",
-          href: `/workspaces/${snapshot.workspace.subdomain}?tab=activity`,
-          meta: "Feed filtrable",
-          active: selectedTab === "activity",
-        },
-        {
-          id: "team-chat",
-          label: "Equipo",
-          href: `/workspaces/${snapshot.workspace.subdomain}?tab=team-chat`,
-          meta: `${teamChatChannels.length} canales`,
-          active: selectedTab === "team-chat",
-        },
-        {
-          id: "import",
-          label: "Importar",
-          href: `/workspaces/${snapshot.workspace.subdomain}?tab=import`,
-          meta: "CSV / XLSX",
-          hidden: membership.role === "viewer",
-          active: selectedTab === "import",
-        },
-        ...objectNavItems,
-      ]}
+      navItems={navItems}
     >
       {content}
     </WorkspaceShell>

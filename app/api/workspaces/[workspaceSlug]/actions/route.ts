@@ -8,6 +8,9 @@ import {
   type WorkspaceSchemaProposal,
 } from "@/lib/workspaceActions";
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 type Context = {
   params: Promise<{ workspaceSlug: string }>;
 };

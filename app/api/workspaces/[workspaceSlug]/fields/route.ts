@@ -2,6 +2,9 @@ import { getCurrentAppUser } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
 import { listWorkspaceMembershipsForUser } from "@/lib/workspaceStore";
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 type Context = {
   params: Promise<{ workspaceSlug: string }>;
 };

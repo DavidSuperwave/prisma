@@ -3,6 +3,10 @@ import {
   evaluateAgentReadiness,
   mergeReadinessIntoKnowledgeScope,
 } from "@/lib/agentReadiness";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
 import { listWorkspaceMembershipsForUser } from "@/lib/workspaceStore";
 

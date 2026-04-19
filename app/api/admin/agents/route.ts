@@ -1,6 +1,9 @@
 import { createAgentDefinition, listAgents, updateAgentDefinition } from '@/lib/platformStore'
 import { ensureAdminApiAccess } from '@/lib/auth'
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 type CreateAgentRequest = {
   workspaceId?: string
   projectId?: string

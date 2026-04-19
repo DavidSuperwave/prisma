@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Download, FileStack, MessageSquare, Upload } from "lucide-react";
-import * as XLSX from "xlsx";
 import type {
   PrismaWorkspaceActivity,
   PrismaWorkspaceAgent,
@@ -51,6 +51,20 @@ type ImportSummary = {
   rowsTotal: number;
   rowsImported: number;
   rowsSkipped: number;
+  rowsUpdated?: number;
+};
+
+type ImportMode = "skip" | "update" | "upsert";
+
+const IMPORT_MODE_LABELS: Record<ImportMode, string> = {
+  skip: "Omitir duplicados",
+  update: "Actualizar si existe",
+  upsert: "Insertar o actualizar",
+};
+
+const CRM_KIND_DEDUPE_HINT: Record<string, string> = {
+  crm_people: "email",
+  crm_companies: "domain",
 };
 
 const IMPORT_BATCH_SIZE = 500;
@@ -216,6 +230,7 @@ function parseCsv(raw: string) {
 export function ImportPanel({ workspaceSlug, objects, fields }: ImportPanelProps) {
   const [selectedObjectId, setSelectedObjectId] = useState<string>(objects[0]?.id ?? "");
   const [dedupeFieldKey, setDedupeFieldKey] = useState<string>("none");
+  const [importMode, setImportMode] = useState<ImportMode>("skip");
   const [fileName, setFileName] = useState<string>("");
   const [previewColumns, setPreviewColumns] = useState<ImportPreviewColumn[]>([]);
   const [previewRows, setPreviewRows] = useState<Array<Record<string, unknown>>>([]);
@@ -230,6 +245,20 @@ export function ImportPanel({ workspaceSlug, objects, fields }: ImportPanelProps
   const selectedFields = fields
     .filter((field) => field.objectId === selectedObject?.id)
     .sort((left, right) => left.sortOrder - right.sortOrder);
+  const selectedObjectKind =
+    selectedObject && typeof (selectedObject as { kind?: unknown }).kind === "string"
+      ? ((selectedObject as { kind: string }).kind)
+      : null;
+  const crmDedupeHint = selectedObjectKind ? CRM_KIND_DEDUPE_HINT[selectedObjectKind] ?? null : null;
+
+  useEffect(() => {
+    if (importMode === "skip") return;
+    if (dedupeFieldKey !== "none") return;
+    if (!crmDedupeHint) return;
+    if (selectedFields.some((field) => field.key === crmDedupeHint)) {
+      setDedupeFieldKey(crmDedupeHint);
+    }
+  }, [importMode, dedupeFieldKey, crmDedupeHint, selectedFields]);
 
   useEffect(() => {
     setPreviewColumns([]);
@@ -276,6 +305,9 @@ export function ImportPanel({ workspaceSlug, objects, fields }: ImportPanelProps
         headers = parsed.headers;
         rows = parsed.rows;
       } else if (extension === "xlsx" || extension === "xls") {
+        // Load the (~400KB) xlsx module only when the user actually picks a
+        // spreadsheet, keeping the panels chunk small on first render.
+        const XLSX = await import("xlsx");
         const workbook = XLSX.read(fileBuffer, { type: "array" });
         const firstSheetName = workbook.SheetNames[0];
         const firstSheet = firstSheetName ? workbook.Sheets[firstSheetName] : undefined;
@@ -367,6 +399,7 @@ export function ImportPanel({ workspaceSlug, objects, fields }: ImportPanelProps
     try {
       let imported = 0;
       let skipped = 0;
+      let upserted = 0;
       for (let index = 0; index < mappedRows.length; index += IMPORT_BATCH_SIZE) {
         const batch = mappedRows.slice(index, index + IMPORT_BATCH_SIZE);
         const response = await fetch(`/api/workspaces/${workspaceSlug}/imports`, {
@@ -376,6 +409,8 @@ export function ImportPanel({ workspaceSlug, objects, fields }: ImportPanelProps
             objectId: selectedObject.id,
             rows: batch,
             dedupeFieldKey: dedupeFieldKey === "none" ? undefined : dedupeFieldKey,
+            dedupeKey: dedupeFieldKey === "none" ? undefined : dedupeFieldKey,
+            mode: importMode,
             fileName,
           }),
         });
@@ -388,12 +423,14 @@ export function ImportPanel({ workspaceSlug, objects, fields }: ImportPanelProps
         }
         imported += payload.import.rowsImported;
         skipped += payload.import.rowsSkipped;
+        upserted += payload.import.rowsUpdated ?? 0;
       }
 
       setImportSummary({
         rowsTotal: mappedRows.length,
         rowsImported: imported,
         rowsSkipped: skipped,
+        rowsUpdated: upserted,
       });
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "No se pudo ejecutar la importación.");
@@ -432,7 +469,30 @@ export function ImportPanel({ workspaceSlug, objects, fields }: ImportPanelProps
                 ))}
               </select>
             </label>
+            <label style={inputLabelStyle}>
+              Modo
+              <select
+                value={importMode}
+                onChange={(event) => setImportMode(event.target.value as ImportMode)}
+                style={inputStyle}
+              >
+                <option value="skip">{IMPORT_MODE_LABELS.skip}</option>
+                <option value="update">{IMPORT_MODE_LABELS.update}</option>
+                <option value="upsert">{IMPORT_MODE_LABELS.upsert}</option>
+              </select>
+            </label>
           </div>
+          {crmDedupeHint && importMode !== "skip" ? (
+            <p
+              style={{
+                margin: 0,
+                fontSize: 12,
+                color: "var(--workspace-muted)",
+              }}
+            >
+              Modo: {IMPORT_MODE_LABELS[importMode]} (por {crmDedupeHint})
+            </p>
+          ) : null}
           <label style={actionButtonStyle}>
             <Upload size={14} />
             Cargar archivo
@@ -573,7 +633,9 @@ export function ImportPanel({ workspaceSlug, objects, fields }: ImportPanelProps
 }
 
 export function FieldsPanel({ workspaceSlug, currentRole, objects, fields }: FieldsPanelProps) {
+  const router = useRouter();
   const canManage = currentRole === "admin";
+  const [localObjects, setLocalObjects] = useState<PrismaWorkspaceObject[]>(objects);
   const [selectedObjectId, setSelectedObjectId] = useState<string>(objects[0]?.id ?? "");
   const [localFields, setLocalFields] = useState<PrismaWorkspaceField[]>(fields);
   const [editingFieldId, setEditingFieldId] = useState<string | null>(null);
@@ -591,6 +653,17 @@ export function FieldsPanel({ workspaceSlug, currentRole, objects, fields }: Fie
   useEffect(() => {
     setLocalFields(fields);
   }, [fields]);
+
+  useEffect(() => {
+    setLocalObjects(objects);
+  }, [objects]);
+
+  const selectedObject = useMemo(
+    () => localObjects.find((object) => object.id === selectedObjectId) ?? null,
+    [localObjects, selectedObjectId],
+  );
+  const canDeleteSelectedObject =
+    canManage && selectedObject !== null && !selectedObject.isSystem && selectedObject.kind === null;
 
   const selectedFields = useMemo(
     () => localFields.filter((field) => field.objectId === selectedObjectId).sort((a, b) => a.sortOrder - b.sortOrder),
@@ -693,6 +766,44 @@ export function FieldsPanel({ workspaceSlug, currentRole, objects, fields }: Fie
     }
   }
 
+  async function deleteSelectedObject() {
+    if (!canDeleteSelectedObject || !selectedObject || isSaving) return;
+    const confirmed = window.confirm(
+      `Esta acción elimina el objeto "${selectedObject.name}" y todos sus registros. ¿Continuar?`,
+    );
+    if (!confirmed) return;
+    setIsSaving(true);
+    setError("");
+    setSuccess("");
+    try {
+      const response = await fetch(
+        `/api/workspaces/${workspaceSlug}/objects/${selectedObject.id}`,
+        { method: "DELETE" },
+      );
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        deletedObjectId?: string;
+      };
+      if (!response.ok || !payload.deletedObjectId) {
+        throw new Error(payload.error ?? "No se pudo eliminar el objeto.");
+      }
+      const deletedId = payload.deletedObjectId;
+      setLocalFields((current) => current.filter((field) => field.objectId !== deletedId));
+      setLocalObjects((current) => {
+        const next = current.filter((object) => object.id !== deletedId);
+        setSelectedObjectId(next[0]?.id ?? "");
+        return next;
+      });
+      resetDraft();
+      setSuccess("Objeto eliminado.");
+      router.refresh();
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "No se pudo eliminar el objeto.");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
   async function moveField(field: PrismaWorkspaceField, direction: "up" | "down") {
     if (!canManage || isSaving) return;
     const ordered = [...selectedFields];
@@ -748,13 +859,28 @@ export function FieldsPanel({ workspaceSlug, currentRole, objects, fields }: Fie
           <label style={inputLabelStyle}>
             Objeto
             <select value={selectedObjectId} onChange={(event) => setSelectedObjectId(event.target.value)} style={inputStyle}>
-              {objects.map((object) => (
+              {localObjects.map((object) => (
                 <option key={object.id} value={object.id}>
                   {object.name}
                 </option>
               ))}
             </select>
           </label>
+          {canManage && selectedObject ? (
+            <button
+              type="button"
+              style={dangerButtonStyle}
+              onClick={() => void deleteSelectedObject()}
+              disabled={!canDeleteSelectedObject || isSaving}
+              title={
+                canDeleteSelectedObject
+                  ? "Elimina el objeto y todos sus registros"
+                  : "Los objetos del CRM no se pueden eliminar"
+              }
+            >
+              Eliminar objeto
+            </button>
+          ) : null}
           {!canManage ? <StatusPill tone="warning">Solo administradores pueden editar campos</StatusPill> : null}
         </div>
 
@@ -907,6 +1033,10 @@ export function ChannelsPanel({ workspaceSlug, currentRole, agents }: ChannelsPa
   } | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [isChecking, setIsChecking] = useState(false);
+  const [isPairing, setIsPairing] = useState(false);
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollDeadlineRef = useRef<number>(0);
   const [error, setError] = useState("");
   const [runtimeState, setRuntimeState] = useState<"reachable" | "unreachable" | "missing_endpoint" | "missing_api_key" | "unknown">("unknown");
   const [runtimeMessage, setRuntimeMessage] = useState<string>("Aún no se ha validado el runtime.");
@@ -1158,6 +1288,119 @@ export function ChannelsPanel({ workspaceSlug, currentRole, agents }: ChannelsPa
     }
   }
 
+  const stopPolling = useCallback(() => {
+    if (pollTimerRef.current) {
+      clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+    pollDeadlineRef.current = 0;
+    setIsPairing(false);
+  }, []);
+
+  const pollPairingStatus = useCallback(async (agentId: string, fallbackName: string) => {
+    if (Date.now() > pollDeadlineRef.current) {
+      stopPolling();
+      setError("Tiempo de emparejamiento agotado. Escanea el nuevo QR o reintenta.");
+      return;
+    }
+    await loadAgentChannelStatus(agentId, fallbackName);
+  }, [loadAgentChannelStatus, stopPolling]);
+
+  useEffect(() => {
+    if (gatewayStatus?.paired) {
+      stopPolling();
+    }
+  }, [gatewayStatus?.paired, stopPolling]);
+
+  useEffect(() => {
+    return () => {
+      if (pollTimerRef.current) {
+        clearInterval(pollTimerRef.current);
+      }
+    };
+  }, []);
+
+  async function startPairing(force: boolean) {
+    if (!selectedAgent || !canManage || isPairing) return;
+    setIsPairing(true);
+    setError("");
+    setStatusMessage("");
+    try {
+      const url = force
+        ? `/api/workspaces/${workspaceSlug}/agents/${selectedAgent.id}/whatsapp/pair?force=true`
+        : `/api/workspaces/${workspaceSlug}/agents/${selectedAgent.id}/whatsapp/pair`;
+      const response = await fetch(url, { method: "POST" });
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        channelStatus?: {
+          status?: string;
+          paired?: boolean;
+          qr?: string | null;
+          lastSeen?: string | null;
+        } | null;
+      };
+      if (!response.ok) {
+        const hint =
+          response.status === 409
+            ? "Ya hay una sesión emparejada. Usa 'Re-emparejar' para generar un nuevo QR."
+            : null;
+        throw new Error(hint ?? payload.error ?? "No se pudo iniciar el emparejamiento.");
+      }
+      if (payload.channelStatus) {
+        setGatewayStatus({
+          status: payload.channelStatus.status ?? "pairing",
+          paired: payload.channelStatus.paired === true,
+          qr: payload.channelStatus.qr ?? null,
+          lastSeen: payload.channelStatus.lastSeen ?? new Date().toISOString(),
+        });
+      }
+      setStatusMessage("Abre WhatsApp → Dispositivos vinculados → Vincular un dispositivo.");
+      pollDeadlineRef.current = Date.now() + 120_000;
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+      const agentId = selectedAgent.id;
+      const agentName = selectedAgent.name ?? "Canal";
+      pollTimerRef.current = setInterval(() => {
+        void pollPairingStatus(agentId, agentName);
+      }, 3_000);
+      void loadAgentChannelStatus(agentId, agentName);
+    } catch (caughtError) {
+      stopPolling();
+      setError(caughtError instanceof Error ? caughtError.message : "No se pudo iniciar el emparejamiento.");
+    }
+  }
+
+  async function logoutWhatsapp() {
+    if (!selectedAgent || !canManage || isLoggingOut) return;
+    if (typeof window !== "undefined" && !window.confirm("Esto desvincula WhatsApp y requerirá un nuevo QR. ¿Continuar?")) {
+      return;
+    }
+    setIsLoggingOut(true);
+    setError("");
+    setStatusMessage("");
+    try {
+      const response = await fetch(
+        `/api/workspaces/${workspaceSlug}/agents/${selectedAgent.id}/whatsapp/pair`,
+        { method: "DELETE" },
+      );
+      const payload = (await response.json().catch(() => ({}))) as { error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "No se pudo desvincular WhatsApp.");
+      }
+      setStatusMessage("Sesión de WhatsApp eliminada. Inicia un nuevo emparejamiento.");
+      setGatewayStatus({
+        status: "idle",
+        paired: false,
+        qr: null,
+        lastSeen: null,
+      });
+      stopPolling();
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "No se pudo desvincular WhatsApp.");
+    } finally {
+      setIsLoggingOut(false);
+    }
+  }
+
   if (channelAgents.length === 0) {
     return (
       <div style={stackStyle}>
@@ -1234,6 +1477,28 @@ export function ChannelsPanel({ workspaceSlug, currentRole, agents }: ChannelsPa
               <button type="button" style={actionButtonStyle} onClick={() => void verifyChannelHealth()} disabled={!canManage || isChecking}>
                 {isChecking ? "Verificando..." : "Verificar conexión"}
               </button>
+              <button
+                type="button"
+                style={actionButtonStyle}
+                onClick={() => void startPairing(Boolean(gatewayStatus?.paired))}
+                disabled={!canManage || isPairing || isLoggingOut}
+              >
+                {isPairing
+                  ? "Generando QR..."
+                  : gatewayStatus?.paired
+                    ? "Re-emparejar WhatsApp"
+                    : "Emparejar WhatsApp"}
+              </button>
+              {gatewayStatus?.paired ? (
+                <button
+                  type="button"
+                  style={actionButtonStyle}
+                  onClick={() => void logoutWhatsapp()}
+                  disabled={!canManage || isLoggingOut || isPairing}
+                >
+                  {isLoggingOut ? "Desvinculando..." : "Desvincular"}
+                </button>
+              ) : null}
             </div>
           </div>
 
@@ -1251,12 +1516,30 @@ export function ChannelsPanel({ workspaceSlug, currentRole, agents }: ChannelsPa
                 : "Aún no se ha ejecutado una verificación."}
             </p>
             {gatewayStatus?.qr ? (
-              <img src={gatewayStatus.qr} alt="QR de emparejamiento de WhatsApp" style={qrImageStyle} />
+              <div style={{ display: "grid", gap: 10, justifyItems: "center" }}>
+                <img src={gatewayStatus.qr} alt="QR de emparejamiento de WhatsApp" style={qrImageStyle} />
+                <p style={{ ...channelCardCopyStyle, textAlign: "center", margin: 0 }}>
+                  Escanea este código desde WhatsApp → Dispositivos vinculados → Vincular un dispositivo.
+                  {isPairing ? " Actualizando cada 3 s." : null}
+                </p>
+              </div>
+            ) : gatewayStatus?.paired ? (
+              <EmptyState
+                icon={MessageSquare}
+                title="WhatsApp emparejado"
+                description="La sesión está activa. Usa Re-emparejar si necesitas vincular otro número."
+              />
+            ) : isPairing ? (
+              <EmptyState
+                icon={MessageSquare}
+                title="Esperando QR del sidecar"
+                description="El sidecar está iniciando Baileys. El QR aparecerá en unos segundos."
+              />
             ) : (
               <EmptyState
                 icon={MessageSquare}
                 title="QR no disponible"
-                description="Cuando el runtime exponga QR se mostrará aquí para completar emparejamiento."
+                description="Presiona Emparejar WhatsApp para generar el QR desde el sidecar."
               />
             )}
           </div>
@@ -1388,12 +1671,43 @@ export function ActivityPanel({ workspaceSlug, agents, initialActivity }: Activi
     }
 
     void fetchActivity();
-    const intervalId = setInterval(() => {
-      void fetchActivity();
-    }, 15000);
+
+    // Gate polling by tab visibility and back off on errors so background tabs
+    // don't keep hitting the activity endpoint every 15s indefinitely.
+    let backoff = 15_000;
+    const MAX_BACKOFF = 120_000;
+    let timerId: ReturnType<typeof setTimeout> | null = null;
+
+    async function tick() {
+      if (typeof document === "undefined" || document.visibilityState !== "visible") {
+        // Retry soon once the tab becomes visible; visibilitychange will drive it.
+        return;
+      }
+      try {
+        await fetchActivity();
+        backoff = 15_000;
+      } catch {
+        backoff = Math.min(backoff * 2, MAX_BACKOFF);
+      } finally {
+        if (active) timerId = setTimeout(tick, backoff);
+      }
+    }
+
+    timerId = setTimeout(tick, 15_000);
+
+    function onVisibilityChange() {
+      if (document.visibilityState === "visible" && active) {
+        if (timerId) clearTimeout(timerId);
+        void fetchActivity();
+        timerId = setTimeout(tick, backoff);
+      }
+    }
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
     return () => {
       active = false;
-      clearInterval(intervalId);
+      if (timerId) clearTimeout(timerId);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, [workspaceSlug, agentFilter, actionFilter, daysFilter]);
 

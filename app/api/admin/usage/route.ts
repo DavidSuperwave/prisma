@@ -1,6 +1,9 @@
 import { listUsageEvents } from '@/lib/platformStore'
 import { ensureAdminApiAccess } from '@/lib/auth'
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 export async function GET(request: Request) {
   const authorizationFailure = await ensureAdminApiAccess()
   if (authorizationFailure) {

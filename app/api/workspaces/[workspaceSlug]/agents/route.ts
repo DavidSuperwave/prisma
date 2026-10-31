@@ -1,4 +1,5 @@
 import { getCurrentAppUser } from "@/lib/auth";
+import { checkWorkspaceAccess, writeWorkspaceAuditLog } from "@/lib/clearance/checkAccess";
 import {
   evaluateAgentReadiness,
   mergeReadinessIntoKnowledgeScope,
@@ -8,6 +9,8 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
+import { listDefaultOperatorToolNames } from "@/lib/agentTools/mcpPolicy";
+import { listAgentTemplates } from "@/lib/platformStore";
 import { listWorkspaceMembershipsForUser } from "@/lib/workspaceStore";
 
 type Context = {
@@ -24,6 +27,7 @@ type AgentRole =
 
 type CreateAgentRequest = {
   name?: string;
+  templateId?: string;
   role?: AgentRole;
   description?: string;
   soulMd?: string;
@@ -32,15 +36,21 @@ type CreateAgentRequest = {
     read?: string[];
     write?: string[];
     channels?: string[];
+    surfaces?: string[];
   };
   cronJobs?: unknown[];
   channelConfig?: Record<string, unknown>;
+  mcpToolsInclude?: string[];
+  skillsScope?: string[];
+  modelOverrides?: Record<string, unknown>;
   isActive?: boolean;
   apiEndpoint?: string;
   apiKey?: string;
   containerName?: string;
   isPrimaryCopilot?: boolean;
 };
+
+type WorkspaceAgentTemplate = Awaited<ReturnType<typeof listAgentTemplates>>[number];
 
 type AgentRow = {
   id: string;
@@ -54,6 +64,9 @@ type AgentRow = {
   status: "active" | "paused" | "deploying" | "error";
   soul_md: string | null;
   skills: string[] | null;
+  mcp_tools_include: string[] | null;
+  skills_scope: string[] | null;
+  model_overrides: Record<string, unknown> | null;
   knowledge_scope: Record<string, unknown> | null;
   cron_jobs: unknown[] | null;
   channel_config: Record<string, unknown> | null;
@@ -95,6 +108,16 @@ function mapRoleToRuntimeType(role: AgentRole): "copilot" | "channel" | "worker"
   return "worker";
 }
 
+function mapTemplateToRole(template: WorkspaceAgentTemplate): AgentRole {
+  if (template.category === "lead_qualification") return "lead_qualifier";
+  if (template.category === "follow_up") return "follow_up";
+  if (template.category === "crm_monitor") return "crm_updater";
+  if (template.category === "ops_assistant" || template.category === "inbox_ops") return "ops_assistant";
+  if (template.type === "copilot" || template.type === "chatbot") return "ops_assistant";
+  if (template.type === "channel") return "lead_qualifier";
+  return "custom";
+}
+
 function resolveWorkspaceAgentLimit(workspaceRow: { agent_limit: number | null; metadata: Record<string, unknown> | null }) {
   const directLimit = Number(workspaceRow.agent_limit ?? Number.NaN);
   if (Number.isFinite(directLimit) && directLimit > 0) {
@@ -124,11 +147,33 @@ function buildWorkspaceAgentPayload(row: AgentRow) {
   const channels = Array.isArray(knowledgeScope.channels)
     ? (knowledgeScope.channels as unknown[]).map((entry) => String(entry))
     : [];
+  const surfaces = Array.isArray(knowledgeScope.surfaces)
+    ? (knowledgeScope.surfaces as unknown[]).map((entry) => String(entry))
+    : [];
   const readinessState =
     knowledgeScope.readiness_state === "ready" ? "ready" : "draft";
   const readinessIssues = Array.isArray(knowledgeScope.readiness_issues)
     ? (knowledgeScope.readiness_issues as unknown[]).map((entry) => String(entry))
     : [];
+
+  const mcpToolsInclude = Array.isArray(row.mcp_tools_include)
+    ? row.mcp_tools_include
+    : Array.isArray(knowledgeScope.mcp_tools_include)
+      ? (knowledgeScope.mcp_tools_include as string[])
+      : [];
+  const skillsScope = Array.isArray(row.skills_scope)
+    ? row.skills_scope
+    : Array.isArray(knowledgeScope.skills_scope)
+      ? (knowledgeScope.skills_scope as string[])
+      : [];
+  const modelOverrides =
+    row.model_overrides && typeof row.model_overrides === "object" && !Array.isArray(row.model_overrides)
+      ? row.model_overrides
+      : knowledgeScope.model_overrides &&
+          typeof knowledgeScope.model_overrides === "object" &&
+          !Array.isArray(knowledgeScope.model_overrides)
+        ? (knowledgeScope.model_overrides as Record<string, unknown>)
+        : {};
 
   return {
     id: String(row.id),
@@ -142,6 +187,7 @@ function buildWorkspaceAgentPayload(row: AgentRow) {
     read,
     write,
     channels,
+    surfaces,
     cronJobs: Array.isArray(row.cron_jobs) ? row.cron_jobs : [],
     memoryLabel: Number(row.memory_limit_mb ?? 0) > 0 ? "Activada" : "Desactivada",
     soulMd: row.soul_md ?? null,
@@ -151,9 +197,14 @@ function buildWorkspaceAgentPayload(row: AgentRow) {
     containerName: row.container_name,
     lastHealthCheckAt:
       typeof knowledgeScope.last_health_check_at === "string" ? String(knowledgeScope.last_health_check_at) : null,
+    lastHealthStatus:
+      typeof knowledgeScope.last_health_status === "string" ? String(knowledgeScope.last_health_status) : null,
     lastCronRunAt:
       typeof knowledgeScope.last_cron_run_at === "string" ? String(knowledgeScope.last_cron_run_at) : null,
     channelConfig: (row.channel_config as Record<string, unknown> | null) ?? {},
+    mcpToolsInclude,
+    skillsScope,
+    modelOverrides,
     readinessState,
     readinessIssues,
     isReadyForExecution: readinessState === "ready" && readinessIssues.length === 0 && row.status === "active",
@@ -173,8 +224,39 @@ async function authorizeWorkspaceAdmin(workspaceSlug: string) {
   }
 
   if (!user.isPlatformAdmin && membership.role !== "admin") {
+    await writeWorkspaceAuditLog({
+      workspaceId: membership.workspaceId,
+      userId: user.id,
+      action: "agents.manage.denied",
+      resourceType: "agent",
+      riskLevel: "medium",
+      metadata: { reason: "role_not_allowed" },
+    });
     return {
       error: Response.json({ error: "Only workspace admins can manage agents." }, { status: 403 }),
+    };
+  }
+
+  const access = await checkWorkspaceAccess({
+    workspaceId: membership.workspaceId,
+    userId: user.id,
+    isPlatformAdmin: user.isPlatformAdmin || membership.isPlatformAdmin,
+    requiredSection: "agents",
+    requiredClearanceLevel: 3,
+    requiredFeatureFlag: "can_use_agents",
+    allowedRoles: ["admin"],
+  });
+  if (!access.allowed) {
+    await writeWorkspaceAuditLog({
+      workspaceId: membership.workspaceId,
+      userId: user.id,
+      action: "agents.manage.denied",
+      resourceType: "agent",
+      riskLevel: "medium",
+      metadata: { reason: access.reason },
+    });
+    return {
+      error: Response.json({ error: "Agent management is disabled for this workspace." }, { status: 403 }),
     };
   }
 
@@ -216,7 +298,15 @@ export async function POST(request: Request, context: Context) {
     }
 
     const payload = (await request.json().catch(() => ({}))) as CreateAgentRequest;
-    const role = payload.role ?? "custom";
+    const requestedTemplateId = payload.templateId?.trim() ?? "";
+    const templates = requestedTemplateId ? await listAgentTemplates() : [];
+    const selectedTemplate = requestedTemplateId
+      ? templates.find((template) => template.id === requestedTemplateId && template.isActive)
+      : null;
+    if (requestedTemplateId && !selectedTemplate) {
+      return Response.json({ error: "Selected agent template was not found." }, { status: 404 });
+    }
+    const role = payload.role ?? (selectedTemplate ? mapTemplateToRole(selectedTemplate) : "custom");
     const name = payload.name?.trim();
     if (!name) {
       return Response.json({ error: "name is required." }, { status: 400 });
@@ -235,21 +325,67 @@ export async function POST(request: Request, context: Context) {
       }
     }
 
-    const skills = payload.skills ? normalizeStringArray(payload.skills, "skills") : [];
-    const read = payload.knowledgeScope?.read ? normalizeStringArray(payload.knowledgeScope.read, "knowledgeScope.read") : [];
-    const write = payload.knowledgeScope?.write ? normalizeStringArray(payload.knowledgeScope.write, "knowledgeScope.write") : [];
-    const channels = payload.knowledgeScope?.channels ? normalizeStringArray(payload.knowledgeScope.channels, "knowledgeScope.channels") : [];
-    const cronJobs = payload.cronJobs ?? [];
+    const templateKnowledgeScope =
+      selectedTemplate?.defaultKnowledgeScope &&
+      typeof selectedTemplate.defaultKnowledgeScope === "object" &&
+      !Array.isArray(selectedTemplate.defaultKnowledgeScope)
+        ? selectedTemplate.defaultKnowledgeScope
+        : {};
+    const skills = payload.skills
+      ? normalizeStringArray(payload.skills, "skills")
+      : Array.isArray(selectedTemplate?.defaultSkills)
+        ? selectedTemplate.defaultSkills.map((entry) => String(entry))
+        : [];
+    const mcpToolsInclude = payload.mcpToolsInclude
+      ? normalizeStringArray(payload.mcpToolsInclude, "mcpToolsInclude")
+      : listDefaultOperatorToolNames();
+    const skillsScope = payload.skillsScope
+      ? normalizeStringArray(payload.skillsScope, "skillsScope")
+      : [];
+    const read = payload.knowledgeScope?.read
+      ? normalizeStringArray(payload.knowledgeScope.read, "knowledgeScope.read")
+      : Array.isArray(templateKnowledgeScope.read)
+        ? normalizeStringArray(templateKnowledgeScope.read, "template.read")
+        : [];
+    const write = payload.knowledgeScope?.write
+      ? normalizeStringArray(payload.knowledgeScope.write, "knowledgeScope.write")
+      : Array.isArray(templateKnowledgeScope.write)
+        ? normalizeStringArray(templateKnowledgeScope.write, "template.write")
+        : [];
+    const channels = payload.knowledgeScope?.channels
+      ? normalizeStringArray(payload.knowledgeScope.channels, "knowledgeScope.channels")
+      : Array.isArray(templateKnowledgeScope.channels)
+        ? normalizeStringArray(templateKnowledgeScope.channels, "template.channels")
+        : [];
+    const surfaces = payload.knowledgeScope?.surfaces
+      ? normalizeStringArray(payload.knowledgeScope.surfaces, "knowledgeScope.surfaces")
+      : Array.isArray(templateKnowledgeScope.surfaces)
+        ? normalizeStringArray(templateKnowledgeScope.surfaces, "template.surfaces")
+        : [];
+    const cronJobs = payload.cronJobs ?? selectedTemplate?.defaultCronJobs ?? [];
     if (!Array.isArray(cronJobs)) {
       return Response.json({ error: "cronJobs must be an array." }, { status: 400 });
     }
-    if (payload.channelConfig !== undefined) {
+    const resolvedChannelConfig =
+      payload.channelConfig !== undefined
+        ? payload.channelConfig
+        : selectedTemplate?.defaultChannelConfig ?? {};
+    if (resolvedChannelConfig !== undefined) {
       if (
-        !payload.channelConfig ||
-        typeof payload.channelConfig !== "object" ||
-        Array.isArray(payload.channelConfig)
+        !resolvedChannelConfig ||
+        typeof resolvedChannelConfig !== "object" ||
+        Array.isArray(resolvedChannelConfig)
       ) {
         return Response.json({ error: "channelConfig must be an object." }, { status: 400 });
+      }
+    }
+    if (payload.modelOverrides !== undefined) {
+      if (
+        !payload.modelOverrides ||
+        typeof payload.modelOverrides !== "object" ||
+        Array.isArray(payload.modelOverrides)
+      ) {
+        return Response.json({ error: "modelOverrides must be an object." }, { status: 400 });
       }
     }
 
@@ -294,15 +430,22 @@ export async function POST(request: Request, context: Context) {
 
     const baseKnowledgeScope = {
       legacy_role: role,
-      model: process.env.OPENROUTER_MODEL ?? "openai/gpt-4o-mini",
+      model:
+        process.env.HERMES_MODEL ??
+        process.env.HERMES_DEFAULT_MODEL ??
+        "hermes-agent",
       read,
       write,
       channels,
+      surfaces,
+      mcp_tools_include: mcpToolsInclude,
+      skills_scope: skillsScope,
+      model_overrides: payload.modelOverrides ?? {},
     } satisfies Record<string, unknown>;
     const readiness = evaluateAgentReadiness({
       apiEndpoint,
       apiKey,
-      soulMd: payload.soulMd?.trim() ?? "",
+      soulMd: payload.soulMd?.trim() ?? selectedTemplate?.defaultSoulMd ?? "",
     });
     const knowledgeScope = mergeReadinessIntoKnowledgeScope(baseKnowledgeScope, readiness);
     const requestedActive = payload.isActive !== false;
@@ -316,23 +459,26 @@ export async function POST(request: Request, context: Context) {
         workspace_id: authorization.membership.workspaceId,
         name,
         type: mapRoleToRuntimeType(role),
-        description: payload.description?.trim() || null,
+        description: payload.description?.trim() || selectedTemplate?.description || null,
         container_name: containerName,
         api_endpoint: apiEndpoint,
         api_key: apiKey,
-        hermes_version: "v2026.4.1",
+        hermes_version: process.env.HERMES_AGENT_VERSION ?? "v2026.4.30",
         status: nextStatus,
-        soul_md: payload.soulMd?.trim() || null,
+        soul_md: payload.soulMd?.trim() || selectedTemplate?.defaultSoulMd || null,
         skills,
+        mcp_tools_include: mcpToolsInclude,
+        skills_scope: skillsScope,
+        model_overrides: payload.modelOverrides ?? {},
         knowledge_scope: knowledgeScope,
         cron_jobs: cronJobs,
-        channel_config: payload.channelConfig ?? {},
+        channel_config: resolvedChannelConfig ?? {},
         memory_limit_mb: 512,
         cpu_limit: 0.5,
         created_at: now,
         updated_at: now,
       })
-      .select("id, workspace_id, name, type, description, api_endpoint, api_key, container_name, status, soul_md, skills, knowledge_scope, cron_jobs, channel_config, memory_limit_mb, cpu_limit, created_at, updated_at")
+      .select("id, workspace_id, name, type, description, api_endpoint, api_key, container_name, status, soul_md, skills, mcp_tools_include, skills_scope, model_overrides, knowledge_scope, cron_jobs, channel_config, memory_limit_mb, cpu_limit, created_at, updated_at")
       .single();
 
     if (insertError) {
@@ -368,6 +514,19 @@ export async function POST(request: Request, context: Context) {
         }
       }
     }
+
+    await writeWorkspaceAuditLog({
+      workspaceId: authorization.membership.workspaceId,
+      userId: authorization.user.id,
+      action: "agents.create",
+      resourceType: "agent",
+      resourceId: String(insertedRow.id),
+      riskLevel: "low",
+      metadata: {
+        role,
+        status: nextStatus,
+      },
+    });
 
     return Response.json(
       {

@@ -8,25 +8,29 @@ import {
 import { getAssetBucketName, getSupabaseAdmin } from "@/lib/supabaseAdmin";
 import { listWorkspaceMembershipsForUser } from "@/lib/workspaceStore";
 import { scrubAndStoreSecrets } from "@/lib/secretScrubber";
-// Side-effect import: register all agent tools into the registry so
+// Importing the executor also registers all agent tools as a side effect so
 // `describeToolsForPrompt` can enumerate them when building the system prompt.
-import "@/lib/agentTools/executor";
-import { describeToolsForPrompt, listTools } from "@/lib/agentTools/registry";
+import { runTool } from "@/lib/agentTools/executor";
+import {
+  describeSelectedToolsForPrompt,
+  listTools,
+} from "@/lib/agentTools/registry";
+import {
+  describeMergedToolsForPrompt,
+  listActiveDynamicToolNamesForChat,
+} from "@/lib/dynamicTools/chatMerge";
 import { buildWorkspaceCatalog, renderCatalogForPrompt } from "@/lib/agentTools/workspaceCatalog";
 import { hermesFetchInit } from "@/lib/hermesFetch";
+import { ensureWorkspaceHermesHome } from "@/lib/hermesHome";
+import {
+  applyToolPolicyToNames,
+  listRegisteredToolNames,
+  resolveMcpToolPolicy,
+} from "@/lib/agentTools/mcpPolicy";
+import { logAgentUsage } from "@/lib/billing/logUsage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-const defaultSystemPrompt = `Eres agente de Prisma. Hablas en espanol para negocios mexicanos con tono claro, cercano y orientado a conversion. Tu trabajo es ayudar al visitante a entender como un agente IA por WhatsApp puede resolver su caso y mover la conversacion al siguiente paso.
-
-Empieza con respuestas cortas y utiles. Despues de responder, empuja el workflow con una siguiente pregunta concreta que ayude a calificar la oportunidad, por ejemplo:
-- que tipo de negocio tiene
-- que proceso quiere automatizar
-- si busca leads, soporte, citas, seguimiento o cobranza
-- si quiere una demo, propuesta o implementacion por vertical
-
-Evita buzzwords, evita exagerar y no des respuestas vagas. Si te preguntan por industrias, explica que la misma base se adapta para legal, salud, belleza, ventas, operaciones y otros servicios. Siempre intenta cerrar cada respuesta con un siguiente paso accionable.`;
 
 type ChatHistoryMessage = { role: string; content: string };
 
@@ -35,6 +39,8 @@ type ChatRequest = {
   history?: ChatHistoryMessage[];
   conversation_id?: string;
   conversationId?: string;
+  conversation_source?: string;
+  conversationSource?: string;
   agent_id?: string;
   agentId?: string;
   workspace_id?: string;
@@ -51,6 +57,11 @@ type ChatRequest = {
     visible_record_count?: number;
     dataset_field_summary?: string;
     dataset_field_catalog?: Array<{ key: string; name: string; type: string; required?: boolean; hidden?: boolean }>;
+    targeted_agent_id?: string | null;
+    targeted_agent_name?: string | null;
+    workspace_slug?: string | null;
+    operator_mode?: string | null;
+    panel_scope?: string | null;
   };
   appContext?: {
     current_tab?: string;
@@ -64,6 +75,11 @@ type ChatRequest = {
     visible_record_count?: number;
     dataset_field_summary?: string;
     dataset_field_catalog?: Array<{ key: string; name: string; type: string; required?: boolean; hidden?: boolean }>;
+    targeted_agent_id?: string | null;
+    targeted_agent_name?: string | null;
+    workspace_slug?: string | null;
+    operator_mode?: string | null;
+    panel_scope?: string | null;
   };
   tool_intent?: {
     kind?: string;
@@ -79,6 +95,8 @@ type ChatRequest = {
     documentRecordId?: string;
     document_record_id?: string;
   } | null;
+  classified_intent?: string | null;
+  classifiedIntent?: string | null;
   attachment_refs?: Array<string | { kind?: string; id?: string }>;
   attachmentRefs?: Array<string | { kind?: string; id?: string }>;
 };
@@ -114,8 +132,6 @@ function normalizeAttachmentRefs(
   return { recordIds: Array.from(recordIds), folderIds: Array.from(folderIds) };
 }
 
-type ChatProvider = "hermes" | "openrouter";
-
 type SchemaProposalField = {
   name: string;
   key: string;
@@ -146,11 +162,15 @@ type AgentRuntimeRecord = {
   id: string;
   workspace_id: string;
   name: string;
+  type: "copilot" | "channel" | "worker";
   api_endpoint: string;
   api_key: string;
   status: string;
   soul_md: string | null;
   skills: string[] | null;
+  mcp_tools_include: string[] | null;
+  skills_scope: string[] | null;
+  model_overrides: Record<string, unknown> | null;
   knowledge_scope: Record<string, unknown> | null;
 };
 
@@ -169,6 +189,10 @@ const PUBLIC_CHAT_LIMIT = 20;
 // set() repeatedly for the same key get moved implicitly by delete+set below.
 const PUBLIC_CHAT_COUNTERS_MAX = 10_000;
 const publicChatCounters = new Map<string, { count: number; windowStart: number }>();
+
+function isHermesFirstModeEnabled() {
+  return process.env.PRISMA_HERMES_FIRST !== "false";
+}
 
 function touchPublicChatCounter(
   key: string,
@@ -226,18 +250,6 @@ function splitTextForProgressiveStream(content: string) {
   return chunks.length > 0 ? chunks : [content];
 }
 
-function resolveProvider() {
-  const configured = (process.env.PRISMA_CHAT_PROVIDER ?? "auto").toLowerCase();
-  if (configured === "hermes") {
-    return "hermes" as ChatProvider;
-  }
-  if (configured === "openrouter") {
-    return "openrouter" as ChatProvider;
-  }
-
-  return process.env.HERMES_API_BASE_URL && process.env.HERMES_API_KEY ? "hermes" : "openrouter";
-}
-
 function getClientFingerprint(request: Request) {
   const forwardedFor = request.headers.get("x-forwarded-for") ?? "";
   const ip = forwardedFor.split(",")[0]?.trim() || "unknown";
@@ -270,6 +282,15 @@ function enforcePublicChatRateLimit(request: Request, payload: ChatRequest) {
   existing.count += 1;
   touchPublicChatCounter(key, existing);
   return null;
+}
+
+function compactHash(input: string) {
+  let hash = 2166136261;
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
 }
 
 function slugifyFieldKey(value: string) {
@@ -739,6 +760,7 @@ function buildToolNameMap() {
 // Canonicalized (lowercased, non-alphanum stripped) on both sides.
 const TOOL_NAME_ALIASES: Record<string, string> = {
   visionanalyze: "documents.analyze",
+  vision_analyze: "documents.analyze",
   analyzedocument: "documents.analyze",
   analyzepdf: "documents.analyze",
   pdfextract: "documents.analyze",
@@ -748,9 +770,21 @@ const TOOL_NAME_ALIASES: Record<string, string> = {
   extracttext: "documents.analyze",
   documentextract: "documents.analyze",
   ocr: "documents.analyze",
+  imagegenerate: "images.generate",
+  image_generate: "images.generate",
+  generateimage: "images.generate",
+  delegate_task: "peer_delegate",
+  delegatetask: "peer_delegate",
 };
 
 function resolveToolName(raw: string): string | null {
+  const trimmed = String(raw ?? "").trim();
+  if (trimmed.startsWith("dyn.")) {
+    if (/^dyn\.[a-zA-Z0-9_.-]+$/.test(trimmed)) {
+      return trimmed;
+    }
+    return null;
+  }
   const map = buildToolNameMap();
   const canonical = canonicalizeToolName(raw);
   const direct = map.get(canonical) ?? map.get(canonical.replace(/\./g, ""));
@@ -768,6 +802,10 @@ const ARG_ALIASES: Record<string, string> = {
   object_name: "objectName",
   record_id: "recordId",
   record_ids: "recordIds",
+  agentId: "agent_id",
+  agent_id: "agent_id",
+  cronJobs: "cron_jobs",
+  cron_jobs: "cron_jobs",
   include_counts: "includeCounts",
   include_fields: "includeFields",
   include_history: "includeHistory",
@@ -989,6 +1027,16 @@ function tryRepairTruncatedToolCall(candidate: string): Record<string, unknown> 
   return null;
 }
 
+function parseBalancedToolCallEnvelope(candidate: string): Record<string, unknown> | null {
+  if (!candidate || candidate[0] !== "{") return null;
+  try {
+    const parsed = JSON.parse(candidate) as Record<string, unknown>;
+    return looksLikeToolCallEnvelope(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 function extractInlineToolCalls(text: string): { cleaned: string; envelopes: Record<string, unknown>[] } {
   if (!text || !text.includes('"type"') || !text.toLowerCase().includes("tool")) {
     return { cleaned: text, envelopes: [] };
@@ -1115,13 +1163,113 @@ function isDonePayload(rawPayload: string, parsed: Record<string, unknown>) {
   return payloadType === "response.completed" || payloadType === "response.output_text.done";
 }
 
+type UsageSnapshot = {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  model: string | null;
+};
+
+function readUsageNumber(source: Record<string, unknown> | null, key: string) {
+  if (!source) return null;
+  const value = source[key];
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  return Math.max(0, Math.floor(value));
+}
+
+function extractUsageSnapshotFromPayload(parsed: Record<string, unknown>): UsageSnapshot | null {
+  const response = parsed.response;
+  const responseRecord =
+    response && typeof response === "object" && !Array.isArray(response)
+      ? (response as Record<string, unknown>)
+      : null;
+  const usage =
+    responseRecord?.usage && typeof responseRecord.usage === "object" && !Array.isArray(responseRecord.usage)
+      ? (responseRecord.usage as Record<string, unknown>)
+      : parsed.usage && typeof parsed.usage === "object" && !Array.isArray(parsed.usage)
+        ? (parsed.usage as Record<string, unknown>)
+        : null;
+  if (!usage) return null;
+
+  const prompt = readUsageNumber(usage, "prompt_tokens") ?? readUsageNumber(usage, "input_tokens");
+  const completion = readUsageNumber(usage, "completion_tokens") ?? readUsageNumber(usage, "output_tokens");
+  const total = readUsageNumber(usage, "total_tokens");
+  if (prompt === null && completion === null && total === null) return null;
+
+  const model =
+    typeof responseRecord?.model === "string"
+      ? responseRecord.model
+      : typeof parsed.model === "string"
+        ? parsed.model
+        : null;
+
+  const promptTokens = prompt ?? 0;
+  const completionTokens = completion ?? 0;
+  const totalTokens = total ?? promptTokens + completionTokens;
+
+  return {
+    promptTokens,
+    completionTokens,
+    totalTokens,
+    model: model?.trim() || null,
+  };
+}
+
+function mergeUsageSnapshot(current: UsageSnapshot | null, next: UsageSnapshot) {
+  if (!current) return next;
+  if (next.totalTokens > current.totalTokens) return next;
+  if (next.totalTokens === current.totalTokens && next.promptTokens + next.completionTokens > current.promptTokens + current.completionTokens) {
+    return next;
+  }
+  return current;
+}
+
 type AssistantMessagePersistor = (content: string) => Promise<void>;
+
+type StreamToolExecutionPolicy = {
+  forcedTargetAgentId?: string | null;
+  requireJobsUpdate?: boolean;
+  blockCrmWritesForTriggerIntent?: boolean;
+  allowedToolNames?: string[];
+};
+
+async function fetchAgentSnapshotForStream(
+  toolContext: { workspaceSlug: string; origin: string; cookieHeader?: string; agentId?: string | null },
+  agentId: string,
+): Promise<Record<string, unknown> | null> {
+  const trimmedAgentId = agentId.trim();
+  if (!trimmedAgentId) return null;
+  const base = toolContext.origin.replace(/\/$/, "");
+  const headers: Record<string, string> = {};
+  if (toolContext.cookieHeader && toolContext.cookieHeader.trim().length > 0) {
+    headers.cookie = toolContext.cookieHeader;
+  }
+  try {
+    const response = await fetch(
+      `${base}/api/workspaces/${encodeURIComponent(toolContext.workspaceSlug)}/agents/${encodeURIComponent(trimmedAgentId)}`,
+      {
+        method: "GET",
+        headers,
+        cache: "no-store",
+      },
+    );
+    const payload = (await response.json().catch(() => ({}))) as { agent?: unknown };
+    if (!response.ok || !payload.agent || typeof payload.agent !== "object") {
+      return null;
+    }
+    return payload.agent as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
 
 function streamFromSseUpstream(
   upstream: Response,
   onAssistantMessage?: AssistantMessagePersistor,
-  toolContext?: { workspaceSlug: string; origin: string; cookieHeader?: string },
+  toolContext?: { workspaceSlug: string; origin: string; cookieHeader?: string; agentId?: string | null },
   clientSignal?: AbortSignal,
+  toolPolicy?: StreamToolExecutionPolicy,
+  onUsage?: (usage: UsageSnapshot) => Promise<void> | void,
 ) {
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
@@ -1156,6 +1304,7 @@ function streamFromSseUpstream(
       let buffer = "";
       let sentDone = false;
       let assistantText = "";
+      let usageSnapshot: UsageSnapshot | null = null;
       // Mirrors assistantText but excludes any tool_call envelope JSON the LLM
       // embedded inline. This is what we persist to the conversation so the
       // user never sees raw `{"type":"toolcall",...}` re-rendered on refresh.
@@ -1164,6 +1313,26 @@ function streamFromSseUpstream(
       // emits the envelope one tiny delta at a time, so extractInlineToolCalls
       // needs to see the accumulated text, not each delta in isolation.
       let toolCallStreamBuffer = "";
+      // Track tool executions so we can synthesize a user-visible line when
+      // the model only emitted tool_calls and never produced plain-text deltas.
+      // Without this, the chat bubble stays on its optimistic placeholder and
+      // nothing gets persisted, so a page refresh shows an empty assistant
+      // message.
+      const toolRunSummaries: Array<{ name: string; ok: boolean; error?: string }> = [];
+      const forcedTargetAgentId =
+        typeof toolPolicy?.forcedTargetAgentId === "string" &&
+        toolPolicy.forcedTargetAgentId.trim().length > 0
+          ? toolPolicy.forcedTargetAgentId.trim()
+          : null;
+      let ranAgentsSoulUpdate = false;
+      let ranAgentsJobsUpdate = false;
+      const allowedToolNames = new Set(
+        Array.isArray(toolPolicy?.allowedToolNames) ? toolPolicy.allowedToolNames : listRegisteredToolNames(),
+      );
+      const toolExecTimeoutMs = Math.max(
+        5_000,
+        Number(process.env.PRISMA_TOOL_EXEC_TIMEOUT_MS ?? 45_000),
+      );
 
       const emitDone = () => {
         if (sentDone) {
@@ -1186,10 +1355,12 @@ function streamFromSseUpstream(
             (typeof parsed.id === "string" && parsed.id) ||
             (typeof parsed.tool_call_id === "string" && (parsed.tool_call_id as string)) ||
             `tc_${Math.random().toString(36).slice(2, 10)}`;
-          const available = listTools()
-            .map((tool) => tool.name)
-            .sort();
+          const available = Array.from(allowedToolNames).sort((a, b) => a.localeCompare(b));
           const errorMessage = `Tool "${requestedName}" is not registered in this workspace. Pick one of the available tools and reissue the tool_call. Available tools: ${available.join(", ")}.`;
+          // Track this so end-of-stream synthesis can surface the failure instead
+          // of leaving the user with an empty bubble when the model gives up
+          // after an unrecognized tool call.
+          toolRunSummaries.push({ name: requestedName, ok: false, error: errorMessage });
           controller.enqueue(
             encoder.encode(
               formatSse({
@@ -1207,18 +1378,106 @@ function streamFromSseUpstream(
           return true;
         }
         const { name, id, args, notes } = normalizedEnvelope;
+        if (!allowedToolNames.has(name)) {
+          const available = Array.from(allowedToolNames).sort();
+          const errorMessage = `Tool "${name}" is not enabled for this agent. Available tools: ${available.join(", ")}.`;
+          toolRunSummaries.push({ name, ok: false, error: errorMessage });
+          controller.enqueue(
+            encoder.encode(
+              formatSse({
+                type: "tool_result",
+                id,
+                name,
+                result: { ok: false, error: errorMessage, availableTools: available },
+              }),
+            ),
+          );
+          return true;
+        }
+        const effectiveArgs: Record<string, unknown> = { ...(args as Record<string, unknown>) };
+        const normalizedNotes = [...notes];
+        if (forcedTargetAgentId && name.startsWith("agents.update_")) {
+          const priorAgentId =
+            typeof effectiveArgs.agent_id === "string" ? effectiveArgs.agent_id.trim() : "";
+          if (!priorAgentId || priorAgentId !== forcedTargetAgentId) {
+            normalizedNotes.push(
+              `Pinned agent_id to targeted_agent_id (${forcedTargetAgentId}) for operator detail safety.`,
+            );
+          }
+          effectiveArgs.agent_id = forcedTargetAgentId;
+        }
+        if (
+          toolPolicy?.blockCrmWritesForTriggerIntent &&
+          name.startsWith("crm.") &&
+          name !== "crm.query"
+        ) {
+          const errorMessage =
+            "This turn is trigger configuration for an agent detail panel. Do not call crm.* write tools. Use agents.update_jobs with cron_jobs and the targeted agent_id.";
+          toolRunSummaries.push({ name, ok: false, error: errorMessage });
+          controller.enqueue(
+            encoder.encode(
+              formatSse({
+                type: "tool_result",
+                id,
+                name,
+                result: { ok: false, error: errorMessage },
+              }),
+            ),
+          );
+          return true;
+        }
         try {
           const mod = await import("@/lib/agentTools/executor");
-          const result = await mod.runTool({ name, args, ctx: toolContext });
+          const dynMod = await import("@/lib/dynamicTools/executor");
+          const result = (await Promise.race([
+            name.startsWith("dyn.")
+              ? dynMod.executeDynamicTool(name, effectiveArgs, toolContext)
+              : mod.runTool({ name, args: effectiveArgs, ctx: toolContext }),
+            new Promise((_, reject) =>
+              setTimeout(
+                () =>
+                  reject(
+                    new Error(
+                      `Tool "${name}" timed out after ${Math.round(toolExecTimeoutMs / 1000)}s.`,
+                    ),
+                  ),
+                toolExecTimeoutMs,
+              ),
+            ),
+          ])) as Awaited<ReturnType<typeof mod.runTool>>;
+          if (result.ok && name === "agents.update_soul") {
+            ranAgentsSoulUpdate = true;
+          }
+          if (result.ok && name === "agents.update_jobs") {
+            ranAgentsJobsUpdate = true;
+          }
+          toolRunSummaries.push({
+            name,
+            ok: Boolean(result.ok),
+            error: result.ok ? undefined : typeof result.error === "string" ? result.error : undefined,
+          });
           // Attach normalization notes so the model sees corrections.
           const decorated =
-            result.ok && notes.length > 0
-              ? { ...result, data: { ...(result.data as Record<string, unknown>), _normalization: notes } }
+            result.ok && normalizedNotes.length > 0
+              ? {
+                  ...result,
+                  data: {
+                    ...(result.data as Record<string, unknown>),
+                    _normalization: normalizedNotes,
+                  },
+                }
               : result;
 
           // Emit write_proposal when the tool result carries a proposal + token.
           if (decorated.ok) {
             const data = decorated.data as Record<string, unknown> | null | undefined;
+            if (name === "records.query" && data) {
+              const summary = summarizeRecordsQueryResult(data);
+              if (summary.trim().length > 0) {
+                cleanedAssistantText += `${cleanedAssistantText ? "\n\n" : ""}${summary}`;
+                controller.enqueue(encoder.encode(formatSse({ type: "delta", content: `${summary}\n` })));
+              }
+            }
             if (
               data &&
               typeof data === "object" &&
@@ -1234,7 +1493,32 @@ function streamFromSseUpstream(
                     proposal: data.proposal,
                     confirmToken: data.confirmToken,
                     expiresAt: data.expiresAt ?? null,
-                    originalArgs: args,
+                    originalArgs: effectiveArgs,
+                  }),
+                ),
+              );
+            }
+            // Keep the operator canvas in sync when an agents.update_* tool
+            // mutates a workspace agent from chat.
+            let agentSnapshot: Record<string, unknown> | null = null;
+            if (name.startsWith("agents.update_")) {
+              if (data && typeof data.agent === "object") {
+                agentSnapshot = data.agent as Record<string, unknown>;
+              } else {
+                const toolAgentId =
+                  typeof effectiveArgs.agent_id === "string" ? effectiveArgs.agent_id.trim() : "";
+                if (toolAgentId) {
+                  agentSnapshot = await fetchAgentSnapshotForStream(toolContext, toolAgentId);
+                }
+              }
+            }
+            if (agentSnapshot) {
+              controller.enqueue(
+                encoder.encode(
+                  formatSse({
+                    type: "agent_snapshot",
+                    toolName: name,
+                    agent: agentSnapshot,
                   }),
                 ),
               );
@@ -1246,6 +1530,7 @@ function streamFromSseUpstream(
           );
         } catch (error) {
           const message = error instanceof Error ? error.message : "Tool execution failed.";
+          toolRunSummaries.push({ name, ok: false, error: message });
           controller.enqueue(
             encoder.encode(formatSse({ type: "tool_result", id, name, result: { ok: false, error: message } })),
           );
@@ -1268,6 +1553,10 @@ function streamFromSseUpstream(
 
           try {
             const parsed = JSON.parse(payload) as Record<string, unknown>;
+            const parsedUsage = extractUsageSnapshotFromPayload(parsed);
+            if (parsedUsage) {
+              usageSnapshot = mergeUsageSnapshot(usageSnapshot, parsedUsage);
+            }
             const errorText = extractErrorText(parsed);
             if (errorText) {
               controller.enqueue(encoder.encode(formatSse({ type: "error", error: errorText })));
@@ -1360,32 +1649,86 @@ function streamFromSseUpstream(
       // max_output_tokens). If repair yields a valid tool_call, execute it;
       // otherwise flush to the user as plain text so nothing is swallowed.
       if (toolCallStreamBuffer.length > 0) {
-        const firstBrace = toolCallStreamBuffer.indexOf("{");
-        let handled = false;
-        if (firstBrace !== -1) {
-          const before = toolCallStreamBuffer.slice(0, firstBrace);
-          const candidate = toolCallStreamBuffer.slice(firstBrace);
-          const repaired = tryRepairTruncatedToolCall(candidate);
-          if (repaired) {
+        // First, capture any complete envelopes that might be present.
+        const intercepted = extractInlineToolCallsStreaming(toolCallStreamBuffer);
+        if (intercepted.cleaned.length > 0) {
+          cleanedAssistantText += intercepted.cleaned;
+          controller.enqueue(encoder.encode(formatSse({ type: "delta", content: intercepted.cleaned })));
+        }
+        for (const envelope of intercepted.envelopes) {
+          parsePromises.push(handleToolCall(envelope).then(() => undefined));
+        }
+
+        // Then deal with trailing partial content.
+        if (intercepted.pending.length > 0) {
+          const firstBrace = intercepted.pending.indexOf("{");
+          if (firstBrace === -1) {
+            cleanedAssistantText += intercepted.pending;
+            controller.enqueue(
+              encoder.encode(formatSse({ type: "delta", content: intercepted.pending })),
+            );
+          } else {
+            const before = intercepted.pending.slice(0, firstBrace);
+            const candidate = intercepted.pending.slice(firstBrace);
             if (before.length > 0) {
               cleanedAssistantText += before;
               controller.enqueue(encoder.encode(formatSse({ type: "delta", content: before })));
             }
-            parsePromises.push(handleToolCall(repaired).then(() => undefined));
-            handled = true;
+
+            const parsedEnvelope =
+              parseBalancedToolCallEnvelope(candidate) ?? tryRepairTruncatedToolCall(candidate);
+            if (parsedEnvelope) {
+              parsePromises.push(handleToolCall(parsedEnvelope).then(() => undefined));
+            } else {
+              // Do not leak a raw tool_call JSON envelope to the user.
+              const looksLikeToolCallText = /"type"\s*:\s*"tool[_-]?call"/i.test(candidate);
+              if (looksLikeToolCallText) {
+                toolRunSummaries.push({
+                  name: "tool_call",
+                  ok: false,
+                  error: "La respuesta del modelo incluyó un tool_call incompleto que no se pudo ejecutar.",
+                });
+              } else {
+                cleanedAssistantText += candidate;
+                controller.enqueue(encoder.encode(formatSse({ type: "delta", content: candidate })));
+              }
+            }
           }
-        }
-        if (!handled) {
-          cleanedAssistantText += toolCallStreamBuffer;
-          controller.enqueue(
-            encoder.encode(formatSse({ type: "delta", content: toolCallStreamBuffer })),
-          );
         }
         toolCallStreamBuffer = "";
       }
 
       if (parsePromises.length > 0) {
         await Promise.allSettled(parsePromises);
+      }
+      if (toolPolicy?.requireJobsUpdate && !ranAgentsJobsUpdate) {
+        const warning =
+          "\n\nNo apliqué triggers porque no se ejecutó agents.update_jobs. Repite el pedido en formato: 'Agrega cron_jobs para este agente' o usa el panel Triggers a la derecha.";
+        cleanedAssistantText += warning;
+        controller.enqueue(encoder.encode(formatSse({ type: "delta", content: warning })));
+      }
+
+      // If the model ran tools but never streamed any user-visible text, the
+      // chat bubble would stay on its optimistic placeholder forever and a
+      // refresh would surface an empty assistant row. Synthesize a short line
+      // describing what ran so the user sees activity and the conversation
+      // history is meaningful after reload.
+      if (cleanedAssistantText.trim().length === 0) {
+        let synthesized = "";
+        if (toolRunSummaries.length > 0) {
+          synthesized = summarizeToolRuns(toolRunSummaries);
+        } else {
+          // Hermes ended the stream without any text or tool activity at all
+          // (e.g. the model emitted a malformed response, hit token limits
+          // before producing content, or the upstream returned an empty
+          // event-stream). Send a generic line so the bubble updates and the
+          // history is meaningful after reload.
+          synthesized = "No recibí texto del agente. Intenta reformular tu pedido.";
+        }
+        if (synthesized) {
+          cleanedAssistantText += synthesized;
+          controller.enqueue(encoder.encode(formatSse({ type: "delta", content: synthesized })));
+        }
       }
 
       // Persist the cleaned text (tool-call JSON stripped) so a page refresh or
@@ -1396,14 +1739,84 @@ function streamFromSseUpstream(
       if (persistedText && onAssistantMessage) {
         await onAssistantMessage(persistedText);
       }
+      if (usageSnapshot && onUsage) {
+        try {
+          await onUsage(usageSnapshot);
+        } catch (error) {
+          console.warn("usage logging failed", error);
+        }
+      }
       emitDone();
       controller.close();
     },
   });
 }
 
-async function streamFromJsonUpstream(upstream: Response, onAssistantMessage?: AssistantMessagePersistor) {
+function summarizeToolRuns(runs: Array<{ name: string; ok: boolean; error?: string }>) {
+  if (runs.length === 0) {
+    return "";
+  }
+  const ok = runs.filter((r) => r.ok);
+  const failed = runs.filter((r) => !r.ok);
+  const okNames = Array.from(new Set(ok.map((r) => r.name)));
+  const failedNames = Array.from(new Set(failed.map((r) => r.name)));
+
+  const parts: string[] = [];
+  if (okNames.length > 0) {
+    parts.push(`Ejecuté ${okNames.join(", ")}.`);
+  }
+  if (failedNames.length > 0) {
+    const firstError = failed.find((r) => r.error)?.error;
+    parts.push(
+      firstError
+        ? `Hubo errores en ${failedNames.join(", ")}: ${firstError}`
+        : `Hubo errores en ${failedNames.join(", ")}.`,
+    );
+  }
+  parts.push("¿Quieres que continúe o necesitas más detalles?");
+  return parts.join(" ");
+}
+
+function summarizeRecordsQueryResult(result: Record<string, unknown>) {
+  const records = Array.isArray(result.records) ? result.records : [];
+  const objectName =
+    result.object && typeof result.object === "object" && typeof (result.object as { name?: unknown }).name === "string"
+      ? String((result.object as { name: string }).name)
+      : "registros";
+  const total = typeof result.total === "number" ? result.total : records.length;
+  if (total === 0) {
+    return `No encontré resultados en ${objectName}.`;
+  }
+  const preview = records
+    .slice(0, 3)
+    .map((entry, index) => {
+      const data =
+        entry && typeof entry === "object" && !Array.isArray(entry) && typeof (entry as { data?: unknown }).data === "object"
+          ? ((entry as { data: Record<string, unknown> }).data ?? {})
+          : {};
+      const label =
+        typeof data.name === "string"
+          ? data.name
+          : typeof data.title === "string"
+            ? data.title
+            : typeof data.full_name === "string"
+              ? data.full_name
+              : typeof data.company_name === "string"
+                ? data.company_name
+                : `Registro ${index + 1}`;
+      return `- ${label}`;
+    })
+    .join("\n");
+  return `Encontré ${total} resultados en ${objectName}.\n${preview}`;
+}
+
+async function streamFromJsonUpstream(
+  upstream: Response,
+  onAssistantMessage?: AssistantMessagePersistor,
+  onUsage?: (usage: UsageSnapshot) => Promise<void> | void,
+) {
   const payload = (await upstream.json().catch(() => null)) as Record<string, unknown> | null;
+  const usageSnapshot = payload ? extractUsageSnapshotFromPayload(payload) : null;
   const rawText = payload ? extractDeltaText(payload) : "";
   // Strip any inline tool_call JSON the LLM embedded in its text. We do NOT
   // execute these here (this path is the single-shot fallback for providers
@@ -1426,6 +1839,13 @@ async function streamFromJsonUpstream(upstream: Response, onAssistantMessage?: A
       if (content.trim() && onAssistantMessage) {
         await onAssistantMessage(content);
       }
+      if (usageSnapshot && onUsage) {
+        try {
+          await onUsage(usageSnapshot);
+        } catch (error) {
+          console.warn("usage logging failed", error);
+        }
+      }
       controller.enqueue(encoder.encode(formatSse({ type: "done" })));
       controller.close();
     },
@@ -1438,7 +1858,9 @@ type ConversationPersistContext = {
   workspaceId: string;
   agentId: string;
   runtimeConversationId: string;
+  runtimeSessionId?: string | null;
   createdBy: string | null;
+  source?: string | null;
 };
 
 async function ensureWorkspaceConversation(context: ConversationPersistContext) {
@@ -1467,17 +1889,32 @@ async function ensureWorkspaceConversation(context: ConversationPersistContext) 
       workspace_id: context.workspaceId,
       agent_id: context.agentId,
       title: "Nuevo chat",
-      source: "workspace_chat",
+        source: context.source?.trim() || "workspace_chat",
       runtime_conversation_id: context.runtimeConversationId,
       created_by: context.createdBy,
     })
     .select("id")
     .single();
 
-  if (createError) {
-    return null;
+  if (!createError && created?.id) {
+    return String(created.id);
   }
-  return String(created.id);
+
+  // Parallel requests can both miss the row above and hit the unique
+  // (workspace_id, runtime_conversation_id) constraint — recover by re-selecting.
+  if (createError?.code === "23505") {
+    const { data: raced, error: raceError } = await supabase
+      .from("workspace_conversations")
+      .select("id")
+      .eq("workspace_id", context.workspaceId)
+      .eq("runtime_conversation_id", context.runtimeConversationId)
+      .maybeSingle();
+    if (!raceError && raced?.id) {
+      return String(raced.id);
+    }
+  }
+
+  return null;
 }
 
 async function persistConversationMessage(
@@ -1502,6 +1939,7 @@ async function persistConversationMessage(
     conversation_id: conversationId,
     workspace_id: context.workspaceId,
     agent_id: context.agentId,
+    runtime_session_id: context.runtimeSessionId ?? null,
     role,
     content,
     created_by: context.createdBy,
@@ -2009,6 +2447,76 @@ async function tryHandleRecordCreateIntent(
   );
 }
 
+async function classifyOperatorIntent(message: string) {
+  const apiKey = process.env.OPENROUTER_API_KEY?.trim();
+  if (!apiKey) return null;
+  const model = process.env.OPENROUTER_MODEL ?? "openai/gpt-4o-mini";
+  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+      "HTTP-Referer": process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000",
+      "X-Title": "Prisma Operator Intent Router",
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0,
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "operator_intent_router",
+          strict: true,
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              intent: {
+                type: "string",
+                enum: ["trigger_config", "records_query", "records_create", "agent_config", "general_chat"],
+              },
+              reason: { type: "string" },
+            },
+            required: ["intent", "reason"],
+          },
+        },
+      },
+      messages: [
+        {
+          role: "system",
+          content:
+            "Classify the user intent for an operator/agent workspace. Pick trigger_config for cron, trigger, schedule, webhook, automation, recurring, diario, cada 30 minutos, event-driven automation or similar requests. Pick records_query for read/list/search/show/query requests. Pick records_create for create/add/new contact/lead/company/deal/record requests. Pick agent_config for SOUL, persona, skills, permissions, tools, capabilities, access, or connections changes. Pick general_chat otherwise.",
+        },
+        {
+          role: "user",
+          content: message,
+        },
+      ],
+    }),
+  });
+  if (!response.ok) return null;
+  const payload = (await response.json().catch(() => ({}))) as {
+    choices?: Array<{ message?: { content?: string } }>;
+  };
+  const content = payload.choices?.[0]?.message?.content ?? "";
+  if (!content) return null;
+  try {
+    const parsed = JSON.parse(content) as { intent?: string; reason?: string };
+    if (
+      parsed.intent === "trigger_config" ||
+      parsed.intent === "records_query" ||
+      parsed.intent === "records_create" ||
+      parsed.intent === "agent_config" ||
+      parsed.intent === "general_chat"
+    ) {
+      return parsed as { intent: string; reason: string };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 const IMAGE_NOUN_PATTERN =
   /\b(imagen|imagenes|imágenes|foto|fotos|fotograf[íi]as?|picture|pictures|pic|pics|photo|photos|press photo|press photos|render|renders|mockup|mockups)\b/;
 const IMAGE_FIND_VERB_PATTERN =
@@ -2090,6 +2598,238 @@ function detectImageIntent(message: string, history?: ChatHistoryMessage[]): Ima
   return null;
 }
 
+function extractDirectSoulUpdateInstruction(message: string): string | null {
+  const trimmed = message.trim();
+  if (!trimmed) return null;
+
+  const explicitToolMatch = trimmed.match(
+    /agents\.update_soul[\s\S]{0,800}?\bsoul_md\s*=\s*["']([\s\S]{3,4000}?)["']/i,
+  );
+  if (explicitToolMatch?.[1]) {
+    const soul = explicitToolMatch[1].trim();
+    if (soul) return soul;
+  }
+
+  const directSoulMatch = trimmed.match(
+    /(?:actualiza|update|cambia|set)\s+soul(?:\s+del\s+agente(?:\s+objetivo)?)?\s*:\s*([\s\S]{3,4000})/i,
+  );
+  if (directSoulMatch?.[1]) {
+    const soul = directSoulMatch[1].trim();
+    if (soul) return soul;
+  }
+
+  const roleMatch = trimmed.match(/cambia\s+tu\s+rol\s+a\s+([\s\S]{3,4000})/i);
+  if (roleMatch?.[1]) {
+    const soul = roleMatch[1].trim();
+    if (soul) return soul;
+  }
+
+  return null;
+}
+
+function extractDirectSkillsUpdateInstruction(message: string): string[] | null {
+  const match = message.match(
+    /actualiza\s+skills\s+del\s+agente(?:\s+objetivo)?\s*:\s*(\[[\s\S]{2,12000}\])\s*$/i,
+  );
+  if (!match?.[1]) return null;
+  try {
+    const parsed = JSON.parse(match[1]) as unknown;
+    if (!Array.isArray(parsed)) return null;
+    const skills = parsed.map((entry) => String(entry ?? "").trim()).filter(Boolean);
+    return skills.length > 0 ? skills : null;
+  } catch {
+    return null;
+  }
+}
+
+function extractDirectTriggersUpdateInstruction(
+  message: string,
+): Array<Record<string, unknown>> | null {
+  const match = message.match(
+    /actualiza\s+triggers\s+del\s+agente(?:\s+objetivo)?\s*:\s*(\[[\s\S]{2,24000}\])\s*$/i,
+  );
+  if (!match?.[1]) return null;
+  try {
+    const parsed = JSON.parse(match[1]) as unknown;
+    if (!Array.isArray(parsed)) return null;
+    const jobs = parsed.filter(
+      (entry): entry is Record<string, unknown> =>
+        Boolean(entry) &&
+        typeof entry === "object" &&
+        !Array.isArray(entry) &&
+        typeof (entry as Record<string, unknown>).cron === "string",
+    );
+    return jobs.length > 0 ? jobs : null;
+  } catch {
+    return null;
+  }
+}
+
+type DirectKnowledgeInstruction = {
+  read?: string[];
+  write?: string[];
+  channels?: string[];
+  surfaces?: string[];
+};
+
+function toTrimmedStringArray(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const normalized = value.map((entry) => String(entry ?? "").trim()).filter(Boolean);
+  return normalized.length > 0 ? normalized : [];
+}
+
+function extractDirectKnowledgeUpdateInstruction(message: string): DirectKnowledgeInstruction | null {
+  const match = message.match(
+    /actualiza\s+knowledge\s+del\s+agente(?:\s+objetivo)?\s*:\s*(\{[\s\S]{2,24000}\})\s*$/i,
+  );
+  if (!match?.[1]) return null;
+  try {
+    const parsed = JSON.parse(match[1]) as Record<string, unknown>;
+    const next: DirectKnowledgeInstruction = {};
+    const read = toTrimmedStringArray(parsed.read);
+    const write = toTrimmedStringArray(parsed.write);
+    const channels = toTrimmedStringArray(parsed.channels);
+    const surfaces = toTrimmedStringArray(parsed.surfaces);
+    if (read !== null) next.read = read;
+    if (write !== null) next.write = write;
+    if (channels !== null) next.channels = channels;
+    if (surfaces !== null) next.surfaces = surfaces;
+    return Object.keys(next).length > 0 ? next : null;
+  } catch {
+    return null;
+  }
+}
+
+function extractDirectConnectionsUpdateInstruction(message: string): Record<string, unknown> | null {
+  const match = message.match(
+    /actualiza\s+connections?\s+del\s+agente(?:\s+objetivo)?\s*:\s*(\{[\s\S]{2,24000}\})\s*$/i,
+  );
+  if (!match?.[1]) return null;
+  try {
+    const parsed = JSON.parse(match[1]) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    return parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function extractDirectStatusUpdateInstruction(message: string): "active" | "paused" | null {
+  const normalized = normalizeIntentText(message);
+  if (
+    /\b(pausar|pausa|pause|deten|detener|desactivar|desactiva)\b/.test(normalized) &&
+    /\b(agente|agent)\b/.test(normalized)
+  ) {
+    return "paused";
+  }
+  if (
+    /\b(activar|activa|activarlo|resume|reanudar|encender|enable|start)\b/.test(normalized) &&
+    /\b(agente|agent)\b/.test(normalized)
+  ) {
+    return "active";
+  }
+  return null;
+}
+
+type DirectSyncLeadsInstruction = {
+  slug: string;
+  limit?: number;
+};
+
+function extractDirectSyncLeadsInstruction(message: string): DirectSyncLeadsInstruction | null {
+  const trimmed = message.trim();
+  if (!trimmed || !/integrations\.sync_leads/i.test(trimmed)) return null;
+
+  const jsonMatch = trimmed.match(/integrations\.sync_leads[\s\S]{0,400}(\{[\s\S]{2,1200}\})/i);
+  if (jsonMatch?.[1]) {
+    try {
+      const parsed = JSON.parse(jsonMatch[1]) as Record<string, unknown>;
+      const slugRaw =
+        typeof parsed.slug === "string"
+          ? parsed.slug
+          : typeof parsed.integrationSlug === "string"
+            ? parsed.integrationSlug
+            : "";
+      const slug = slugRaw.trim();
+      if (!slug) return null;
+      const limitRaw = Number(parsed.limit);
+      const limit =
+        Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(Math.round(limitRaw), 100) : undefined;
+      return { slug, ...(typeof limit === "number" ? { limit } : {}) };
+    } catch {
+      // Fall through to regex-based extraction below.
+    }
+  }
+
+  const slugMatch = trimmed.match(/\b(?:slug|integrationSlug)\s*[:=]\s*["']?([a-z0-9_-]{2,80})["']?/i);
+  if (!slugMatch?.[1]) return null;
+  const slug = slugMatch[1].trim();
+  if (!slug) return null;
+  const limitMatch = trimmed.match(/\blimit\s*[:=]\s*(\d{1,3})\b/i);
+  const limit = limitMatch?.[1] ? Math.min(Math.max(Number(limitMatch[1]), 1), 100) : undefined;
+  return { slug, ...(typeof limit === "number" ? { limit } : {}) };
+}
+
+function streamDirectAgentToolResult({
+  toolName,
+  result,
+  successMessage,
+  originalArgs,
+}: {
+  toolName: string;
+  result: { ok: boolean; data?: unknown; error?: string };
+  successMessage: string;
+  originalArgs?: Record<string, unknown>;
+}) {
+  const stream = new ReadableStream({
+    start(controller) {
+      const encoder = new TextEncoder();
+      const toolId = `shortcut-${Date.now()}`;
+
+      if (result.ok && result.data && typeof result.data === "object") {
+        const data = result.data as Record<string, unknown>;
+        if (data.agent && typeof data.agent === "object") {
+          controller.enqueue(
+            encoder.encode(
+              formatSse({
+                type: "agent_snapshot",
+                toolName,
+                agent: data.agent,
+              }),
+            ),
+          );
+        }
+      }
+
+      controller.enqueue(
+        encoder.encode(formatSse({ type: "tool_result", id: toolId, name: toolName, result })),
+      );
+      if (result.ok && result.data && typeof result.data === "object") {
+        const data = result.data as Record<string, unknown>;
+        if (data.proposal && typeof data.confirmToken === "string") {
+          controller.enqueue(
+            encoder.encode(
+              formatSse({
+                type: "write_proposal",
+                id: toolId,
+                toolName,
+                proposal: data.proposal,
+                confirmToken: data.confirmToken,
+                expiresAt: data.expiresAt ?? null,
+                originalArgs: originalArgs ?? null,
+              }),
+            ),
+          );
+        }
+      }
+      controller.enqueue(encoder.encode(formatSse({ type: "delta", content: successMessage })));
+      controller.enqueue(encoder.encode(formatSse({ type: "done" })));
+      controller.close();
+    },
+  });
+  return new Response(stream, { headers: sseHeaders });
+}
+
 function streamImageToolResult({
   toolName,
   toolId,
@@ -2113,6 +2853,643 @@ function streamImageToolResult({
     },
   });
   return new Response(stream, { headers: sseHeaders });
+}
+
+function parseInventoryUpdateShortcut(message: string) {
+  const lower = message.toLowerCase();
+  if (!/\b(update|change|set|modifica|actualiza|actualizar|acutliza|acutlizar|cambia|cambiar)\b/i.test(message)) {
+    return null;
+  }
+  const looksLikeInventory =
+    /\b(inventory|inventario|vehicle|vehicles|car|cars|auto|autos|unidad|unidades|mustang|territory|edge|ranger|bronco|lobo|ford)\b/i.test(
+      message,
+    ) || /\b(?:stock(?:[_\s-]?number)?|sku|vin|id)\s*[:#-]?\s*[A-Z0-9][A-Z0-9_-]{2,}\b/i.test(message);
+  if (!looksLikeInventory) return null;
+
+  const stockMatch =
+    message.match(/\b(?:stock(?:[_\s-]?number)?|sku|unidad|vin)\s*[:#-]?\s*([A-Z0-9][A-Z0-9_-]{2,})\b/i) ??
+    message.match(/\b(GB-\d{3,}|[A-Z]{2,}-\d{3,})\b/i);
+  const stockNumber = stockMatch?.[1]?.trim().toUpperCase() ?? "";
+  const idPrefixMatch = message.match(/\bid\s*[:#-]?\s*([a-f0-9]{6,36})\b/i);
+  const idPrefix = idPrefixMatch?.[1]?.trim().toLowerCase() ?? "";
+  const model = extractInventoryModel(message);
+  const year = extractInventoryYear(message);
+  const color = extractInventoryColor(message);
+  if (!stockNumber && !idPrefix && !model) return null;
+
+  const patch: Record<string, unknown> = {};
+  const priceMatch =
+    message.match(/\b(?:price|precio)\b[^\d$]*\$?\s*([\d][\d,.\s]*)/i) ??
+    message.match(/\b(?:a|en|to|por)\s*\$?\s*([\d][\d,.\s]*)\s*(?:mxn|pesos?)\b/i) ??
+    message.match(/\$\s*([\d][\d,.\s]*)/);
+  if (priceMatch?.[1]) {
+    const normalizedPrice = Number(priceMatch[1].replace(/[,\s]/g, ""));
+    if (Number.isFinite(normalizedPrice) && normalizedPrice >= 0) {
+      patch.price = normalizedPrice;
+    }
+  }
+
+  const statusMatch = lower.match(/\b(available|reserved|sold|pending|disponible|reservado|vendido|pendiente)\b/);
+  if (statusMatch?.[1]) {
+    const statusMap: Record<string, string> = {
+      available: "available",
+      disponible: "available",
+      reserved: "reserved",
+      reservado: "reserved",
+      sold: "sold",
+      vendido: "sold",
+      pending: "pending",
+      pendiente: "pending",
+    };
+    patch.status = statusMap[statusMatch[1]] ?? statusMatch[1];
+  }
+
+  if (Object.keys(patch).length === 0) return null;
+  return { stockNumber, idPrefix, model, year, color, patch };
+}
+
+function normalizeInventoryText(value: unknown) {
+  return String(value ?? "")
+    .trim()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
+function inventoryTextIncludes(value: unknown, term: string) {
+  const normalizedTerm = normalizeInventoryText(term);
+  return normalizeInventoryText(value).includes(normalizedTerm);
+}
+
+function extractInventoryYear(message: string) {
+  const match = message.match(/\b(20[0-4]\d|19[8-9]\d)\b/);
+  return match?.[1] ? Number(match[1]) : null;
+}
+
+function extractInventoryColor(message: string) {
+  const colorMap: Array<{ canonical: string; terms: string[] }> = [
+    { canonical: "rojo", terms: ["rojo", "roja", "red", "rubi", "ruby"] },
+    { canonical: "blanco", terms: ["blanco", "blanca", "white", "oxford", "artico"] },
+    { canonical: "negro", terms: ["negro", "negra", "black"] },
+    { canonical: "gris", terms: ["gris", "gray", "grey", "magneto", "humo", "basalto", "meteoro"] },
+    { canonical: "azul", terms: ["azul", "blue"] },
+    { canonical: "verde", terms: ["verde", "green"] },
+    { canonical: "plata", terms: ["plata", "silver"] },
+  ];
+  const normalized = normalizeInventoryText(message);
+  return colorMap.find((entry) => entry.terms.some((term) => normalized.includes(term))) ?? null;
+}
+
+function extractInventoryModel(message: string) {
+  const knownModels = [
+    "bronco sport",
+    "expedition",
+    "explorer",
+    "mustang",
+    "territory",
+    "ranger",
+    "raptor",
+    "edge",
+    "f150",
+    "f-150",
+    "f350",
+    "f-350",
+    "f450",
+    "f-450",
+    "lobo",
+    "jetta",
+    "corolla",
+    "rav4",
+  ];
+  const normalized = normalizeInventoryText(message);
+  const matched = knownModels.find((model) => normalized.includes(normalizeInventoryText(model)));
+  if (matched) return matched.toUpperCase();
+  const afterArticle = message.match(/\b(?:un|una|el|la)\s+([a-z0-9-]{3,}(?:\s+[a-z0-9-]{2,})?)\b/i)?.[1];
+  return afterArticle ? afterArticle.trim().toUpperCase() : null;
+}
+
+function extractInventoryBranch(message: string) {
+  const match = message.match(/\b(?:sucursal|branch|location|ubicaci[oó]n)\s+(?:de|en)?\s*([a-záéíóúñ\s-]{3,})/i);
+  if (!match?.[1]) return null;
+  return match[1].replace(/[?.,!].*$/, "").trim();
+}
+
+async function resolveVehiclesObjectId(workspaceId: string, preferredObjectId?: string | null) {
+  const supabase = getSupabaseAdmin();
+  if (!supabase) return null;
+  if (preferredObjectId) {
+    const { data } = await supabase
+      .from("workspace_objects")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("id", preferredObjectId)
+      .maybeSingle();
+    if (data?.id) return String(data.id);
+  }
+  const { data } = await supabase
+    .from("workspace_objects")
+    .select("id, name")
+    .eq("workspace_id", workspaceId)
+    .or("name.ilike.%vehicle%,name.ilike.%vehiculo%,name.ilike.%inventario%")
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  return data?.id ? String(data.id) : null;
+}
+
+async function loadVehicleInventoryRows(workspaceId: string, objectId: string) {
+  const supabase = getSupabaseAdmin();
+  if (!supabase) return [];
+  const { data } = await supabase
+    .from("records")
+    .select("id, data, updated_at")
+    .eq("workspace_id", workspaceId)
+    .eq("object_id", objectId)
+    .is("deleted_at", null)
+    .order("updated_at", { ascending: false })
+    .limit(500);
+  return (data ?? []).map((row) => ({
+    id: String(row.id),
+    updatedAt: String(row.updated_at),
+    data: ((row.data as Record<string, unknown>) ?? {}) as Record<string, unknown>,
+  }));
+}
+
+function formatVehicleLine(row: { id: string; data: Record<string, unknown> }) {
+  const data = row.data;
+  const title = [data.year, data.make, data.model, data.trim].filter(Boolean).join(" ");
+  const color = data.exterior_color ? `color ${data.exterior_color}` : "color sin capturar";
+  const status = data.status ? `estado ${data.status}` : "estado sin capturar";
+  const price = typeof data.price === "number" ? `precio ${new Intl.NumberFormat("es-MX").format(data.price)} MXN` : null;
+  const quantity = data.quantity !== undefined ? `${data.quantity} unidad(es)` : null;
+  const stock = data.stock_number ? `stock ${data.stock_number}` : `id ${row.id.slice(0, 8)}`;
+  return [title || "Vehiculo sin nombre", color, status, price, quantity, stock].filter(Boolean).join(" · ");
+}
+
+function matchVehicleRows(
+  rows: Array<{ id: string; data: Record<string, unknown> }>,
+  criteria: { model?: string | null; year?: number | null; color?: { canonical: string; terms: string[] } | null; branch?: string | null },
+) {
+  return rows.filter((row) => {
+    const data = row.data;
+    if (criteria.model) {
+      const modelNeedle = normalizeInventoryText(criteria.model);
+      const modelHaystack = [data.make, data.model, data.trim].map(normalizeInventoryText).join(" ");
+      if (!modelHaystack.includes(modelNeedle)) return false;
+    }
+    if (criteria.year && Number(data.year) !== criteria.year) return false;
+    if (criteria.color) {
+      const colorHaystack = [data.exterior_color, data.color].map(normalizeInventoryText).join(" ");
+      if (!criteria.color.terms.some((term) => colorHaystack.includes(normalizeInventoryText(term)))) return false;
+    }
+    if (criteria.branch) {
+      const branchHaystack = [data.branch, data.location, data.sucursal].map(normalizeInventoryText).join(" ");
+      if (!branchHaystack || !branchHaystack.includes(normalizeInventoryText(criteria.branch))) return false;
+    }
+    return true;
+  });
+}
+
+async function tryHandleInventoryUpdateIntent(
+  message: string,
+  workspaceIdentifier: string | null,
+  preferredObjectId: string | null,
+  requestContext: { origin: string; cookieHeader?: string; agentId?: string | null },
+) {
+  const parsed = parseInventoryUpdateShortcut(message);
+  if (!parsed || !workspaceIdentifier) return null;
+  const workspace = await resolveWorkspaceContext(workspaceIdentifier);
+  const supabase = getSupabaseAdmin();
+  if (!workspace || !supabase) return null;
+
+  let objectId = preferredObjectId;
+  if (objectId) {
+    const { data: scopedObject } = await supabase
+      .from("workspace_objects")
+      .select("id")
+      .eq("workspace_id", workspace.workspaceId)
+      .eq("id", objectId)
+      .maybeSingle();
+    objectId = scopedObject?.id ? String(scopedObject.id) : null;
+  }
+
+  if (!objectId) {
+    const { data: vehicleObject } = await supabase
+      .from("workspace_objects")
+      .select("id")
+      .eq("workspace_id", workspace.workspaceId)
+      .or("name.ilike.%vehicle%,name.ilike.%vehiculo%,name.ilike.%inventario%")
+      .order("created_at", { ascending: true })
+      .limit(1)
+      .maybeSingle();
+    objectId = vehicleObject?.id ? String(vehicleObject.id) : null;
+  }
+
+  if (!objectId) return null;
+
+  const { data: candidateRows, error: recordError } = await supabase
+    .from("records")
+    .select("id, data")
+    .eq("workspace_id", workspace.workspaceId)
+    .eq("object_id", objectId)
+    .is("deleted_at", null)
+    .order("updated_at", { ascending: false })
+    .limit(500);
+
+  if (recordError) {
+    return streamDirectAgentToolResult({
+      toolName: "records.query",
+      result: { ok: false, error: recordError.message },
+      successMessage: `No pude buscar ${parsed.stockNumber}: ${recordError.message}`,
+    });
+  }
+  const matches = ((candidateRows ?? []) as Array<{ id: string; data: Record<string, unknown> }>).filter((row) => {
+    const data = row.data ?? {};
+    if (parsed.idPrefix && !String(row.id).toLowerCase().startsWith(parsed.idPrefix)) return false;
+    if (parsed.stockNumber && String(data.stock_number ?? "").toUpperCase() !== parsed.stockNumber) return false;
+    if (parsed.model) {
+      const modelNeedle = normalizeInventoryText(parsed.model);
+      const modelHaystack = [data.make, data.model, data.trim].map(normalizeInventoryText).join(" ");
+      if (!modelHaystack.includes(modelNeedle)) return false;
+    }
+    if (parsed.year && Number(data.year) !== parsed.year) return false;
+    if (parsed.color) {
+      const colorHaystack = [data.exterior_color, data.color].map(normalizeInventoryText).join(" ");
+      if (!parsed.color.terms.some((term) => colorHaystack.includes(normalizeInventoryText(term)))) return false;
+    }
+    return true;
+  });
+  const recordRow = matches.length === 1 ? matches[0] : null;
+
+  if (matches.length > 1) {
+    const preview = matches.slice(0, 3).map(formatVehicleLine).join("\n");
+    return streamDirectAgentToolResult({
+      toolName: "records.query",
+      result: {
+        ok: false,
+        error: "Multiple matching vehicle records.",
+        data: { count: matches.length, matches: matches.slice(0, 3) },
+      },
+      successMessage: `EncontrÃ© ${matches.length} vehÃ­culos posibles. Dime cuÃ¡l actualizar:\n${preview}`,
+    });
+  }
+
+  if (!recordRow?.id) {
+    return streamDirectAgentToolResult({
+      toolName: "records.query",
+      result: {
+        ok: false,
+        error: `No vehicle record found for stock_number ${parsed.stockNumber}.`,
+      },
+      successMessage: `No encontré un vehículo con stock_number ${parsed.stockNumber}.`,
+    });
+  }
+
+  const args = {
+    recordId: String(recordRow.id),
+    data: parsed.patch,
+    dryRun: true,
+  };
+  const result = await runTool({
+    name: "records.update",
+    args,
+    ctx: {
+      workspaceSlug: workspace.workspaceSlug,
+      origin: requestContext.origin,
+      cookieHeader: requestContext.cookieHeader,
+      agentId: requestContext.agentId ?? undefined,
+    },
+  });
+
+  const changed = Object.entries(parsed.patch)
+    .map(([key, value]) => `${key}=${String(value)}`)
+    .join(", ");
+  return streamDirectAgentToolResult({
+    toolName: "records.update",
+    result,
+    originalArgs: args,
+    successMessage: result.ok
+      ? `Encontré ${parsed.stockNumber} y preparé la actualización (${changed}). Confirma la tarjeta para aplicarla.`
+      : `Encontré ${parsed.stockNumber}, pero no pude preparar la actualización: ${result.error ?? "error desconocido"}.`,
+  });
+}
+
+async function tryHandleInventoryQuestionIntent(
+  message: string,
+  workspaceIdentifier: string | null,
+  preferredObjectId: string | null,
+) {
+  const normalized = normalizeInventoryText(message);
+  const looksLikeInventoryQuestion =
+    /\b(tenemos|hay|existe|disponible|inventario|catalogo|cat[aá]logo|mustang|territory|edge|ranger|bronco|lobo|veh[ií]culo|auto|carro|unidad)\b/i.test(
+      message,
+    ) && /[?¿]|\b(tenemos|hay|que|qu[eé]|cu[aá]l|cuales|disponible)\b/i.test(message);
+  if (!looksLikeInventoryQuestion || !workspaceIdentifier) return null;
+  const workspace = await resolveWorkspaceContext(workspaceIdentifier);
+  if (!workspace) return null;
+  const objectId = await resolveVehiclesObjectId(workspace.workspaceId, preferredObjectId);
+  if (!objectId) return null;
+
+  const rows = await loadVehicleInventoryRows(workspace.workspaceId, objectId);
+  const criteria = {
+    model: extractInventoryModel(message),
+    year: extractInventoryYear(message),
+    color: extractInventoryColor(message),
+    branch: extractInventoryBranch(message),
+  };
+  const hasSpecificCriteria = Boolean(criteria.model || criteria.year || criteria.color || criteria.branch);
+  if (!hasSpecificCriteria && !normalized.includes("inventario") && !normalized.includes("catalogo")) return null;
+
+  const exactMatches = matchVehicleRows(rows, criteria);
+  const nearestCriteria = { ...criteria, color: null, branch: null };
+  const nearMatches =
+    exactMatches.length === 0 && (criteria.color || criteria.branch)
+      ? matchVehicleRows(rows, nearestCriteria).slice(0, 5)
+      : [];
+  const redMatches =
+    exactMatches.length === 0 && criteria.color?.canonical === "rojo"
+      ? matchVehicleRows(rows, { color: criteria.color }).slice(0, 5)
+      : [];
+  const hasBranchField = rows.some((row) => row.data.branch || row.data.location || row.data.sucursal);
+
+  const parts: string[] = [];
+  if (exactMatches.length > 0) {
+    parts.push(`Sí encontré ${exactMatches.length} coincidencia(s) en inventario:`);
+    parts.push(exactMatches.slice(0, 6).map((row) => `- ${formatVehicleLine(row)}`).join("\n"));
+  } else {
+    const requested = [
+      criteria.model,
+      criteria.year,
+      criteria.color ? criteria.color.canonical : null,
+      criteria.branch ? `sucursal ${criteria.branch}` : null,
+    ]
+      .filter(Boolean)
+      .join(" ");
+    parts.push(`No encontré una coincidencia exacta para ${requested || "esa búsqueda"} en Vehicles.`);
+    if (criteria.branch && !hasBranchField) {
+      parts.push("Nota: la sucursal todavía no está capturada como campo en esta tabla, así que solo pude validar modelo/color/año.");
+    }
+    if (nearMatches.length > 0) {
+      parts.push("Lo más cercano por modelo/año:");
+      parts.push(nearMatches.map((row) => `- ${formatVehicleLine(row)}`).join("\n"));
+    }
+    if (redMatches.length > 0) {
+      parts.push("Unidades rojas disponibles en el inventario:");
+      parts.push(redMatches.map((row) => `- ${formatVehicleLine(row)}`).join("\n"));
+    }
+  }
+
+  return streamActionResponse(parts.join("\n\n"));
+}
+
+function parseInventoryCreateShortcut(message: string) {
+  const normalized = normalizeInventoryText(message);
+  if (!/\b(agrega|agregar|crea|crear|alta|anade|añade|add)\b/.test(normalized)) return null;
+  if (!/\b(mustang|territory|edge|ranger|bronco|lobo|vehiculo|vehiculo|auto|unidad)\b/.test(normalized)) return null;
+  const model = extractInventoryModel(message);
+  if (!model) return null;
+  const year = extractInventoryYear(message);
+  const color = extractInventoryColor(message);
+  const quantityMatch = message.match(/\b(\d+)\s*(?:unidad|unidades|uds|existencia|existencias)\b/i);
+  const quantity = quantityMatch?.[1] ? Number(quantityMatch[1]) : null;
+  const trimMatch = message.match(/\b(?:version|versi[oó]n|trim)\s+([^,.]+)/i);
+  const statusMatch = normalized.match(/\b(disponible|reserved|reservado|reservada|sold|vendido|vendida|pending|pendiente)\b/);
+  const statusMap: Record<string, string> = {
+    disponible: "available",
+    reserved: "reserved",
+    reservado: "reserved",
+    reservada: "reserved",
+    sold: "sold",
+    vendido: "sold",
+    vendida: "sold",
+    pending: "pending",
+    pendiente: "pending",
+  };
+  const data: Record<string, unknown> = {
+    stock_number: `CHAT-${compactHash(message).toUpperCase().slice(0, 6)}`,
+    make: "Ford",
+    model: model.replace(/^F(\d)/, "F-$1"),
+    status: statusMatch?.[1] ? statusMap[statusMatch[1]] ?? statusMatch[1] : "available",
+    source: "workspace-chat",
+  };
+  if (year) data.year = year;
+  if (color) data.exterior_color = color.canonical;
+  if (quantity !== null && Number.isFinite(quantity)) data.quantity = quantity;
+  if (trimMatch?.[1]) data.trim = trimMatch[1].trim();
+  return data;
+}
+
+async function tryHandleInventoryCreateIntent(
+  message: string,
+  workspaceIdentifier: string | null,
+  preferredObjectId: string | null,
+  requestContext: { origin: string; cookieHeader?: string; agentId?: string | null },
+) {
+  const data = parseInventoryCreateShortcut(message);
+  if (!data || !workspaceIdentifier) return null;
+  const workspace = await resolveWorkspaceContext(workspaceIdentifier);
+  if (!workspace) return null;
+  const objectId = await resolveVehiclesObjectId(workspace.workspaceId, preferredObjectId);
+  if (!objectId) return null;
+
+  const args = { objectId, data, dryRun: true };
+  const result = await runTool({
+    name: "records.create",
+    args,
+    ctx: {
+      workspaceSlug: workspace.workspaceSlug,
+      origin: requestContext.origin,
+      cookieHeader: requestContext.cookieHeader,
+      agentId: requestContext.agentId ?? undefined,
+    },
+  });
+  return streamDirectAgentToolResult({
+    toolName: "records.create",
+    result,
+    originalArgs: args,
+    successMessage: result.ok
+      ? "Preparé el alta de inventario. Confirma la tarjeta para crear la unidad en Vehicles."
+      : `No pude preparar el alta: ${result.error ?? "error desconocido"}.`,
+  });
+}
+
+async function tryHandleInventoryNamedUpdateIntent(
+  message: string,
+  workspaceIdentifier: string | null,
+  preferredObjectId: string | null,
+  requestContext: { origin: string; cookieHeader?: string; agentId?: string | null },
+) {
+  const normalized = normalizeInventoryText(message);
+  const statusMatch = normalized.match(/\b(disponible|available|reservado|reservada|reserved|vendido|vendida|sold|pendiente|pending)\b/);
+  const wantsStatusUpdate = /\b(marca|marcar|actualiza|actualizar|cambia|cambiar|pon|poner)\b/.test(normalized);
+  if (!statusMatch || !wantsStatusUpdate || !workspaceIdentifier) return null;
+  const model = extractInventoryModel(message);
+  if (!model) return null;
+  const workspace = await resolveWorkspaceContext(workspaceIdentifier);
+  if (!workspace) return null;
+  const objectId = await resolveVehiclesObjectId(workspace.workspaceId, preferredObjectId);
+  if (!objectId) return null;
+
+  const statusMap: Record<string, string> = {
+    disponible: "available",
+    available: "available",
+    reservado: "reserved",
+    reservada: "reserved",
+    reserved: "reserved",
+    vendido: "sold",
+    vendida: "sold",
+    sold: "sold",
+    pendiente: "pending",
+    pending: "pending",
+  };
+  const rows = await loadVehicleInventoryRows(workspace.workspaceId, objectId);
+  const matches = matchVehicleRows(rows, {
+    model,
+    year: extractInventoryYear(message),
+    color: extractInventoryColor(message),
+    branch: extractInventoryBranch(message),
+  });
+  if (matches.length === 0) {
+    return streamActionResponse(`No encontré una unidad que coincida con ${model}. No hice cambios.`);
+  }
+  if (matches.length > 1) {
+    return streamActionResponse(
+      [
+        `Encontré ${matches.length} posibles unidades para ${model}. ¿Cuál quieres actualizar?`,
+        matches.slice(0, 3).map((row) => `- ${formatVehicleLine(row)}`).join("\n"),
+      ].join("\n\n"),
+    );
+  }
+
+  const args = {
+    recordId: matches[0]!.id,
+    data: { status: statusMap[statusMatch[1]] ?? statusMatch[1] },
+    dryRun: true,
+  };
+  const result = await runTool({
+    name: "records.update",
+    args,
+    ctx: {
+      workspaceSlug: workspace.workspaceSlug,
+      origin: requestContext.origin,
+      cookieHeader: requestContext.cookieHeader,
+      agentId: requestContext.agentId ?? undefined,
+    },
+  });
+  return streamDirectAgentToolResult({
+    toolName: "records.update",
+    result,
+    originalArgs: args,
+    successMessage: result.ok
+      ? `Encontré una sola coincidencia: ${formatVehicleLine(matches[0]!)}. Confirma la tarjeta para actualizarla.`
+      : `No pude preparar la actualización: ${result.error ?? "error desconocido"}.`,
+  });
+}
+
+async function tryHandleInventoryImportIntent(
+  message: string,
+  attachmentRecordIds: string[],
+  workspaceIdentifier: string | null,
+  preferredObjectId: string | null,
+  requestContext: { origin: string; cookieHeader?: string; agentId?: string | null },
+) {
+  const normalized = normalizeInventoryText(message);
+  const wantsImport = /\b(importa|importar|carga|cargar|sube|subir|actualiza|actualizar)\b/.test(normalized);
+  const inventoryContext = /\b(inventario|catalogo|cat[aá]logo|autos|vehiculos|vehiculos|unidades|carros)\b/.test(normalized);
+  if (!wantsImport || !inventoryContext || attachmentRecordIds.length === 0 || !workspaceIdentifier) return null;
+  const workspace = await resolveWorkspaceContext(workspaceIdentifier);
+  if (!workspace) return null;
+  const objectId = await resolveVehiclesObjectId(workspace.workspaceId, preferredObjectId);
+  if (!objectId) return null;
+  const args = {
+    documentRecordId: attachmentRecordIds[0],
+    objectId,
+    objectName: "Vehicles",
+    mode: "upsert",
+    dedupeFieldKey: "inventory_import_key",
+    dryRun: true,
+  };
+  const result = await runTool({
+    name: "records.import_attachment",
+    args,
+    ctx: {
+      workspaceSlug: workspace.workspaceSlug,
+      origin: requestContext.origin,
+      cookieHeader: requestContext.cookieHeader,
+      agentId: requestContext.agentId ?? undefined,
+    },
+  });
+  return streamDirectAgentToolResult({
+    toolName: "records.import_attachment",
+    result,
+    originalArgs: args,
+    successMessage: result.ok
+      ? "Detecté que el archivo parece inventario automotriz y lo mapeé al objeto existente Vehicles. Revisa la tarjeta y confirma para importar."
+      : `No pude preparar la importación de inventario: ${result.error ?? "error desconocido"}.`,
+  });
+}
+
+function parseConfirmedProposalMessage(message: string) {
+  const match = message.match(/<<CONFIRM_PROPOSAL\s+([^>]+)>>/i);
+  if (!match?.[1]) return null;
+  const attrs = match[1];
+  const toolName = attrs.match(/\btoolName=([^\s>]+)/i)?.[1]?.trim() ?? "";
+  const token = attrs.match(/\btoken=([^\s>]+)/i)?.[1]?.trim() ?? "";
+  const encodedArgs = attrs.match(/\bargs=([^\s>]+)/i)?.[1]?.trim() ?? "";
+  if (!toolName || !token) return null;
+
+  let args: Record<string, unknown> | null = null;
+  if (encodedArgs) {
+    try {
+      const parsed = JSON.parse(decodeURIComponent(encodedArgs)) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        args = parsed as Record<string, unknown>;
+      }
+    } catch {
+      args = null;
+    }
+  }
+
+  return { toolName, token, args };
+}
+
+async function tryHandleConfirmedProposal(
+  message: string,
+  workspaceIdentifier: string | null,
+  requestContext: { origin: string; cookieHeader?: string; agentId?: string | null },
+) {
+  const parsed = parseConfirmedProposalMessage(message);
+  if (!parsed || !workspaceIdentifier) return null;
+  if (!parsed.args) {
+    return streamActionResponse(
+      "[Workspace action] Recibí la confirmación, pero esta tarjeta no incluía los argumentos originales para aplicar el cambio. Genera una nueva propuesta y confirma desde la tarjeta actualizada.",
+    );
+  }
+  const workspace = await resolveWorkspaceContext(workspaceIdentifier);
+  if (!workspace) return null;
+  const args = {
+    ...parsed.args,
+    dryRun: false,
+    confirmToken: parsed.token,
+  };
+  const result = await runTool({
+    name: parsed.toolName,
+    args,
+    ctx: {
+      workspaceSlug: workspace.workspaceSlug,
+      origin: requestContext.origin,
+      cookieHeader: requestContext.cookieHeader,
+      agentId: requestContext.agentId ?? undefined,
+    },
+  });
+
+  return streamDirectAgentToolResult({
+    toolName: parsed.toolName,
+    result,
+    successMessage: result.ok
+      ? "Confirmación aplicada. El cambio quedó guardado en el workspace."
+      : `No pude aplicar la confirmación: ${result.error ?? "error desconocido"}.`,
+  });
 }
 
 type ExplicitImageIntent = {
@@ -2144,6 +3521,8 @@ async function tryHandleImageIntent(
   requestContext: { origin: string; cookieHeader?: string },
   explicitIntent?: ExplicitImageIntent,
 ): Promise<Response | null> {
+  const imageShortcutsEnabled = process.env.PRISMA_ENABLE_IMAGE_SHORTCUTS === "true";
+  if (!imageShortcutsEnabled) return null;
   if (!workspaceIdentifier) return null;
 
   const forced = resolveImageIntentKind(explicitIntent);
@@ -2255,7 +3634,7 @@ async function resolveAgentRuntime(payload: ChatRequest) {
 
   let query = supabase
     .from("workspace_agents")
-    .select("id, workspace_id, name, api_endpoint, api_key, status, soul_md, skills, knowledge_scope")
+    .select("id, workspace_id, name, type, api_endpoint, api_key, status, soul_md, skills, mcp_tools_include, skills_scope, model_overrides, knowledge_scope")
     .eq("id", requestedAgentId)
     .limit(1);
 
@@ -2290,6 +3669,176 @@ function agentSupportsWebIntent(agent: AgentRuntimeRecord) {
   return hasSkill || scopeWebEnabled;
 }
 
+function resolveAgentAllowedToolNames(agent: AgentRuntimeRecord | null): string[] {
+  const registeredNames = listRegisteredToolNames();
+  const registeredSet = new Set(registeredNames);
+  if (!agent) {
+    return registeredNames;
+  }
+  const knowledgeScope =
+    agent.knowledge_scope && typeof agent.knowledge_scope === "object" && !Array.isArray(agent.knowledge_scope)
+      ? agent.knowledge_scope
+      : {};
+  const legacyRole =
+    typeof (knowledgeScope as Record<string, unknown>).legacy_role === "string"
+      ? String((knowledgeScope as Record<string, unknown>).legacy_role)
+      : null;
+  const policy = resolveMcpToolPolicy({
+    agentType: agent.type,
+    legacyRole,
+    knowledgeScope,
+  });
+  const policyAllowed = applyToolPolicyToNames(registeredNames, policy);
+  const explicitIncludes = Array.isArray(agent.mcp_tools_include)
+    ? agent.mcp_tools_include
+        .map((entry) => String(entry ?? "").trim())
+        .filter((name) => name.length > 0 && registeredSet.has(name))
+    : [];
+  return Array.from(new Set([...policyAllowed, ...explicitIncludes])).sort((a, b) => a.localeCompare(b));
+}
+
+function withOperatorDetailAgentTools(toolNames: string[], enabled: boolean): string[] {
+  if (!enabled) return toolNames;
+  const operatorAgentToolNames = listRegisteredToolNames().filter((name) => name.startsWith("agents.update_"));
+  if (operatorAgentToolNames.length === 0) return toolNames;
+  return Array.from(new Set([...toolNames, ...operatorAgentToolNames])).sort((a, b) => a.localeCompare(b));
+}
+
+function toolNamespace(name: string): string {
+  return name.includes(".") ? name.split(".")[0] || "general" : "general";
+}
+
+function hasToolNamespace(toolNames: string[], namespace: string): boolean {
+  return toolNames.some((name) => toolNamespace(name) === namespace);
+}
+
+function hasExactTool(toolNames: string[], toolName: string): boolean {
+  return toolNames.includes(toolName);
+}
+
+function formatToolNamespaceList(namespaces: string[]): string {
+  return namespaces.map((ns) => `\`${ns}.*\``).join(", ");
+}
+
+type HermesUpstreamRequest = {
+  baseUrl: string;
+  apiKey: string;
+  requestBody: Record<string, unknown>;
+  workspaceId?: string;
+  agentId?: string;
+  clientSignal?: AbortSignal;
+};
+
+async function requestHermesUpstream({
+  baseUrl,
+  apiKey,
+  requestBody,
+  workspaceId,
+  agentId,
+  clientSignal,
+}: HermesUpstreamRequest): Promise<Response> {
+  const shimBase = process.env.PRISMA_HERMES_SHIM_URL?.trim();
+  if (shimBase) {
+    const shimUrl = `${shimBase.replace(/\/$/, "")}/chat`;
+    try {
+      const shimResponse = await fetch(shimUrl, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(process.env.PRISMA_HERMES_SHIM_SHARED_SECRET
+            ? { "x-prisma-shim-secret": process.env.PRISMA_HERMES_SHIM_SHARED_SECRET }
+            : {}),
+        },
+        body: JSON.stringify({
+          baseUrl,
+          apiKey,
+          requestBody,
+          workspaceId,
+          agentId,
+        }),
+        signal: clientSignal,
+      });
+      if (shimResponse.ok) {
+        return shimResponse;
+      }
+      const detail = await shimResponse.text().catch(() => "");
+      if (shimResponse.status >= 500) {
+        console.warn(
+          `[chat] Hermes shim returned ${shimResponse.status}; falling back to direct runtime.`,
+          detail.slice(0, 180),
+        );
+      } else {
+        throw new Error(detail || `Shim returned ${shimResponse.status}`);
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      console.warn(
+        "[chat] Hermes shim request failed; falling back to direct runtime.",
+        detail.slice(0, 180),
+      );
+    }
+  }
+
+  const hermesUrl = `${baseUrl.replace(/\/$/, "")}/v1/responses`;
+  const hermesHeaders = {
+    Authorization: `Bearer ${apiKey}`,
+    "Content-Type": "application/json",
+  };
+  const hermesBody = JSON.stringify(requestBody);
+  const firstAttemptTimeoutMs = Number(process.env.HERMES_CONNECT_TIMEOUT_MS ?? 90000);
+  const retryTimeoutMs = Number(process.env.HERMES_RETRY_TIMEOUT_MS ?? 120000);
+  let hermesResponse: Response | null = null;
+  let lastError: unknown = null;
+  const dispatcherInit = await hermesFetchInit();
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(
+        () => controller.abort(),
+        attempt === 1 ? firstAttemptTimeoutMs : retryTimeoutMs,
+      );
+      const signals: AbortSignal[] = [controller.signal];
+      if (clientSignal) signals.push(clientSignal);
+      const combinedSignal =
+        signals.length === 1
+          ? signals[0]
+          : (AbortSignal as unknown as { any: (list: AbortSignal[]) => AbortSignal }).any(signals);
+      hermesResponse = await fetch(hermesUrl, {
+        method: "POST",
+        headers: hermesHeaders,
+        body: hermesBody,
+        signal: combinedSignal,
+        ...dispatcherInit,
+      });
+      clearTimeout(timeout);
+      break;
+    } catch (err) {
+      lastError = err;
+      const message = err instanceof Error ? err.message : String(err);
+      const isAbort = message.includes("aborted") || message.includes("AbortError");
+      console.warn(
+        `[chat] Hermes fetch attempt ${attempt}/3 failed${isAbort ? " (timeout)" : ""}:`,
+        message.slice(0, 200),
+      );
+      if (attempt < 3) {
+        await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
+      }
+    }
+  }
+
+  if (!hermesResponse) {
+    const detail = lastError instanceof Error ? lastError.message : "network error";
+    const isTimeout = detail.includes("aborted") || detail.includes("AbortError") || detail.includes("timeout");
+    const message = isTimeout
+      ? `Hermes tardó demasiado en responder (>${Math.round(retryTimeoutMs / 1000)}s tras 3 intentos). El runtime puede estar frío o saturado; intenta de nuevo en unos segundos.`
+      : `Hermes runtime is unreachable (${detail}). Check HERMES_API_BASE_URL or try again in a moment.`;
+    throw new Error(message);
+  }
+
+  return hermesResponse;
+}
+
 async function proxyToHermes({
   payload,
   baseUrl,
@@ -2315,11 +3864,52 @@ async function proxyToHermes({
     recentActions: string[];
   } | null;
   conversationContext?: ConversationPersistContext | null;
-  toolContext?: { workspaceSlug: string; origin: string; cookieHeader?: string } | null;
+  toolContext?: { workspaceSlug: string; origin: string; cookieHeader?: string; agentId?: string | null } | null;
   clientSignal?: AbortSignal;
 }) {
   const appContext = payload.app_context ?? payload.appContext ?? null;
   const toolIntent = payload.tool_intent ?? payload.toolIntent ?? null;
+  const baseAllowedToolNames = resolveAgentAllowedToolNames(agent ?? null);
+  const targetedAgentIdForTurn =
+    appContext && typeof appContext.targeted_agent_id === "string" && appContext.targeted_agent_id
+      ? appContext.targeted_agent_id
+      : null;
+  const targetedAgentNameForTurn =
+    appContext && typeof appContext.targeted_agent_name === "string" && appContext.targeted_agent_name
+      ? appContext.targeted_agent_name
+      : null;
+  const operatorMode =
+    appContext && typeof appContext.operator_mode === "string" && appContext.operator_mode
+      ? appContext.operator_mode
+      : null;
+  const panelScope =
+    appContext && typeof appContext.panel_scope === "string" && appContext.panel_scope
+      ? appContext.panel_scope
+      : null;
+  const isOperatorDetailMode =
+    operatorMode === "agent_detail" ||
+    panelScope === "operator_agent" ||
+    Boolean(targetedAgentIdForTurn);
+  let allowedToolNames = withOperatorDetailAgentTools(baseAllowedToolNames, isOperatorDetailMode);
+  if (agent?.workspace_id) {
+    try {
+      const extra = await listActiveDynamicToolNamesForChat(
+        agent.workspace_id,
+        toolContext?.agentId ?? agent.id ?? null,
+      );
+      allowedToolNames = Array.from(new Set([...allowedToolNames, ...extra])).sort((a, b) => a.localeCompare(b));
+    } catch (error) {
+      console.warn("[chat] dynamic tool name merge failed", error);
+    }
+  }
+  const normalizedUserMessage = payload.message.toLowerCase();
+  const classifiedIntentKind = payload.classified_intent ?? payload.classifiedIntent ?? null;
+  const isTriggerConfigIntent =
+    isOperatorDetailMode &&
+    (classifiedIntentKind === "trigger_config" ||
+      /(trigger|cron|programar|programa|schedule|agendar|cada\s+\d+\s*(min|hora)|daily|diario)/.test(
+        normalizedUserMessage,
+      ));
   const scrubberNotes: string[] = [];
   if (conversationContext?.workspaceId && typeof payload.message === "string") {
     try {
@@ -2552,6 +4142,10 @@ async function proxyToHermes({
     payload.conversationId ??
     (agent ? `${agent.workspace_id}:${agent.id}` : process.env.HERMES_DEFAULT_CONVERSATION) ??
     undefined;
+  const hermesConversationId =
+    agent && conversationId && typeof agent.soul_md === "string" && agent.soul_md.trim().length > 0
+      ? `${conversationId}:soul-${compactHash(agent.soul_md.trim())}`.slice(0, 220)
+      : conversationId;
 
   const appContextLines =
     appContext
@@ -2574,6 +4168,21 @@ async function proxyToHermes({
           } else if (appContext.dataset_search_query === null) {
             base.push("Active search filter: none");
           }
+          if (typeof appContext.targeted_agent_id === "string" && appContext.targeted_agent_id) {
+            base.push(`Targeted agent id for this turn: ${appContext.targeted_agent_id}`);
+          }
+          if (typeof appContext.targeted_agent_name === "string" && appContext.targeted_agent_name) {
+            base.push(`Targeted agent name for this turn: ${appContext.targeted_agent_name}`);
+          }
+          if (typeof appContext.operator_mode === "string" && appContext.operator_mode) {
+            base.push(`Operator mode: ${appContext.operator_mode}`);
+          }
+          if (typeof appContext.panel_scope === "string" && appContext.panel_scope) {
+            base.push(`Operator panel scope: ${appContext.panel_scope}`);
+          }
+          if (typeof appContext.workspace_slug === "string" && appContext.workspace_slug) {
+            base.push(`Workspace slug hint: ${appContext.workspace_slug}`);
+          }
           if (typeof appContext.visible_record_count === "number") {
             base.push(`Visible rows in current grid: ${appContext.visible_record_count}`);
           }
@@ -2592,14 +4201,30 @@ async function proxyToHermes({
         })()
       : [];
   const soulInstructions =
-    typeof agent?.soul_md === "string" && agent.soul_md.trim().length > 0
-      ? [
-          `Agent SOUL.md instructions (your persona and primary mission):\n${agent.soul_md.trim()}`,
-          "Scope override: the SOUL.md describes your PRIMARY focus, not a hard restriction. The `images.*`, `integrations.*`, `recipes.*`, `automations.*`, `skills.*`, and `cms.*` tool namespaces are platform utilities that are ALWAYS in-scope for every agent in every workspace. When the user asks for a picture, an external API call, a website inventory update, or a scheduled automation, you MUST call the relevant tool — never refuse on persona grounds and never redirect the user back to your queue. After the utility task is done you can resume your primary workflow.",
-        ]
-      : [
-          "Scope: the `images.*`, `integrations.*`, `recipes.*`, `automations.*`, `skills.*`, and `cms.*` tool namespaces are platform utilities available in every chat. Use them whenever the user asks for an image, an external API call, a saved-recipe replay, a scheduled automation, or a CMS update.",
-        ];
+    (() => {
+      const utilityNamespaces = [
+        "images",
+        "integrations",
+        "connections",
+        "recipes",
+        "automations",
+        "skills",
+        "cms",
+      ].filter((namespace) => hasToolNamespace(allowedToolNames, namespace));
+      const utilityMessage =
+        utilityNamespaces.length > 0
+          ? `Scope override: the SOUL.md describes your PRIMARY focus, not a hard restriction. The following tool namespaces are available in this chat and remain in-scope regardless of persona: ${formatToolNamespaceList(utilityNamespaces)}. When the user asks for one of those capabilities, call the relevant available tool instead of refusing on persona grounds. After the utility task is done you can resume your primary workflow.`
+          : null;
+      return typeof agent?.soul_md === "string" && agent.soul_md.trim().length > 0
+        ? [
+            `Agent SOUL.md instructions (your persona and primary mission):\n${agent.soul_md.trim()}`,
+            "SOUL authority rule: the SOUL.md above is the current saved source of truth. If older conversation history conflicts with it, ignore the older history. If older messages contain placeholders such as [[CALENDLY_LINK]] or [[STRIPE_LINK]] but the SOUL.md above contains real URLs, use the real URLs from the current SOUL.md.",
+            ...(utilityMessage ? [utilityMessage] : []),
+          ]
+        : utilityMessage
+          ? [utilityMessage]
+          : [];
+    })();
 
   // Build a compact, rename-proof catalog of the workspace objects the agent
   // can reason about without guessing from memory. Kept small to respect the
@@ -2632,13 +4257,18 @@ async function proxyToHermes({
     }
   }
 
-  const toolEnvelopeLines =
-    toolContext
-      ? (() => {
-          const registered = describeToolsForPrompt();
-          const byNs = new Map<string, string[]>();
+  let toolEnvelopeLines: string[] = [];
+  if (toolContext) {
+    const registered = workspaceContext?.workspaceId
+      ? await describeMergedToolsForPrompt(
+          workspaceContext.workspaceId,
+          toolContext.agentId ?? agent?.id ?? null,
+          allowedToolNames,
+        )
+      : describeSelectedToolsForPrompt(allowedToolNames);
+    const byNs = new Map<string, string[]>();
           for (const t of registered) {
-            const ns = t.name.includes(".") ? t.name.split(".")[0] : "general";
+            const ns = toolNamespace(t.name);
             if (!byNs.has(ns)) byNs.set(ns, []);
             byNs.get(ns)!.push(t.name);
           }
@@ -2680,22 +4310,63 @@ async function proxyToHermes({
             },
           };
 
-          return [
+    const toolNotes: string[] = [];
+    if (hasToolNamespace(allowedToolNames, "images")) {
+      toolNotes.push(
+        "images.search uses SerpAPI and images.generate calls Hermes image generation (image_generate/FAL) through the Prisma tool layer.",
+      );
+    }
+    if (hasToolNamespace(allowedToolNames, "integrations")) {
+      toolNotes.push(
+        "integrations.call / integrations.sync_leads operate on credentials stored in the per-workspace encrypted vault; call integrations.list first to discover configured slugs.",
+      );
+    }
+    if (hasToolNamespace(allowedToolNames, "cms")) {
+      toolNotes.push(
+        "cms.push_inventory pushes to external sites like gb-automotriz over an HMAC-signed webhook.",
+      );
+    }
+    const canPublishRecipeSkill = hasExactTool(allowedToolNames, "skills.publish_recipe");
+    const integrationLearningLoopLine = hasToolNamespace(allowedToolNames, "integrations")
+      ? `Integration learning loop: whenever you call an API for the first time, your workflow is (1) integrations.list to see what's configured, (2) integrations.probe a likely endpoint to see status/shape/sample, (3) once you have a known-good call, \`recipes.save\` it with a descriptive name and {{var}} placeholders for user-supplied values, (4) next time reuse it via \`recipes.call\` with \`vars\` — do NOT re-probe known endpoints.${canPublishRecipeSkill ? " After saving, call \\`skills.publish_recipe\\` so future sessions inherit the SKILL.md." : ""} If the user pastes a fresh API key for a vendor we don't have a dedicated provider for, route it through the encrypted workspace integration flow (Operadores -> Connections or Settings -> Integrations) using provider \`custom_api\`, not agent channel_config credentials.`
+      : null;
+    const delegationLine =
+      hasExactTool(allowedToolNames, "peer.list_agents") && hasExactTool(allowedToolNames, "peer_delegate")
+        ? "Delegation rule: BEFORE calling `peer_delegate`, you MUST first call `peer.list_agents` (no args) to discover the workspace operators. Match the user's intent to a single `target_agent_id` using `name`, `type`, and `summary`. If two or more agents look plausible, ask the user which operator should own the task (list them by name + role). Never invent or reuse an id from another workspace. The `goal` field should be a complete, self-contained instruction the receiving operator can execute without further context — restate the resolved entities (people/clients/objects) in plain language inside `goal`."
+        : null;
+
+    toolEnvelopeLines = [
             "Tool envelope: you may invoke platform tools by emitting SSE data frames of the shape {\"type\":\"tool_call\",\"id\":\"<unique>\",\"name\":\"<tool>\",\"args\":{...}} before text. The platform executes each and replies with a tool_result frame containing {ok, data} or {ok:false, error}. Always emit `tool_call` with an underscore and the exact registry name (e.g. `cms.list_inventory`, not `cms.listinventory`). Prefer tool calls for any write (create/update/delete/stage/assign/import), for reading CRM or custom object lists, for searching/generating/saving images, and for calling configured third-party integrations.",
             `Available tools by namespace — ${groups}.`,
+            ...(isOperatorDetailMode
+              ? [
+                  `Operator detail mode is active: you are editing one operator agent directly in the Operadores tab${targetedAgentNameForTurn ? ` (${targetedAgentNameForTurn})` : ""}.`,
+                  targetedAgentIdForTurn
+                    ? `For ANY agents.update_* call in this turn, set agent_id exactly to "${targetedAgentIdForTurn}" unless the user explicitly asks to switch targets.`
+                    : "If no targeted_agent_id is present, ask a short clarification before calling agents.update_*.",
+                  "When the user asks to add/change/remove triggers, cron schedules, or recurring jobs for this agent, call agents.update_jobs (not crm.* or records.* unless the user explicitly asks to modify CRM/data records).",
+                  "When the user gives persona/behavior instructions, call agents.update_soul in this turn with the FULL updated soul_md. Do not only provide a plan.",
+                  "When the requested role/operation materially changes or the current agent name no longer fits, also call agents.update_identity in the same turn with a concise role-aligned name and, if helpful, a matching one-line description.",
+                  "After a successful agents.update_soul call, include a short confirmation and echo the applied SOUL.md text so the operator can verify exactly what was saved.",
+                ]
+              : []),
             ...catalogLines,
             "Datos query contract: when the user mentions a workspace object, use the #CATALOG above. ALWAYS pass `objectSlug` from the catalog (it survives renames and is the shortest stable reference). Pass the FULL 36-char `objectId` only if you're retrying a slug that was rejected; NEVER pass a partial/truncated id (e.g. the 8-char prefix — that's display-only). For filter rules, `field` should be the field's stable `key` from the catalog. If the user's phrase doesn't match any catalog slug clearly, STOP and ask the user a short clarifying question listing the top 3 candidate slugs from the catalog — do NOT guess, and do NOT emit multiple speculative tool_calls in the same turn. Only call `schema.catalog` when the catalog is marked truncated or the user named something that isn't in the catalog at all. If records.query returns `{reason:\"object_not_found\", retryWith:[slug, ...]}`, retry once with the first slug in retryWith; if it returns `{reason:\"unknown_fields\"}` or `{reason:\"needs_disambiguation\"}`, read the structured error and retry with the suggested `key` or `id`.",
-            "Confirm-before-commit rule: EVERY write tool (records.create, records.update, records.delete, records.bulk_update, records.bulk_delete, cms.push_inventory, crm.delete_*) MUST be issued twice. FIRST call with `dryRun:true` (the default) — you will receive `{ proposal, confirmToken, expiresAt }` and the chat UI will show the user a confirmation card. WAIT for the user's confirmation (a follow-up user message that includes the confirmToken, usually prefixed \"user confirmed\"). THEN re-issue the SAME tool_call with `dryRun:false` and `confirmToken:\"<token>\"` to commit. If the user says cancel/no/stop, acknowledge and abandon the write. Never commit silently, never call a write tool with dryRun:false on your own.",
+            "GB Automotriz inventory rule: treat natural Spanish dealership questions as live inventory work. For reads like \"tenemos un Mustang rojo en Sonora\", query Vehicles before answering; match model/make/trim, year, exterior_color, status, price, quantity, and branch/location/sucursal when those fields exist. If branch/location is not tracked, say so plainly and answer with the closest available inventory. For attached Ford/vehicle CSV sheets, use records.import_attachment with dryRun:true against the existing Vehicles object; map Tipo de Vehiculo→model, Año Modelo→year, Color→exterior_color, Version→trim, Color Interior→interior_color, Uds Existencia→quantity. Do not create a new table for vehicle sheets unless no Vehicles object exists.",
+            "Confirm-before-commit rule: EVERY write tool (records.create, records.update, records.delete, records.import_attachment, records.bulk_update, records.bulk_delete, crm.delete_*, and any available `cms.push_inventory`-style write tool) MUST be issued twice. FIRST call with `dryRun:true` (the default) — you will receive `{ proposal, confirmToken, expiresAt }` and the chat UI will show the user a confirmation card. WAIT for the user's confirmation (a follow-up user message that includes the confirmToken, usually prefixed \"user confirmed\"). THEN re-issue the SAME tool_call with `dryRun:false` and `confirmToken:\"<token>\"` to commit. If the user says cancel/no/stop, acknowledge and abandon the write. Never commit silently, never call a write tool with dryRun:false on your own.",
+            "Operational pilot rule: when an admin asks to test/prove a client operation setup (BBC/factoring, automotive/inventory/promotions, or despacho/lead intake), call `operational_pilot.setup` with `dryRun:true` first. Explain the proposed worker, operational databases, fields/views, workflows, and setup blockers. Only apply with `dryRun:false` plus the confirmToken after explicit confirmation. Treat these as pilot scenarios, not reusable templates yet, and keep website generation/design out of scope.",
             `Example read: ${JSON.stringify(queryExample)}`,
             `Example propose-then-commit: first ${JSON.stringify(bulkExample)} → receive proposal+confirmToken → wait for user's Confirm → second {\"type\":\"tool_call\",\"id\":\"tc_3\",\"name\":\"records.bulk_update\",\"args\":{...same args...,\"dryRun\":false,\"confirmToken\":\"v1.abc...\"}}.`,
-            "Notes: images.search uses SerpAPI and images.generate uses OpenRouter → google/gemini-2.5-flash-image-preview (nano-banana). integrations.call / integrations.sync_leads operate on credentials stored in the per-workspace vault; call integrations.list first to discover configured slugs. cms.push_inventory pushes to external sites like gb-automotriz over an HMAC-signed webhook.",
-            "Integration learning loop: whenever you call an API for the first time, your workflow is (1) integrations.list to see what's configured, (2) integrations.probe a likely endpoint to see status/shape/sample, (3) once you have a known-good call, `recipes.save` it with a descriptive name and {{var}} placeholders for user-supplied values, (4) next time reuse it via `recipes.call` with `vars` — do NOT re-probe known endpoints. After saving, call `skills.publish_recipe` so future sessions inherit the SKILL.md. If the user pastes a fresh API key for a vendor we don't have a dedicated provider for, tell them to add it in Settings → Integrations using provider `custom_api` (or do it on their behalf by explaining the required config).",
+            ...(toolNotes.length > 0 ? [`Notes: ${toolNotes.join(" ")}`] : []),
+            ...(integrationLearningLoopLine ? [integrationLearningLoopLine] : []),
             "Automations rule: when the user describes recurring work (\"check every 30 minutes\", \"every morning\", \"when X happens do Y\"), use `automations.create` to materialize it as a workflow. Cron schedules use 5-field cron (`*/30 * * * *` = every 30 min; tick granularity is 5 min). Steps can chain saved recipes via `{ \"type\": \"run_recipe\", \"integrationSlug\": \"...\", \"recipeSlug\": \"...\", \"vars\": { ... }, \"saveAs\": \"stepKey\" }` and later steps can reference prior step outputs via `{{steps.stepKey.data.<path>}}` in their own vars/templates. Offer `automations.run_now` to let the user smoke-test before waiting for the next tick. Use `automations.list` / `automations.update` / `automations.disable` to inspect and modify existing ones.",
             "Mandatory rule: if the user asks for an image, an online lookup, an API call against a configured integration, a CMS push, or any data exploration/modification of workspace records, you MUST emit the matching tool_call. Do NOT respond with 'I don't have image tools', 'searching is out of scope', or 'I'm focused on factoring/CRM/etc.' Tool availability is determined by the registry above, not by your persona. If a required integration is missing, call integrations.list first; if empty, instruct the user to add it in Settings → Integrations and tell them the exact provider+slug you need.",
             "Document extraction rule: when the user attaches a document (PDF, spreadsheet, CSV, text) and asks you to read, summarize, extract values from it, or use it to update records, your FIRST tool_call must be `documents.analyze` with `{ recordId: \"<the attachment recordId shown in the prompt>\" }`. Do NOT call any vision/image tool on PDFs. Do NOT ask the user to re-upload. Do NOT guess the contents. The attachment lines of this prompt include lines like `- <filename> [recordId: <uuid>] · tipo: pdf` — use that recordId. Example: {\"type\":\"tool_call\",\"id\":\"tc_1\",\"name\":\"documents.analyze\",\"args\":{\"recordId\":\"<uuid>\"}}. Only after you receive the tool_result with the extracted text should you propose follow-up writes (e.g. `records.bulk_update` with dryRun:true to change prices).",
-          ];
-        })()
-      : [];
+            "Clarify-then-act rule: when a request mentions people, companies, deals, vehicles, or any workspace record by name/description (e.g. \"send an invoice to ACME\", \"green Hondas in Mexico City\", \"create a task for Maria\"), FIRST call the relevant search/list tool (`crm.find_*`, `records.query`, `cms.list_*`) with the user's terms. If the result contains zero matches, ask the user how to proceed. If it contains multiple plausible matches, STOP and ask a single short disambiguation question that lists up to 3 candidates with the minimum identifying fields (name + city / company / status). Only commit to a write or `peer_delegate` once a single entity is locked in. NEVER fabricate ids, NEVER pick one of several silently.",
+            ...(delegationLine ? [delegationLine] : []),
+            "Automation/persona rule: when the user describes a recurring job (\"daily briefing at 7am\", \"every time a lead comes in\", \"check inventory hourly\") use `automations.create` after you have confirmed the schedule, the trigger, the action, and the delivery target. When the user gives persona feedback (\"don't talk like that\", \"you are Jayme, a sales rep\", \"keep replies short\"), persist it with `agents.update_soul` instead of only describing a plan. If that feedback changes what the operator fundamentally is, also call `agents.update_identity` so the visible agent name matches the new role. In operator detail mode, always use the targeted_agent_id as agent_id.",
+    ];
+  }
 
   const inputLines = [
     ...soulInstructions,
@@ -2746,7 +4417,7 @@ async function proxyToHermes({
 
   const requestBody: Record<string, unknown> = {
     input: inputLines.join("\n"),
-    conversation: conversationId,
+    conversation: hermesConversationId,
     stream: true,
     store: true,
     // Give Hermes enough headroom to finish tool_call envelopes. The default
@@ -2764,72 +4435,48 @@ async function proxyToHermes({
 
   await persistConversationMessage(conversationContext ?? null, "user", payload.message.trim());
 
-  const hermesUrl = `${baseUrl.replace(/\/$/, "")}/v1/responses`;
-  const hermesHeaders = {
-    Authorization: `Bearer ${apiKey}`,
-    "Content-Type": "application/json",
-  };
-  const hermesBody = JSON.stringify(requestBody);
-  // Retry up to 3 times with linear backoff on connect/transient errors.
-  // Covers cold starts and one-off UND_ERR_CONNECT_TIMEOUT flakes.
-  // Timeout budget is generous: Hermes can take 20-60s on first response (large
-  // system prompt + cold agent state). We only time the HEADERS/connect phase;
-  // once fetch() resolves the stream is handed off and the timer is cleared.
-  const firstAttemptTimeoutMs = Number(process.env.HERMES_CONNECT_TIMEOUT_MS ?? 90000);
-  const retryTimeoutMs = Number(process.env.HERMES_RETRY_TIMEOUT_MS ?? 120000);
-  let hermesResponse: Response | null = null;
-  let lastError: unknown = null;
-  const dispatcherInit = await hermesFetchInit();
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(
-        () => controller.abort(),
-        attempt === 1 ? firstAttemptTimeoutMs : retryTimeoutMs,
-      );
-      // Combine our connect/headers timeout with the caller's signal so a
-      // client disconnect aborts the upstream request immediately.
-      const signals: AbortSignal[] = [controller.signal];
-      if (clientSignal) signals.push(clientSignal);
-      const combinedSignal =
-        signals.length === 1 ? signals[0] : (AbortSignal as unknown as { any: (list: AbortSignal[]) => AbortSignal }).any(signals);
-      hermesResponse = await fetch(hermesUrl, {
-        method: "POST",
-        headers: hermesHeaders,
-        body: hermesBody,
-        signal: combinedSignal,
-        ...dispatcherInit,
-      });
-      clearTimeout(timeout);
-      break;
-    } catch (err) {
-      lastError = err;
-      const message = err instanceof Error ? err.message : String(err);
-      const isAbort = message.includes("aborted") || message.includes("AbortError");
-      console.warn(
-        `[chat] Hermes fetch attempt ${attempt}/3 failed${isAbort ? " (timeout)" : ""}:`,
-        message.slice(0, 200),
-      );
-      if (attempt < 3) {
-        await new Promise((r) => setTimeout(r, attempt * 1000));
-      }
-    }
-  }
-  if (!hermesResponse) {
-    const detail = lastError instanceof Error ? lastError.message : "network error";
-    const isTimeout = detail.includes("aborted") || detail.includes("AbortError") || detail.includes("timeout");
-    const message = isTimeout
-      ? `Hermes tardó demasiado en responder (>${Math.round(retryTimeoutMs / 1000)}s tras 3 intentos). El runtime puede estar frío o saturado; intenta de nuevo en unos segundos.`
-      : `Hermes runtime is unreachable (${detail}). Check HERMES_API_BASE_URL or try again in a moment.`;
-    return Response.json({ error: message }, { status: 502 });
+  let hermesResponse: Response;
+  try {
+    hermesResponse = await requestHermesUpstream({
+      baseUrl,
+      apiKey,
+      requestBody,
+      workspaceId: agent?.workspace_id,
+      agentId: agent?.id,
+      clientSignal,
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "Hermes runtime is unreachable.";
+    return Response.json({ error: detail }, { status: 503 });
   }
   if (!hermesResponse.ok || !hermesResponse.body) {
     const errorText = await hermesResponse.text();
-    return Response.json({ error: errorText || "Unable to reach hErmes runtime." }, { status: 502 });
+    return Response.json({ error: errorText || "Unable to reach Hermes runtime." }, { status: 503 });
   }
 
   const contentType = hermesResponse.headers.get("content-type") ?? "";
   if (contentType.includes("text/event-stream")) {
+    const logUsageSnapshot = async (usage: UsageSnapshot) => {
+      if (!agent?.workspace_id) return;
+      const fallbackModel = typeof requestBody.model === "string" ? requestBody.model : undefined;
+      await logAgentUsage({
+        workspaceId: agent.workspace_id,
+        agentId: agent.id,
+        userId: conversationContext?.createdBy ?? null,
+        model: usage.model ?? fallbackModel ?? null,
+        usage: {
+          prompt_tokens: usage.promptTokens,
+          completion_tokens: usage.completionTokens,
+          total_tokens: usage.totalTokens,
+        },
+        eventType: "chat_response",
+        metadata: {
+          source: "chat_route",
+          conversationId: conversationId ?? null,
+          hermesConversationId: hermesConversationId ?? null,
+        },
+      });
+    };
     return new Response(
       streamFromSseUpstream(
         hermesResponse,
@@ -2838,19 +4485,49 @@ async function proxyToHermes({
         },
         toolContext ?? undefined,
         clientSignal,
+        {
+          allowedToolNames,
+          forcedTargetAgentId: isOperatorDetailMode ? targetedAgentIdForTurn : null,
+          requireJobsUpdate: isTriggerConfigIntent,
+          blockCrmWritesForTriggerIntent: isTriggerConfigIntent,
+        },
+        logUsageSnapshot,
       ),
       { headers: sseHeaders },
     );
   }
 
-  return streamFromJsonUpstream(hermesResponse, async (assistantContent) => {
-    await persistConversationMessage(conversationContext ?? null, "assistant", assistantContent);
-  });
+  return streamFromJsonUpstream(
+    hermesResponse,
+    async (assistantContent) => {
+      await persistConversationMessage(conversationContext ?? null, "assistant", assistantContent);
+    },
+    async (usage) => {
+      if (!agent?.workspace_id) return;
+      const fallbackModel = typeof requestBody.model === "string" ? requestBody.model : undefined;
+      await logAgentUsage({
+        workspaceId: agent.workspace_id,
+        agentId: agent.id,
+        userId: conversationContext?.createdBy ?? null,
+        model: usage.model ?? fallbackModel ?? null,
+        usage: {
+          prompt_tokens: usage.promptTokens,
+          completion_tokens: usage.completionTokens,
+          total_tokens: usage.totalTokens,
+        },
+        eventType: "chat_response",
+        metadata: {
+          source: "chat_route",
+          conversationId: conversationId ?? null,
+        },
+      });
+    },
+  );
 }
 
 async function callHermes(
   payload: ChatRequest & { message: string },
-  toolContext?: { workspaceSlug: string; origin: string; cookieHeader?: string } | null,
+  toolContext?: { workspaceSlug: string; origin: string; cookieHeader?: string; agentId?: string | null } | null,
   clientSignal?: AbortSignal,
 ) {
   const agent = await resolveAgentRuntime(payload);
@@ -2911,7 +4588,17 @@ async function callHermes(
 
   const baseUrl = agent?.api_endpoint ?? process.env.HERMES_API_BASE_URL;
   const apiKey = agent?.api_key ?? process.env.HERMES_API_KEY;
-  const model = agent ? undefined : process.env.HERMES_MODEL ?? undefined;
+  const modelFromOverrides =
+    agent?.model_overrides &&
+    typeof agent.model_overrides === "object" &&
+    !Array.isArray(agent.model_overrides)
+      ? (typeof agent.model_overrides.defaultModel === "string"
+          ? agent.model_overrides.defaultModel
+          : typeof agent.model_overrides.model === "string"
+            ? agent.model_overrides.model
+            : undefined)
+      : undefined;
+  const model = agent ? modelFromOverrides : process.env.HERMES_MODEL ?? undefined;
   const currentUser = await getCurrentAppUser();
   const conversationContext =
     agent && currentUser
@@ -2920,15 +4607,33 @@ async function callHermes(
           agentId: agent.id,
           runtimeConversationId:
             payload.conversation_id ?? payload.conversationId ?? `${agent.workspace_id}:${agent.id}`,
+          runtimeSessionId:
+            payload.conversation_id ?? payload.conversationId ?? `${agent.workspace_id}:${agent.id}`,
           createdBy: currentUser.id,
+          source:
+            typeof (payload.conversation_source ?? payload.conversationSource) === "string"
+              ? String(payload.conversation_source ?? payload.conversationSource)
+              : "workspace_chat",
         }
       : null;
 
   if (!baseUrl || !apiKey) {
     return Response.json(
-      { error: "HERMES_API_BASE_URL or HERMES_API_KEY is missing for hErmes mode." },
-      { status: 500 },
+      { error: "Hermes runtime is required for chat. Configure HERMES_API_BASE_URL and HERMES_API_KEY." },
+      { status: 503 },
     );
+  }
+
+  if (agent) {
+    try {
+      await ensureWorkspaceHermesHome({
+        workspaceId: agent.workspace_id,
+        workspaceSlug: workspaceContext?.workspaceSlug,
+        agentId: agent.id,
+      });
+    } catch (error) {
+      console.error("ensureWorkspaceHermesHome failed", error);
+    }
   }
 
   return proxyToHermes({
@@ -2997,47 +4702,6 @@ async function authorizeWorkspaceRequest(payload: ChatRequest) {
   return null;
 }
 
-async function callOpenRouter(payload: ChatRequest & { message: string }) {
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  const model = process.env.OPENROUTER_MODEL ?? "[REDACTED]";
-
-  if (!apiKey) {
-    return Response.json({ error: "OPENROUTER_API_KEY is missing for OpenRouter mode." }, { status: 500 });
-  }
-
-  const upstream = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model,
-      stream: true,
-      messages: [
-        { role: "system", content: defaultSystemPrompt },
-        ...(payload.history ?? []).slice(-10).map((item) => ({
-          role: item.role === "assistant" ? "assistant" : "user",
-          content: item.content,
-        })),
-        { role: "user", content: payload.message.trim() },
-      ],
-    }),
-  });
-
-  if (!upstream.ok || !upstream.body) {
-    const errorText = await upstream.text();
-    return Response.json(
-      {
-        error: errorText || "Unable to reach OpenRouter",
-      },
-      { status: 502 },
-    );
-  }
-
-  return new Response(streamFromSseUpstream(upstream), { headers: sseHeaders });
-}
-
 export async function POST(request: Request) {
   const payload = (await request.json()) as ChatRequest;
   const message = payload.message?.trim();
@@ -3056,6 +4720,104 @@ export async function POST(request: Request) {
   }
 
   const workspaceIdentifier = payload.workspace_id ?? payload.workspaceId ?? null;
+  const confirmedProposalResponse = await tryHandleConfirmedProposal(
+    message,
+    workspaceIdentifier,
+    {
+      origin: new URL(request.url).origin,
+      cookieHeader: request.headers.get("cookie") ?? undefined,
+      agentId:
+        typeof (payload.agent_id ?? payload.agentId) === "string"
+          ? String(payload.agent_id ?? payload.agentId)
+          : null,
+    },
+  );
+  if (confirmedProposalResponse) {
+    return confirmedProposalResponse;
+  }
+
+  const preferredObjectId =
+    payload.app_context?.dataset_object_id ??
+    payload.appContext?.dataset_object_id ??
+    null;
+  const attachmentRefsForImport = normalizeAttachmentRefs(
+    payload.attachment_refs,
+    payload.attachmentRefs,
+  ).recordIds;
+  const requestToolContext = {
+    origin: new URL(request.url).origin,
+    cookieHeader: request.headers.get("cookie") ?? undefined,
+    agentId:
+      typeof (payload.agent_id ?? payload.agentId) === "string"
+        ? String(payload.agent_id ?? payload.agentId)
+        : null,
+  };
+  const earlyInventoryImportResponse = await tryHandleInventoryImportIntent(
+    message,
+    attachmentRefsForImport,
+    workspaceIdentifier,
+    typeof preferredObjectId === "string" ? preferredObjectId : null,
+    requestToolContext,
+  );
+  if (earlyInventoryImportResponse) {
+    return earlyInventoryImportResponse;
+  }
+  const earlyInventoryUpdateResponse = await tryHandleInventoryUpdateIntent(
+    message,
+    workspaceIdentifier,
+    typeof preferredObjectId === "string" ? preferredObjectId : null,
+    requestToolContext,
+  );
+  if (earlyInventoryUpdateResponse) {
+    return earlyInventoryUpdateResponse;
+  }
+  const earlyInventoryNamedUpdateResponse = await tryHandleInventoryNamedUpdateIntent(
+    message,
+    workspaceIdentifier,
+    typeof preferredObjectId === "string" ? preferredObjectId : null,
+    requestToolContext,
+  );
+  if (earlyInventoryNamedUpdateResponse) {
+    return earlyInventoryNamedUpdateResponse;
+  }
+  const earlyInventoryCreateResponse = await tryHandleInventoryCreateIntent(
+    message,
+    workspaceIdentifier,
+    typeof preferredObjectId === "string" ? preferredObjectId : null,
+    requestToolContext,
+  );
+  if (earlyInventoryCreateResponse) {
+    return earlyInventoryCreateResponse;
+  }
+  const earlyInventoryQuestionResponse = await tryHandleInventoryQuestionIntent(
+    message,
+    workspaceIdentifier,
+    typeof preferredObjectId === "string" ? preferredObjectId : null,
+  );
+  if (earlyInventoryQuestionResponse) {
+    return earlyInventoryQuestionResponse;
+  }
+
+  if (isHermesFirstModeEnabled()) {
+    const wsForTools = await resolveWorkspaceContext(workspaceIdentifier);
+    const toolContext = wsForTools
+      ? {
+          workspaceSlug: wsForTools.workspaceSlug,
+          origin: new URL(request.url).origin,
+          cookieHeader: request.headers.get("cookie") ?? undefined,
+          agentId:
+            typeof (payload.agent_id ?? payload.agentId) === "string"
+              ? String(payload.agent_id ?? payload.agentId)
+              : null,
+        }
+      : null;
+    return callHermes(
+      { ...payload, message, classified_intent: null },
+      toolContext,
+      request.signal,
+    );
+  }
+
   const toolIntent = payload.toolIntent ?? payload.tool_intent ?? null;
   const intentKind = toolIntent?.kind ?? null;
   const intentDocumentRecordId =
@@ -3110,10 +4872,6 @@ export async function POST(request: Request) {
   // and there is a spreadsheet attachment, run a dry-run import and emit a
   // structured `import_proposal` SSE so the chat UI can confirm the mapping.
   const importMatch = /\b(importa|importar|import)\b/i.test(message);
-  const attachmentRefsForImport = normalizeAttachmentRefs(
-    payload.attachment_refs,
-    payload.attachmentRefs,
-  ).recordIds;
   if (importMatch && attachmentRefsForImport.length > 0 && workspaceIdentifier) {
     const wsForImport = await resolveWorkspaceContext(workspaceIdentifier);
     if (wsForImport) {
@@ -3153,7 +4911,224 @@ export async function POST(request: Request) {
     }
   }
 
+  const appContext = payload.app_context ?? payload.appContext ?? null;
+  const targetedAgentIdForTurn =
+    appContext && typeof appContext.targeted_agent_id === "string" && appContext.targeted_agent_id
+      ? appContext.targeted_agent_id
+      : null;
+  const operatorMode =
+    appContext && typeof appContext.operator_mode === "string" && appContext.operator_mode
+      ? appContext.operator_mode
+      : null;
+  const panelScope =
+    appContext && typeof appContext.panel_scope === "string" && appContext.panel_scope
+      ? appContext.panel_scope
+      : null;
+  const isOperatorDetailMode =
+    operatorMode === "agent_detail" ||
+    panelScope === "operator_agent" ||
+    Boolean(targetedAgentIdForTurn);
+  const directSoulInstruction = extractDirectSoulUpdateInstruction(message);
+  const directSkillsInstruction = extractDirectSkillsUpdateInstruction(message);
+  const directTriggersInstruction = extractDirectTriggersUpdateInstruction(message);
+  const directKnowledgeInstruction = extractDirectKnowledgeUpdateInstruction(message);
+  const directConnectionsInstruction = extractDirectConnectionsUpdateInstruction(message);
+  const directStatusInstruction = extractDirectStatusUpdateInstruction(message);
+  const directSyncLeadsInstruction = extractDirectSyncLeadsInstruction(message);
+  if (
+    isOperatorDetailMode &&
+    targetedAgentIdForTurn &&
+    workspaceIdentifier
+  ) {
+    const wsForDirectSoul = await resolveWorkspaceContext(workspaceIdentifier);
+    if (wsForDirectSoul) {
+      try {
+        const mod = await import("@/lib/agentTools/executor");
+        const directToolCtx = {
+          workspaceSlug: wsForDirectSoul.workspaceSlug,
+          origin: new URL(request.url).origin,
+          cookieHeader: request.headers.get("cookie") ?? undefined,
+          agentId:
+            typeof (payload.agent_id ?? payload.agentId) === "string"
+              ? String(payload.agent_id ?? payload.agentId)
+              : null,
+        };
+        if (directKnowledgeInstruction) {
+          const patchResult = await mod.fetchInternalJson<{ agent?: unknown; error?: string }>(
+            directToolCtx,
+            `/api/workspaces/${encodeURIComponent(wsForDirectSoul.workspaceSlug)}/agents/${encodeURIComponent(targetedAgentIdForTurn)}`,
+            {
+              method: "PATCH",
+              body: JSON.stringify({ knowledgeScope: directKnowledgeInstruction }),
+            },
+          );
+          if (patchResult.ok) {
+            return streamDirectAgentToolResult({
+              toolName: "agents.update_knowledge",
+              result: { ok: true, data: patchResult.data ?? {} },
+              successMessage: "Knowledge actualizada.",
+            });
+          }
+          return streamActionResponse(
+            `[Workspace action] No pude actualizar knowledge: ${patchResult.error ?? "error desconocido"}.`,
+          );
+        }
+
+        if (directConnectionsInstruction) {
+          const toolResult = await mod.runTool({
+            name: "agents.update_connections",
+            args: {
+              agent_id: targetedAgentIdForTurn,
+              channel_config: directConnectionsInstruction,
+            },
+            ctx: directToolCtx,
+          });
+          if (toolResult.ok) {
+            return streamDirectAgentToolResult({
+              toolName: "agents.update_connections",
+              result: toolResult,
+              successMessage: "Connections actualizadas.",
+            });
+          }
+          return streamActionResponse(
+            `[Workspace action] No pude actualizar connections: ${toolResult.error ?? "error desconocido"}.`,
+          );
+        }
+
+        if (directStatusInstruction) {
+          const toolResult = await mod.runTool({
+            name: "agents.set_status",
+            args: {
+              agent_id: targetedAgentIdForTurn,
+              status: directStatusInstruction,
+            },
+            ctx: directToolCtx,
+          });
+          if (toolResult.ok) {
+            return streamDirectAgentToolResult({
+              toolName: "agents.set_status",
+              result: toolResult,
+              successMessage:
+                directStatusInstruction === "active" ? "Agente activado." : "Agente pausado.",
+            });
+          }
+          return streamActionResponse(
+            `[Workspace action] No pude cambiar activation: ${toolResult.error ?? "error desconocido"}.`,
+          );
+        }
+
+        if (directTriggersInstruction) {
+          const toolResult = await mod.runTool({
+            name: "agents.update_jobs",
+            args: {
+              agent_id: targetedAgentIdForTurn,
+              cron_jobs: directTriggersInstruction,
+            },
+            ctx: directToolCtx,
+          });
+          if (toolResult.ok) {
+            return streamDirectAgentToolResult({
+              toolName: "agents.update_jobs",
+              result: toolResult,
+              successMessage: `Triggers actualizados (${directTriggersInstruction.length}).`,
+            });
+          }
+          return streamActionResponse(
+            `[Workspace action] No pude actualizar triggers: ${toolResult.error ?? "error desconocido"}.`,
+          );
+        }
+
+        if (directSkillsInstruction) {
+          const toolResult = await mod.runTool({
+            name: "agents.update_skills",
+            args: {
+              agent_id: targetedAgentIdForTurn,
+              skills: directSkillsInstruction,
+              mcp_tools_include: directSkillsInstruction,
+            },
+            ctx: directToolCtx,
+          });
+          if (toolResult.ok) {
+            return streamDirectAgentToolResult({
+              toolName: "agents.update_skills",
+              result: toolResult,
+              successMessage: `Skills actualizadas (${directSkillsInstruction.length}).`,
+            });
+          }
+          return streamActionResponse(
+            `[Workspace action] No pude actualizar skills: ${toolResult.error ?? "error desconocido"}.`,
+          );
+        }
+
+        if (directSyncLeadsInstruction) {
+          const slug = directSyncLeadsInstruction.slug.replace(/_/g, "-");
+          const toolResult = await mod.runTool({
+            name: "integrations.sync_leads",
+            args: {
+              slug,
+              ...(typeof directSyncLeadsInstruction.limit === "number"
+                ? { limit: directSyncLeadsInstruction.limit }
+                : {}),
+            },
+            ctx: directToolCtx,
+          });
+          if (toolResult.ok) {
+            const data =
+              toolResult.data && typeof toolResult.data === "object"
+                ? (toolResult.data as Record<string, unknown>)
+                : {};
+            const fetched =
+              typeof data.fetched === "number" && Number.isFinite(data.fetched) ? data.fetched : 0;
+            const upserted =
+              typeof data.upserted === "number" && Number.isFinite(data.upserted) ? data.upserted : 0;
+            const failed = typeof data.failed === "number" && Number.isFinite(data.failed) ? data.failed : 0;
+            return streamDirectAgentToolResult({
+              toolName: "integrations.sync_leads",
+              result: toolResult,
+              successMessage: `Sync de leads completado. fetched=${fetched}, upserted=${upserted}, failed=${failed}.`,
+            });
+          }
+          return streamActionResponse(
+            `[Workspace action] No pude sincronizar leads: ${toolResult.error ?? "error desconocido"}.`,
+          );
+        }
+
+        if (!directSoulInstruction) {
+          // No direct operator shortcut matched; continue with normal Hermes flow.
+          // (kept inside this block to reuse already-resolved workspace context)
+        } else {
+        const toolResult = await mod.runTool({
+          name: "agents.update_soul",
+          args: {
+            agent_id: targetedAgentIdForTurn,
+            soul_md: directSoulInstruction,
+          },
+          ctx: directToolCtx,
+        });
+        if (toolResult.ok) {
+          const preview =
+            directSoulInstruction.length > 280
+              ? `${directSoulInstruction.slice(0, 277)}...`
+              : directSoulInstruction;
+          return streamDirectAgentToolResult({
+            toolName: "agents.update_soul",
+            result: toolResult,
+            successMessage: `SOUL actualizado.\n\n${preview}`,
+          });
+        }
+        return streamActionResponse(
+          `[Workspace action] No pude actualizar SOUL: ${toolResult.error ?? "error desconocido"}.`,
+        );
+        }
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : "error desconocido";
+        return streamActionResponse(`[Workspace action] No pude actualizar SOUL: ${detail}.`);
+      }
+    }
+  }
+
   const explicitToolIntent = payload.tool_intent ?? payload.toolIntent ?? null;
+  const classifiedIntent = await classifyOperatorIntent(message);
   const imageIntentResponse = await tryHandleImageIntent(
     message,
     workspaceIdentifier,
@@ -3172,17 +5147,19 @@ export async function POST(request: Request) {
     payload.app_context?.current_object ??
     payload.appContext?.current_object ??
     null;
-  const recordIntentResponse = await tryHandleRecordCreateIntent(
-    message,
-    workspaceIdentifier,
-    typeof preferredObjectName === "string" ? preferredObjectName : null,
-    {
-      origin: new URL(request.url).origin,
-      cookieHeader: request.headers.get("cookie") ?? undefined,
-    },
-  );
-  if (recordIntentResponse) {
-    return recordIntentResponse;
+  if (classifiedIntent?.intent === "records_create") {
+    const recordIntentResponse = await tryHandleRecordCreateIntent(
+      message,
+      workspaceIdentifier,
+      typeof preferredObjectName === "string" ? preferredObjectName : null,
+      {
+        origin: new URL(request.url).origin,
+        cookieHeader: request.headers.get("cookie") ?? undefined,
+      },
+    );
+    if (recordIntentResponse) {
+      return recordIntentResponse;
+    }
   }
 
   const isWorkspaceScoped = Boolean(payload.workspace_id ?? payload.workspaceId ?? payload.agent_id ?? payload.agentId);
@@ -3193,15 +5170,22 @@ export async function POST(request: Request) {
           workspaceSlug: wsForTools.workspaceSlug,
           origin: new URL(request.url).origin,
           cookieHeader: request.headers.get("cookie") ?? undefined,
+          agentId:
+            typeof (payload.agent_id ?? payload.agentId) === "string"
+              ? String(payload.agent_id ?? payload.agentId)
+              : null,
         }
       : null;
-    return callHermes({ ...payload, message }, toolContext, request.signal);
+    return callHermes(
+      { ...payload, message, classified_intent: classifiedIntent?.intent ?? null },
+      toolContext,
+      request.signal,
+    );
   }
 
-  const provider = resolveProvider();
-  if (provider === "hermes") {
-    return callHermes({ ...payload, message }, null, request.signal);
-  }
-
-  return callOpenRouter({ ...payload, message });
+  return callHermes(
+    { ...payload, message, classified_intent: classifiedIntent?.intent ?? null },
+    null,
+    request.signal,
+  );
 }

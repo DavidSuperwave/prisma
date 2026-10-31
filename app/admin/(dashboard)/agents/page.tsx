@@ -1,7 +1,14 @@
 import Link from 'next/link'
+import { unstable_noStore as noStore } from 'next/cache'
 import { listAgents, listWorkspaces } from '@/lib/platformStore'
 
+export const runtime = 'nodejs'
+export const dynamic = 'force-dynamic'
+export const revalidate = 0
+
 export default async function AdminAgentsPage() {
+  noStore()
+
   const [agents, workspaces] = await Promise.all([listAgents(), listWorkspaces()])
 
   return (
@@ -25,9 +32,14 @@ export default async function AdminAgentsPage() {
                   <p style={{ margin: 0, color: 'var(--giga-muted)' }}>{agent.isActive ? 'active' : 'paused'}</p>
                   <p style={{ margin: 0, color: 'var(--giga-muted)' }}>{workspace?.name ?? agent.workspaceId}</p>
                   {workspace?.slug ? (
-                    <Link href={`/admin/agents/${workspace.slug}/${agent.id}`} style={linkStyle}>
-                      Advanced
-                    </Link>
+                    <div style={actionsStyle}>
+                      <Link href={`/admin/agents/${workspace.slug}/${agent.id}`} style={linkStyle}>
+                        Advanced
+                      </Link>
+                      <Link href={`/admin/workspaces/${workspace.slug}/hermes-lab`} style={linkStyle}>
+                        Hermes lab
+                      </Link>
+                    </div>
                   ) : (
                     <span style={{ color: 'var(--giga-muted)' }}>No workspace slug</span>
                   )}
@@ -74,4 +86,11 @@ const linkStyle: React.CSSProperties = {
   padding: '6px 10px',
   color: 'var(--giga-text)',
   fontSize: 13,
+}
+
+const actionsStyle: React.CSSProperties = {
+  display: 'flex',
+  gap: 6,
+  flexWrap: 'wrap',
+  justifyContent: 'flex-end',
 }

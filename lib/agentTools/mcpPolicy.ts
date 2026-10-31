@@ -12,10 +12,62 @@ type ResolveToolPolicyInput = ResolvePresetInput & {
   knowledgeScope?: Record<string, unknown> | null;
 };
 
+export const DEFAULT_OPERATOR_TOOLSET_NAMESPACES = [
+  "general",
+  "objects",
+  "schema",
+  "records",
+  "crm",
+  "documents",
+  "spreadsheet",
+  "images",
+  "integrations",
+  "connections",
+  "recipes",
+  "automations",
+  "bindings",
+  "cms",
+  "peer",
+  "skills",
+] as const;
+
 const PRESET_NAMESPACES: Record<Exclude<PrismaMcpRolePreset, "custom">, string[]> = {
-  intake: ["objects", "schema", "records", "crm", "documents", "images", "integrations"],
-  ops: ["objects", "schema", "records", "crm", "documents", "images", "integrations", "recipes", "automations", "bindings", "cms", "skills"],
-  sales: ["objects", "schema", "records", "crm", "documents", "images", "integrations", "recipes", "automations"],
+  intake: ["general", "objects", "schema", "records", "crm", "documents", "spreadsheet", "images", "integrations"],
+  ops: [
+    "general",
+    "objects",
+    "schema",
+    "records",
+    "crm",
+    "documents",
+    "spreadsheet",
+    "images",
+    "integrations",
+    "connections",
+    "recipes",
+    "automations",
+    "bindings",
+    "cms",
+    "peer",
+    "skills",
+  ],
+  sales: [
+    "general",
+    "objects",
+    "schema",
+    "records",
+    "crm",
+    "documents",
+    "spreadsheet",
+    "images",
+    "integrations",
+    "connections",
+    "recipes",
+    "automations",
+    "cms",
+    "peer",
+    "skills",
+  ],
 };
 
 function normalizeStringArray(value: unknown): string[] {
@@ -41,6 +93,29 @@ export function listRegisteredToolNames(): string[] {
   return listTools()
     .map((tool) => tool.name)
     .sort((a, b) => a.localeCompare(b));
+}
+
+export function listDefaultOperatorToolNames(): string[] {
+  const namespaces = new Set<string>(DEFAULT_OPERATOR_TOOLSET_NAMESPACES);
+  return listRegisteredToolNames().filter((toolName) => namespaces.has(namespaceOf(toolName)));
+}
+
+export function isDefaultOperatorToolName(toolName: string): boolean {
+  return new Set<string>(DEFAULT_OPERATOR_TOOLSET_NAMESPACES).has(namespaceOf(toolName));
+}
+
+export function applyToolPolicyToNames(
+  toolNames: string[],
+  policy: { include: string[]; exclude: string[] },
+): string[] {
+  const includeSet = new Set(policy.include);
+  const excludeSet = new Set(policy.exclude);
+  return toolNames.filter((toolName) => {
+    if (includeSet.size > 0 && !includeSet.has(toolName)) {
+      return false;
+    }
+    return !excludeSet.has(toolName);
+  });
 }
 
 export function resolveAgentRolePreset(input: ResolvePresetInput): PrismaMcpRolePreset {

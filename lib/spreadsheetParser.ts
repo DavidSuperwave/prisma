@@ -185,23 +185,22 @@ export function smartExtractSheet(sheet: XLSX.WorkSheet): {
 }
 
 export function parseCsvForPreview(raw: string) {
-  const lines = raw
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-  if (lines.length < 1) {
+  if (raw.trim().length === 0) {
     return { headers: [] as string[], rows: [] as Array<Record<string, unknown>>, rowCount: 0 };
   }
-  const rawHeaders = lines[0].split(",").map((entry) => entry.trim());
-  const dataLines = lines.slice(1);
-  const rawRows = dataLines.map((line) => {
-    const cells = line.split(",");
-    return rawHeaders.reduce<Record<string, unknown>>((accumulator, header, index) => {
-      accumulator[header] = cells[index]?.trim() ?? "";
-      return accumulator;
-    }, {});
-  });
-  const { headers, rows } = dropEmptyColumns(rawHeaders, rawRows);
+
+  const workbook = XLSX.read(raw, { type: "string", raw: false });
+  const firstName = workbook.SheetNames[0];
+  if (!firstName) {
+    return { headers: [] as string[], rows: [] as Array<Record<string, unknown>>, rowCount: 0 };
+  }
+
+  const sheet = workbook.Sheets[firstName];
+  if (!sheet) {
+    return { headers: [] as string[], rows: [] as Array<Record<string, unknown>>, rowCount: 0 };
+  }
+
+  const { headers, rows } = smartExtractSheet(sheet);
   return { headers, rows, rowCount: rows.length };
 }
 

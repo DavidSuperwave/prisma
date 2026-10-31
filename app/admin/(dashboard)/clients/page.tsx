@@ -1,8 +1,16 @@
+import Link from 'next/link'
+import { unstable_noStore as noStore } from 'next/cache'
 import ClientWorkflowActions from '@/components/admin/ClientWorkflowActions'
 import { listIntakeSubmissions } from '@/lib/intakeStore'
 import { listProjects, listSites, listWorkspaces } from '@/lib/platformStore'
 
+export const runtime = 'nodejs'
+export const dynamic = 'force-dynamic'
+export const revalidate = 0
+
 export default async function AdminClientsPage() {
+  noStore()
+
   const [workspaces, projects, sites, intakes] = await Promise.all([
     listWorkspaces(),
     listProjects(),
@@ -49,6 +57,21 @@ export default async function AdminClientsPage() {
                       siteStatus={targetSite?.publishStatus}
                     />
                   </div>
+                  <div style={{ marginTop: 8 }}>
+                    <Link href={`/admin/workspaces/${workspace.slug}`} style={labLinkStyle}>
+                      View details
+                    </Link>
+                  </div>
+                  <div style={{ marginTop: 8 }}>
+                    <Link href={`/workspaces/${workspace.slug}`} style={labLinkStyle}>
+                      Open workspace app
+                    </Link>
+                  </div>
+                  <div style={{ marginTop: 8 }}>
+                    <Link href={`/admin/workspaces/${workspace.slug}/hermes-lab`} style={labLinkStyle}>
+                      Open Hermes lab
+                    </Link>
+                  </div>
                 </li>
               )
             })}
@@ -80,4 +103,14 @@ const rowStyle: React.CSSProperties = {
   borderRadius: 10,
   padding: 12,
   display: 'block',
+}
+
+const labLinkStyle: React.CSSProperties = {
+  textDecoration: 'none',
+  color: 'var(--giga-text)',
+  border: '1px solid var(--giga-border)',
+  borderRadius: 8,
+  padding: '6px 10px',
+  fontSize: 13,
+  display: 'inline-block',
 }

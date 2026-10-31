@@ -34,12 +34,9 @@ const ALGORITHM = "HS256";
 const DEFAULT_TTL_SECONDS = 15 * 60;
 
 function getSigningSecret(): string {
-  const configured =
-    process.env.PRISMA_MCP_JWT_SECRET?.trim() ||
-    process.env.HERMES_API_KEY?.trim() ||
-    "";
+  const configured = process.env.PRISMA_MCP_JWT_SECRET?.trim() || "";
   if (!configured) {
-    throw new Error("PRISMA_MCP_JWT_SECRET (or HERMES_API_KEY fallback) is required for MCP JWT sessions.");
+    throw new Error("PRISMA_MCP_JWT_SECRET is required for MCP JWT sessions.");
   }
   return configured;
 }

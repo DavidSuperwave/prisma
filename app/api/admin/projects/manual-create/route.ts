@@ -5,10 +5,10 @@ import {
   createWorkspace,
   listSites,
   listTemplates,
-  listWorkspaces,
   seedPlaceholderAgents,
   trackUsageEvent,
 } from '@/lib/platformStore'
+import { ensureWorkspaceHermesHome } from '@/lib/hermesHome'
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -16,22 +16,9 @@ export const dynamic = "force-dynamic";
 import { ensureAdminApiAccess } from '@/lib/auth'
 
 type ManualCreateRequest = {
-  workspaceId?: string
-  workspaceName?: string
-  workspaceSlug?: string
-  projectName?: string
-  industry?: string
-  primaryColor?: string
-  templateId?: string
-  siteName?: string
-  subdomain?: string
-  serviceDescription?: string
-  createAgent?: boolean
-  agentName?: string
-  agentRole?: 'intake_assistant' | 'lead_qualifier' | 'crm_updater' | 'follow_up' | 'ops_assistant' | 'custom'
-  agentModel?: string
-  dropletHost?: string
-  imageRef?: string
+  companyName?: string
+  agentCount?: number
+  soulMd?: string
 }
 
 function slugify(value: string) {
@@ -46,6 +33,25 @@ function sanitizeContainerName(input: string) {
   return input.toLowerCase().replace(/[^a-z0-9-]/g, '-')
 }
 
+function buildUniqueSubdomain(companyName: string, existingSubdomains: Set<string>) {
+  const base = slugify(companyName)
+  if (!base) {
+    return ''
+  }
+  if (!existingSubdomains.has(base)) {
+    return base
+  }
+  let suffix = 2
+  while (suffix < 1000) {
+    const candidate = `${base}-${suffix}`
+    if (!existingSubdomains.has(candidate)) {
+      return candidate
+    }
+    suffix += 1
+  }
+  return `${base}-${Date.now().toString(36)}`
+}
+
 export async function POST(request: Request) {
   const authorizationFailure = await ensureAdminApiAccess()
   if (authorizationFailure) {
@@ -53,59 +59,47 @@ export async function POST(request: Request) {
   }
   try {
     const body = (await request.json()) as ManualCreateRequest
-    if (!body.projectName?.trim()) {
-      return Response.json({ error: 'projectName is required' }, { status: 400 })
+    const companyName = body.companyName?.trim()
+    if (!companyName) {
+      return Response.json({ error: 'companyName is required' }, { status: 400 })
     }
-    if (!body.templateId) {
-      return Response.json({ error: 'templateId is required' }, { status: 400 })
-    }
-    if (!body.siteName?.trim()) {
-      return Response.json({ error: 'siteName is required' }, { status: 400 })
-    }
-    if (!body.subdomain?.trim()) {
-      return Response.json({ error: 'subdomain is required' }, { status: 400 })
-    }
-
-    const workspaces = await listWorkspaces()
-    let workspace = body.workspaceId ? workspaces.find((entry) => entry.id === body.workspaceId) : undefined
-
-    if (!workspace) {
-      if (!body.workspaceName?.trim()) {
-        return Response.json({ error: 'workspaceName is required when workspaceId is not provided' }, { status: 400 })
-      }
-      workspace = await createWorkspace({
-        name: body.workspaceName,
-        slug: body.workspaceSlug,
-        metadata: {
-          source: 'manual_admin_create',
-        },
-      })
+    const requestedAgentCount = Number.isFinite(body.agentCount) ? Math.max(1, Math.floor(Number(body.agentCount))) : 3
+    if (requestedAgentCount > 12) {
+      return Response.json({ error: 'agentCount must be 12 or fewer' }, { status: 400 })
     }
 
     const templates = await listTemplates()
-    const template = templates.find((entry) => entry.id === body.templateId)
+    const template = templates.find((entry) => entry.isActive) ?? templates[0]
     if (!template) {
-      return Response.json({ error: 'template not found' }, { status: 404 })
+      return Response.json({ error: 'No active landing template is available.' }, { status: 404 })
     }
-
-    const normalizedSubdomain = slugify(body.subdomain)
-    if (!normalizedSubdomain) {
-      return Response.json({ error: 'subdomain is invalid' }, { status: 400 })
-    }
-
     const existingSites = await listSites()
-    if (existingSites.some((site) => site.subdomain === normalizedSubdomain)) {
-      return Response.json({ error: 'subdomain is already in use' }, { status: 409 })
+    const normalizedSubdomain = buildUniqueSubdomain(companyName, new Set(existingSites.map((site) => site.subdomain)))
+    if (!normalizedSubdomain) {
+      return Response.json({ error: 'Unable to generate a subdomain from companyName.' }, { status: 400 })
     }
 
-    const project = await createProject({
-      workspaceId: workspace.id,
-      name: body.projectName,
-      status: 'onboarding',
-      industry: body.industry,
-      primaryColor: body.primaryColor,
+    const sharedSoulMd = body.soulMd?.trim() ?? ''
+    const projectName = `${companyName} Launch`
+    const siteName = `${companyName} Site`
+
+    const workspace = await createWorkspace({
+      name: companyName,
+      slug: normalizedSubdomain,
       metadata: {
         source: 'manual_admin_create',
+        company_name: companyName,
+        agent_limit: requestedAgentCount,
+        requested_agent_count: requestedAgentCount,
+      },
+    })
+    const project = await createProject({
+      workspaceId: workspace.id,
+      name: projectName,
+      status: 'onboarding',
+      metadata: {
+        source: 'manual_admin_create',
+        company_name: companyName,
       },
     })
 
@@ -113,53 +107,57 @@ export async function POST(request: Request) {
       workspaceId: workspace.id,
       projectId: project.id,
       templateId: template.id,
-      name: body.siteName,
+      name: siteName,
       subdomain: normalizedSubdomain,
       publishStatus: 'reviewing',
       content: {
-        companyName: workspace.name,
-        serviceDescription: body.serviceDescription ?? '',
+        companyName,
+        serviceDescription: '',
       },
-      themeConfig: {
-        primaryColor: body.primaryColor ?? '#4f46e5',
-      },
+      themeConfig: {},
       seoConfig: {
-        title: `${workspace.name} | Prisma`,
+        title: `${companyName} | Prisma`,
       },
     })
 
-    let agents: Awaited<ReturnType<typeof seedPlaceholderAgents>> = []
-    let agent: Awaited<ReturnType<typeof seedPlaceholderAgents>>[number] | null = null
-    let deployment: Awaited<ReturnType<typeof createDeployment>> | null = null
-
-    if (body.createAgent !== false) {
-      agents = await seedPlaceholderAgents(workspace.id, 3)
-      agent = agents[0] ?? null
-
-      if (agent) {
-        deployment = await createDeployment({
+    const agents = await seedPlaceholderAgents(workspace.id, requestedAgentCount, {
+      companyName,
+      sharedSoulMd,
+    })
+    const deployments: Awaited<ReturnType<typeof createDeployment>>[] = []
+    for (const agent of agents) {
+      const deployment = await createDeployment({
           workspaceId: workspace.id,
           agentDefinitionId: agent.id,
-          dropletHost: body.dropletHost ?? process.env.HERMES_DROPLET_HOST ?? 'shared-droplet',
+          dropletHost: process.env.HERMES_DROPLET_HOST ?? 'shared-droplet',
           containerName: sanitizeContainerName(`hermes-${workspace.slug}-${agent.role}`),
-          imageRef: body.imageRef ?? process.env.HERMES_IMAGE_REF ?? 'prisma/hermes:stable',
+          imageRef: process.env.HERMES_IMAGE_REF ?? 'prisma/hermes:stable',
           envSecretRef: `secret://${workspace.slug}/hermes`,
           status: 'pending',
-        })
-      }
+      })
+      deployments.push(deployment)
+    }
+    try {
+      await ensureWorkspaceHermesHome({
+        workspaceId: workspace.id,
+        workspaceSlug: workspace.slug,
+        agentId: agents[0]?.id ?? null,
+      })
+    } catch (error) {
+      console.error('manual-create ensureWorkspaceHermesHome failed', error)
     }
 
     await trackUsageEvent({
       workspaceId: workspace.id,
       projectId: project.id,
       source: 'admin',
-      eventName: 'project.manual_created',
+      eventName: 'workspace.manual_created',
       eventMetadata: {
         templateId: template.id,
         siteId: site.id,
-        agentId: agent?.id ?? null,
         agentIds: agents.map((entry) => entry.id),
-        deploymentId: deployment?.id ?? null,
+        deploymentIds: deployments.map((entry) => entry.id),
+        requestedAgentCount,
       },
     })
 
@@ -169,8 +167,14 @@ export async function POST(request: Request) {
         project,
         site,
         agents,
-        agent,
-        deployment,
+        deployments,
+        runtime: {
+          workspaceAppPath: `/workspaces/${workspace.slug}`,
+          adminPath: `/admin/workspaces/${workspace.slug}`,
+          status: deployments.length > 0 ? 'pending_runtime_sync' : 'database_only',
+          message:
+            'Workspace, project, site, and agent rows are provisioned. Hermes runtime health may still be pending until deployment sync completes.',
+        },
       },
       { status: 201 },
     )

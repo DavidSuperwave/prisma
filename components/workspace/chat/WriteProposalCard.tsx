@@ -27,6 +27,7 @@ type Props = {
   toolName: string;
   proposal: WriteProposalPayload;
   confirmToken: string;
+  originalArgs?: Record<string, unknown> | null;
   expiresAt?: string | null;
   state?: "pending" | "confirmed" | "cancelled";
   onConfirm: (message: string) => void;
@@ -165,7 +166,16 @@ function renderDiff(entries: WriteProposalDiffEntry[] | undefined) {
   );
 }
 
-export function WriteProposalCard({ toolName, proposal, confirmToken, expiresAt, state = "pending", onConfirm, onCancel }: Props) {
+export function WriteProposalCard({
+  toolName,
+  proposal,
+  confirmToken,
+  originalArgs,
+  expiresAt,
+  state = "pending",
+  onConfirm,
+  onCancel,
+}: Props) {
   const [busy, setBusy] = useState(false);
   const isPending = state === "pending";
   const isConfirmed = state === "confirmed";
@@ -179,7 +189,11 @@ export function WriteProposalCard({ toolName, proposal, confirmToken, expiresAt,
   const handleConfirm = () => {
     if (busy || !isPending) return;
     setBusy(true);
-    const message = `Confirmo la acción propuesta.\n\n<<CONFIRM_PROPOSAL toolName=${toolName} token=${confirmToken}>>`;
+    const commitArgs = originalArgs ? { ...originalArgs, dryRun: false, confirmToken } : null;
+    const argsMarker = commitArgs
+      ? ` args=${encodeURIComponent(JSON.stringify(commitArgs))}`
+      : "";
+    const message = `Confirmo la acción propuesta.\n\n<<CONFIRM_PROPOSAL toolName=${toolName} token=${confirmToken}${argsMarker}>>`;
     onConfirm(message);
   };
 
@@ -222,3 +236,4 @@ export function WriteProposalCard({ toolName, proposal, confirmToken, expiresAt,
     </div>
   );
 }
+

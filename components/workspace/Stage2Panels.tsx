@@ -183,9 +183,43 @@ function parseSelectOptions(field: PrismaWorkspaceField) {
 function normalizeColumnKey(value: string) {
   return value
     .trim()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
     .replace(/[^a-z0-9_]+/g, "_")
     .replace(/^_+|_+$/g, "");
+}
+
+const FIELD_COLUMN_SYNONYMS: Record<string, string[]> = {
+  make: ["marca", "brand", "manufacturer"],
+  model: ["modelo", "model", "tipo_de_vehiculo", "vehicle_type", "tipo_vehiculo"],
+  trim: ["version", "version_trim", "submodelo", "edition", "package"],
+  year: ["ano_modelo", "anio_modelo", "modelo_ano", "model_year", "year"],
+  exterior_color: ["color", "color_exterior", "exterior", "paint"],
+  interior_color: ["color_interior", "interior"],
+  price: ["precio", "price", "precio_lista", "list_price"],
+  mileage: ["kilometraje", "mileage", "km"],
+  stock_number: ["stock", "stock_number", "numero_stock", "unidad"],
+  vin: ["vin", "serie", "numero_serie"],
+  status: ["status", "estado", "estatus"],
+  quantity: ["uds_existencia", "unidades", "existencia", "cantidad"],
+};
+
+function findFieldForSourceColumn(sourceKey: string, selectedFields: PrismaWorkspaceField[]) {
+  const normalized = normalizeColumnKey(sourceKey);
+  const exact = selectedFields.find(
+    (field) => field.key === normalized || normalizeColumnKey(field.name) === normalized,
+  );
+  if (exact) return exact;
+
+  for (const field of selectedFields) {
+    const candidates = FIELD_COLUMN_SYNONYMS[field.key] ?? [];
+    if (candidates.some((candidate) => normalized === candidate || normalized.endsWith(`_${candidate}`))) {
+      return field;
+    }
+  }
+
+  return null;
 }
 
 function humanizeActivityAction(action: string) {
@@ -206,25 +240,6 @@ function toStringValue(value: unknown) {
   if (typeof value === "string") return value.trim();
   if (typeof value === "number" || typeof value === "boolean") return String(value);
   return JSON.stringify(value);
-}
-
-function parseCsv(raw: string) {
-  const lines = raw
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-  if (lines.length < 2) {
-    return { headers: [], rows: [] as Array<Record<string, unknown>> };
-  }
-  const headers = lines[0].split(",").map((entry) => entry.trim());
-  const rows = lines.slice(1).map((line) => {
-    const cells = line.split(",");
-    return headers.reduce<Record<string, unknown>>((accumulator, header, index) => {
-      accumulator[header] = cells[index]?.trim() ?? "";
-      return accumulator;
-    }, {});
-  });
-  return { headers, rows };
 }
 
 export function ImportPanel({ workspaceSlug, objects, fields }: ImportPanelProps) {
@@ -301,25 +316,26 @@ export function ImportPanel({ workspaceSlug, objects, fields }: ImportPanelProps
 
       if (extension === "csv") {
         const text = new TextDecoder("utf-8").decode(fileBuffer);
-        const parsed = parseCsv(text);
+        const { parseCsvForPreview } = await import("@/lib/spreadsheetParser");
+        const parsed = parseCsvForPreview(text);
         headers = parsed.headers;
         rows = parsed.rows;
       } else if (extension === "xlsx" || extension === "xls") {
         // Load the (~400KB) xlsx module only when the user actually picks a
         // spreadsheet, keeping the panels chunk small on first render.
-        const XLSX = await import("xlsx");
+        const [{ smartExtractSheet }, XLSX] = await Promise.all([
+          import("@/lib/spreadsheetParser"),
+          import("xlsx"),
+        ]);
         const workbook = XLSX.read(fileBuffer, { type: "array" });
         const firstSheetName = workbook.SheetNames[0];
         const firstSheet = firstSheetName ? workbook.Sheets[firstSheetName] : undefined;
         if (!firstSheet) {
           throw new Error("No se encontró una hoja válida en el archivo.");
         }
-        const jsonRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(firstSheet, {
-          defval: "",
-          raw: false,
-        });
-        rows = jsonRows;
-        headers = jsonRows.length > 0 ? Object.keys(jsonRows[0]) : [];
+        const parsed = smartExtractSheet(firstSheet);
+        rows = parsed.rows;
+        headers = parsed.headers;
       } else {
         throw new Error("Solo se permiten archivos CSV o XLSX.");
       }
@@ -329,10 +345,7 @@ export function ImportPanel({ workspaceSlug, objects, fields }: ImportPanelProps
       }
 
       const nextColumns = headers.map((sourceKey) => {
-        const normalized = normalizeColumnKey(sourceKey);
-        const matchedField = selectedFields.find(
-          (field) => field.key === normalized || normalizeColumnKey(field.name) === normalized,
-        );
+        const matchedField = findFieldForSourceColumn(sourceKey, selectedFields);
         return {
           sourceKey,
           fieldKey: matchedField?.key ?? "skip",

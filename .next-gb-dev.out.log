@@ -1,0 +1,22 @@
+
+> gb-automotriz@1.0.0 dev
+> next dev --port 3100
+
+▲ Next.js 16.2.2 (Turbopack)
+- Local:         http://localhost:3100
+- Network:       http://192.168.100.39:3100
+- Environments: .env.local
+✓ Ready in 878ms
+
+ GET /seminuevos 200 in 1894ms (next.js: 408ms, application-code: 1487ms)
+ GET /seminuevos 200 in 1046ms (next.js: 11ms, application-code: 1035ms)
+ GET /seminuevos 200 in 946ms (next.js: 6ms, application-code: 940ms)
+ GET /seminuevos 200 in 874ms (next.js: 4ms, application-code: 869ms)
+ GET /seminuevos 200 in 867ms (next.js: 13ms, application-code: 854ms)
+ GET / 200 in 802ms (next.js: 102ms, application-code: 701ms)
+ GET /cars/dd05736b-3d6b-47f2-8054-2339d2537d5d 200 in 2.3s (next.js: 1545ms, application-code: 766ms)
+ GET /seminuevos 200 in 679ms (next.js: 7ms, application-code: 672ms)
+ GET /seminuevos 200 in 740ms (next.js: 14ms, application-code: 727ms)
+ GET /seminuevos 200 in 961ms (next.js: 15ms, application-code: 947ms)
+ GET /seminuevos 200 in 891ms (next.js: 82ms, application-code: 809ms)
+ GET /seminuevos 200 in 1147ms (next.js: 24ms, application-code: 1123ms)

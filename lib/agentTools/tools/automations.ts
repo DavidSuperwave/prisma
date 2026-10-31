@@ -17,6 +17,9 @@ import { registerTool, type ToolContext } from "../registry";
 import { processRun } from "@/lib/workflows/engine";
 
 const KNOWN_TRIGGER_TYPES = new Set([
+  "record.created",
+  "record.updated",
+  "record.deleted",
   "cron",
   "lead.created",
   "lead.updated",
@@ -65,7 +68,7 @@ function isValidCronExpression(expr: string): boolean {
 registerTool({
   name: "automations.create",
   description:
-    "Create a scheduled or event-driven automation (materialized as a workspace_workflows row). For recurring checks use trigger.type='cron' with a schedule like '*/30 * * * *'. Steps may include { type: 'run_recipe', integrationSlug, recipeSlug, vars }, plus existing engine steps (send_email, send_whatsapp, update_record, create_task, wait, branch, enroll_in_sequence).",
+    "Create a scheduled or event-driven automation (materialized as a workspace_workflows row). For recurring checks use trigger.type='cron' with a schedule like '*/30 * * * *'. Steps may include { type: 'run_recipe', integrationSlug, recipeSlug, vars }, { type: 'create_extraction_review_item', fieldId, reason, proposedValue, currentValue, confidence }, { type: 'run_workflow', workflowId|workflowName, waitForCompletion }, plus existing engine steps (send_email, send_whatsapp, update_record, create_task, wait, branch, enroll_in_sequence).",
   args: {
     name: { type: "string", required: true },
     description: { type: "string" },
@@ -302,6 +305,123 @@ registerTool({
         runId,
         status: result?.status ?? "unknown",
         error: result?.error ?? null,
+      },
+    };
+  },
+});
+
+registerTool({
+  name: "automation_schedule",
+  description:
+    "Schedule an agent automation using cron syntax. Persists a workspace_workflows row and, when configured, provisions a Hermes cron job through the shim.",
+  args: {
+    prompt: { type: "string", required: true },
+    cron: { type: "string", required: true },
+    target_agent_id: { type: "string" },
+    targetAgentId: { type: "string" },
+    attached_skills: { type: "array" },
+    attachedSkills: { type: "array" },
+    deliver_to: { type: "string" },
+    deliverTo: { type: "string" },
+  },
+  handler: async (args, ctx) => {
+    const workspaceId = await resolveWorkspaceId(ctx);
+    if (!workspaceId) return { ok: false, error: "Workspace not found.", status: 404 };
+
+    const prompt = String(args.prompt ?? "").trim();
+    const cron = String(args.cron ?? "").trim();
+    if (!prompt) return { ok: false, error: "prompt is required.", status: 400 };
+    if (!cron || !isValidCronExpression(cron)) {
+      return { ok: false, error: "cron must be a valid 5-field expression.", status: 400 };
+    }
+    const targetAgentId = String(args.target_agent_id ?? args.targetAgentId ?? "").trim();
+    if (!targetAgentId) {
+      return { ok: false, error: "target_agent_id is required.", status: 400 };
+    }
+    const attachedSkillsRaw = Array.isArray(args.attached_skills)
+      ? args.attached_skills
+      : Array.isArray(args.attachedSkills)
+        ? args.attachedSkills
+        : [];
+    const attachedSkills = attachedSkillsRaw.map((entry) => String(entry)).filter((entry) => entry.length > 0);
+    const deliverTo = String(args.deliver_to ?? args.deliverTo ?? "").trim() || null;
+
+    const mod = await import("@/lib/supabaseAdmin");
+    const supabase = mod.getSupabaseAdmin();
+    if (!supabase) return { ok: false, error: "Supabase admin unavailable.", status: 500 };
+
+    const { data: workflow, error: workflowError } = await supabase
+      .from("workspace_workflows")
+      .insert({
+        workspace_id: workspaceId,
+        name: `Automation · ${prompt.slice(0, 72)}`,
+        description: `Scheduled by automation_schedule for agent ${targetAgentId}.`,
+        enabled: true,
+        trigger: {
+          type: "cron",
+          schedule: cron,
+        },
+        steps: [
+          {
+            type: "agent_prompt",
+            target_agent_id: targetAgentId,
+            prompt,
+            attached_skills: attachedSkills,
+            deliver_to: deliverTo,
+          },
+        ],
+      })
+      .select("id, name, trigger, enabled")
+      .single();
+    if (workflowError) return { ok: false, error: workflowError.message, status: 400 };
+
+    let shim: Record<string, unknown> | null = null;
+    const shimUrl = process.env.PRISMA_HERMES_SHIM_URL?.trim();
+    const shimCronEnabled = process.env.PRISMA_ENABLE_SHIM_CRON === "true";
+    if (shimUrl && shimCronEnabled) {
+      try {
+        const response = await fetch(`${shimUrl.replace(/\/$/, "")}/cronjob/create`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            ...(process.env.PRISMA_HERMES_SHIM_SHARED_SECRET
+              ? { "x-prisma-shim-secret": process.env.PRISMA_HERMES_SHIM_SHARED_SECRET }
+              : {}),
+          },
+          body: JSON.stringify({
+            workspaceId,
+            targetAgentId,
+            prompt,
+            cron,
+            attachedSkills,
+            deliverTo,
+          }),
+        });
+        shim = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+      } catch (error) {
+        shim = {
+          ok: false,
+          error: error instanceof Error ? error.message : "Shim cron creation failed.",
+        };
+      }
+    } else if (shimUrl && !shimCronEnabled) {
+      shim = {
+        ok: false,
+        error:
+          "Shim cron dispatch is disabled (PRISMA_ENABLE_SHIM_CRON!=true). Workflow schedule is persisted in Prisma only.",
+      };
+    }
+
+    return {
+      ok: true,
+      data: {
+        workflowId: String((workflow as { id: string }).id),
+        name: String((workflow as { name: string }).name),
+        cron,
+        targetAgentId,
+        attachedSkills,
+        deliverTo,
+        shim,
       },
     };
   },

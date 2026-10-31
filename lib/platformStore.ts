@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { evaluateAgentReadiness, mergeReadinessIntoKnowledgeScope } from '@/lib/agentReadiness'
+import { listDefaultOperatorToolNames } from '@/lib/agentTools/mcpPolicy'
 import { getSupabaseAdmin } from '@/lib/supabaseAdmin'
 import type { IntakeSubmission } from '@/lib/intakeStore'
 
@@ -307,16 +308,37 @@ const defaultTemplates: LandingTemplate[] = [
 const defaultAgentTemplates: AgentTemplate[] = [
   withDate<AgentTemplate>({
     id: 'agt_tmpl_whatsapp_qualifier',
-    name: 'WhatsApp Qualifier',
-    description: 'Califica leads entrantes y actualiza el workspace.',
+    name: 'Prisma AI SDR',
+    description: 'Califica leads de WhatsApp para la oferta de sitio web gratis y enruta a Calendly o Stripe.',
     type: 'channel',
     category: 'lead_qualification',
-    defaultSoulMd: 'Eres un agente especializado en calificar leads entrantes por WhatsApp.',
-    defaultSkills: ['prisma-records', 'prisma-qualify'],
+    defaultSoulMd: [
+      '# Prisma AI SDR',
+      '',
+      'Eres el SDR de Prisma AI por WhatsApp. Respondes corto, haces una pregunta a la vez y calificas negocios para la oferta de sitio web profesional gratis.',
+      '',
+      'Tu flujo base: pregunta a que se dedica la empresa, pregunta cuantas personas trabajan ahi y, si falta evidencia, pregunta cuanto tiempo llevan operando y si tienen oficinas fisicas.',
+      '',
+      'Calificado: mas de 5 empleados, oficinas/sucursales o varios anos operando. En ese caso comparte https://calendly.com/jaime-ailegalgrowth/30min.',
+      '',
+      'No calificado: ofrece el sitio gratis con mantenimiento mensual y comparte https://buy.stripe.com/9B68wOgOw4g8fPk1617EQ0m.',
+      '',
+      'Siempre registra estado, evidencia y siguiente accion en CRM/tareas usando herramientas Prisma.',
+    ].join('\n'),
+    defaultSkills: [
+      'prisma-sdr-whatsapp',
+      'prisma-crm',
+      'prisma-records',
+      'prisma-qualify',
+      'prisma-tasks',
+      'prisma-reply-approve',
+    ],
     defaultKnowledgeScope: {
-      read: ['Contacts', 'Deals'],
-      write: ['Contacts', 'Deals'],
+      read: ['People', 'Contacts', 'Leads', 'Deals', 'Tasks'],
+      write: ['People', 'Contacts', 'Leads', 'Deals', 'Tasks'],
       channels: ['whatsapp'],
+      surfaces: ['CRM', 'Inbox', 'Tareas', 'Operadores'],
+      sdr_playbook: 'prisma-ai-free-website-v1',
     },
     defaultCronJobs: [],
     defaultChannelConfig: { provider: 'whatsapp' },
@@ -341,6 +363,66 @@ const defaultAgentTemplates: AgentTemplate[] = [
     defaultChannelConfig: {},
     defaultMemoryConfig: { recent: true, preferences: false, intelligence: true },
     icon: 'bot',
+    isActive: true,
+  }),
+  withDate<AgentTemplate>({
+    id: 'agt_tmpl_inbox_triage',
+    name: 'Inbox Triage',
+    description: 'Clasifica inbox, resume conversaciones y enruta a humanos o agentes especializados.',
+    type: 'copilot',
+    category: 'inbox_ops',
+    defaultSoulMd: 'Eres un operador de inbox. Priorizas mensajes, detectas intención y decides el siguiente paso sin perder contexto.',
+    defaultSkills: ['prisma-records', 'prisma-inbox'],
+    defaultKnowledgeScope: {
+      read: ['Contacts', 'Deals', 'Tasks'],
+      write: ['Tasks', 'Deals'],
+      channels: ['whatsapp', 'email'],
+      surfaces: ['Inbox', 'CRM', 'Chat'],
+    },
+    defaultCronJobs: [],
+    defaultChannelConfig: { inbox_mode: 'triage' },
+    defaultMemoryConfig: { recent: true, preferences: true, intelligence: true },
+    icon: 'inbox',
+    isActive: true,
+  }),
+  withDate<AgentTemplate>({
+    id: 'agt_tmpl_sales_closer',
+    name: 'Sales Closer',
+    description: 'Da seguimiento comercial, mantiene el pipeline limpio y empuja cierres.',
+    type: 'channel',
+    category: 'follow_up',
+    defaultSoulMd: 'Eres un closer comercial. Avanzas oportunidades, propones siguientes pasos concretos y registras todo en el CRM.',
+    defaultSkills: ['prisma-records', 'prisma-qualify', 'prisma-sequences'],
+    defaultKnowledgeScope: {
+      read: ['Contacts', 'Companies', 'Deals'],
+      write: ['Deals', 'Tasks'],
+      channels: ['whatsapp', 'email'],
+      surfaces: ['CRM', 'Inbox', 'Chat'],
+    },
+    defaultCronJobs: [],
+    defaultChannelConfig: { sales_mode: 'closer' },
+    defaultMemoryConfig: { recent: true, preferences: true, intelligence: true },
+    icon: 'target',
+    isActive: true,
+  }),
+  withDate<AgentTemplate>({
+    id: 'agt_tmpl_ops_scheduler',
+    name: 'Ops Scheduler',
+    description: 'Revisa automaciones, detecta fallas y ejecuta chequeos recurrentes del workspace.',
+    type: 'worker',
+    category: 'ops_assistant',
+    defaultSoulMd: 'Eres un agente de operaciones. Revisas integraciones, cron jobs y alertas para mantener el workspace estable.',
+    defaultSkills: ['prisma-records', 'prisma-ops'],
+    defaultKnowledgeScope: {
+      read: ['Tasks', 'Deals'],
+      write: ['Tasks'],
+      channels: [],
+      surfaces: ['Tareas', 'CRM'],
+    },
+    defaultCronJobs: [{ cron: '*/30 * * * *', prompt: 'Revisa integraciones y workflow runs con error.' }],
+    defaultChannelConfig: {},
+    defaultMemoryConfig: { recent: true, preferences: false, intelligence: true },
+    icon: 'shield',
     isActive: true,
   }),
 ]
@@ -581,7 +663,10 @@ function runtimeStatusFromDeployment(status: AgentDeploymentStatus) {
   if (status === 'building') return 'deploying'
   if (status === 'stopped') return 'paused'
   if (status === 'failed' || status === 'degraded') return 'error'
-  return 'deploying'
+  // Pending / unknown deployment records should not strand the workspace
+  // agent in a "deploying" state because there is no real container deploy
+  // happening today; treat them as paused so the UI stays actionable.
+  return 'paused'
 }
 
 function hostFromEndpoint(endpoint: string) {
@@ -594,7 +679,7 @@ function hostFromEndpoint(endpoint: string) {
 
 function resolveHermesImageRef(value: unknown) {
   if (typeof value !== 'string' || value.trim().length === 0) {
-    return 'prisma/hermes:stable'
+    return process.env.HERMES_IMAGE_REF ?? 'prisma/hermes:stable'
   }
   const normalized = value.trim()
   if (normalized.includes('/') || normalized.includes(':')) {
@@ -608,6 +693,26 @@ function fromWorkspaceAgentRow(row: Record<string, unknown>): AgentDefinition {
   const runtimeType = (row.type as AgentRuntimeType) ?? 'worker'
   const legacyRole = knowledgeScope.legacy_role
   const resolvedRole = isLegacyAgentRole(legacyRole) ? legacyRole : runtimeTypeToRole(runtimeType)
+  const mcpToolsInclude = Array.isArray(row.mcp_tools_include)
+    ? (row.mcp_tools_include as string[])
+    : Array.isArray(knowledgeScope.mcp_tools_include)
+      ? (knowledgeScope.mcp_tools_include as string[])
+      : []
+  const skillsScope = Array.isArray(row.skills_scope)
+    ? (row.skills_scope as string[])
+    : Array.isArray(knowledgeScope.skills_scope)
+      ? (knowledgeScope.skills_scope as string[])
+      : []
+  const modelOverrides =
+    row.model_overrides &&
+    typeof row.model_overrides === 'object' &&
+    !Array.isArray(row.model_overrides)
+      ? (row.model_overrides as Record<string, unknown>)
+      : knowledgeScope.model_overrides &&
+          typeof knowledgeScope.model_overrides === 'object' &&
+          !Array.isArray(knowledgeScope.model_overrides)
+        ? (knowledgeScope.model_overrides as Record<string, unknown>)
+        : {}
 
   return {
     id: String(row.id),
@@ -621,6 +726,8 @@ function fromWorkspaceAgentRow(row: Record<string, unknown>): AgentDefinition {
     },
     toolsConfig: {
       skills: (row.skills as string[]) ?? [],
+      mcpToolsInclude,
+      skillsScope,
     },
     integrationConfig: {
       runtime: 'hermes',
@@ -633,6 +740,7 @@ function fromWorkspaceAgentRow(row: Record<string, unknown>): AgentDefinition {
       readinessIssues: Array.isArray(knowledgeScope.readiness_issues)
         ? (knowledgeScope.readiness_issues as unknown[]).map((entry) => String(entry))
         : [],
+      modelOverrides,
     },
     isActive: String(row.status ?? 'active') === 'active',
     createdAt: String(row.created_at ?? nowIso()),
@@ -655,6 +763,26 @@ function toWorkspaceAgentRow(agent: AgentDefinition) {
           !Array.isArray(agent.toolsConfig.knowledgeScope)
         ? (agent.toolsConfig.knowledgeScope as Record<string, unknown>)
         : {}) ?? {}
+  const configuredMcpToolsInclude = Array.isArray(agent.toolsConfig.mcpToolsInclude)
+    ? (agent.toolsConfig.mcpToolsInclude as string[])
+    : Array.isArray((configuredKnowledgeScope.mcp_tools_include as unknown[] | undefined))
+      ? (configuredKnowledgeScope.mcp_tools_include as string[])
+      : listDefaultOperatorToolNames()
+  const configuredSkillsScope = Array.isArray(agent.toolsConfig.skillsScope)
+    ? (agent.toolsConfig.skillsScope as string[])
+    : Array.isArray((configuredKnowledgeScope.skills_scope as unknown[] | undefined))
+      ? (configuredKnowledgeScope.skills_scope as string[])
+      : []
+  const configuredModelOverrides =
+    agent.integrationConfig.modelOverrides &&
+    typeof agent.integrationConfig.modelOverrides === 'object' &&
+    !Array.isArray(agent.integrationConfig.modelOverrides)
+      ? (agent.integrationConfig.modelOverrides as Record<string, unknown>)
+      : configuredKnowledgeScope.model_overrides &&
+          typeof configuredKnowledgeScope.model_overrides === 'object' &&
+          !Array.isArray(configuredKnowledgeScope.model_overrides)
+        ? (configuredKnowledgeScope.model_overrides as Record<string, unknown>)
+        : {}
   const endpoint =
     (typeof agent.integrationConfig.endpoint === 'string' && agent.integrationConfig.endpoint) ||
     ''
@@ -663,7 +791,8 @@ function toWorkspaceAgentRow(agent: AgentDefinition) {
     ''
   const version =
     (typeof agent.integrationConfig.hermesVersion === 'string' && agent.integrationConfig.hermesVersion) ||
-    'v2026.4.1'
+    process.env.HERMES_AGENT_VERSION ||
+    'v2026.4.30'
   const configuredCronJobs = Array.isArray(agent.integrationConfig.cronJobs)
     ? (agent.integrationConfig.cronJobs as unknown[])
     : []
@@ -687,6 +816,9 @@ function toWorkspaceAgentRow(agent: AgentDefinition) {
       ...configuredKnowledgeScope,
       legacy_role: agent.role,
       model: agent.model,
+      mcp_tools_include: configuredMcpToolsInclude,
+      skills_scope: configuredSkillsScope,
+      model_overrides: configuredModelOverrides,
     },
     readiness,
   )
@@ -707,6 +839,9 @@ function toWorkspaceAgentRow(agent: AgentDefinition) {
     status: agent.isActive && readiness.isReady ? 'active' : 'paused',
     soul_md: typeof agent.promptPack.soulMd === 'string' ? agent.promptPack.soulMd : null,
     skills: configuredSkills,
+    mcp_tools_include: configuredMcpToolsInclude,
+    skills_scope: configuredSkillsScope,
+    model_overrides: configuredModelOverrides,
     knowledge_scope: mergedKnowledgeScope,
     cron_jobs: configuredCronJobs,
     channel_config: configuredChannelConfig,
@@ -841,12 +976,21 @@ export async function createWorkspace(input: CreateWorkspaceInput) {
 
   const supabase = getSupabaseAdmin()
   if (supabase) {
+    const requestedAgentLimit =
+      typeof record.metadata.agent_limit === 'number'
+        ? record.metadata.agent_limit
+        : typeof record.metadata.agentLimit === 'number'
+          ? record.metadata.agentLimit
+          : null
     const { data, error } = await supabase
       .from('workspaces')
       .insert({
         name: record.name,
         subdomain: record.slug,
         metadata: record.metadata,
+        ...(typeof requestedAgentLimit === 'number' && Number.isFinite(requestedAgentLimit) && requestedAgentLimit > 0
+          ? { agent_limit: Math.floor(requestedAgentLimit) }
+          : {}),
         inbound_token:
           typeof crypto !== "undefined" && "randomUUID" in crypto
             ? crypto.randomUUID().replace(/-/g, "")
@@ -1287,7 +1431,11 @@ export async function createAgentDefinition(input: CreateAgentInput) {
     projectId: input.projectId,
     name: input.name.trim(),
     role: input.role,
-    model: input.model ?? process.env.OPENROUTER_MODEL ?? 'openai/gpt-4o-mini',
+    model:
+      input.model ??
+      process.env.HERMES_MODEL ??
+      process.env.HERMES_DEFAULT_MODEL ??
+      'hermes-agent',
     promptPack: input.promptPack ?? {},
     toolsConfig: input.toolsConfig ?? {},
     integrationConfig: input.integrationConfig ?? {},
@@ -1399,6 +1547,41 @@ const placeholderAgentBlueprints: Array<{
   },
 ]
 
+type SeedPlaceholderAgentsOptions = {
+  companyName?: string
+  sharedSoulMd?: string
+}
+
+function buildDefaultSharedSoulMd(companyName?: string) {
+  const scopedCompany = companyName?.trim() || 'this company'
+  return [
+    '# SOUL.md',
+    '',
+    '## Identity',
+    '- You are a Hermes operator for a Prisma workspace.',
+    `- Keep company context anchored to ${scopedCompany}.`,
+    '- Answer in Spanish unless the user explicitly requests another language.',
+    '',
+    '## Priorities',
+    '- Stay scoped to this workspace only.',
+    '- Use tools and records to move work forward instead of asking the operator to do manual coordination.',
+    '- Keep responses concise, actionable, and operationally useful.',
+    '',
+    '## Guardrails',
+    '- Do not invent customer or CRM data.',
+    '- If critical context is missing, ask a focused clarifying question.',
+    '- Treat SOUL.md as persona and operating style, not as temporary task memory.',
+  ].join('\n')
+}
+
+function buildSeedObjective(baseObjective: string, companyName?: string) {
+  const normalizedCompany = companyName?.trim()
+  if (!normalizedCompany) {
+    return baseObjective
+  }
+  return `${baseObjective} Company context: support ${normalizedCompany} inside this workspace.`
+}
+
 function buildUniqueAgentName(base: string, existingNames: Set<string>) {
   if (!existingNames.has(base.toLowerCase())) {
     existingNames.add(base.toLowerCase())
@@ -1420,7 +1603,7 @@ function buildUniqueAgentName(base: string, existingNames: Set<string>) {
   return fallback
 }
 
-export async function seedPlaceholderAgents(workspaceId: string, count = 3) {
+export async function seedPlaceholderAgents(workspaceId: string, count = 3, options: SeedPlaceholderAgentsOptions = {}) {
   const targetCount = Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0
   if (targetCount <= 0) {
     return []
@@ -1443,6 +1626,20 @@ export async function seedPlaceholderAgents(workspaceId: string, count = 3) {
   ]
 
   const result = [...seeded]
+  const sharedSoulMd =
+    typeof options.sharedSoulMd === 'string' && options.sharedSoulMd.trim().length > 0
+      ? options.sharedSoulMd.trim()
+      : buildDefaultSharedSoulMd(options.companyName)
+
+  // Seed placeholder agents pointed at the shared Hermes runtime so they come
+  // up as `active` immediately. Without these, agents land as `paused` with an
+  // empty endpoint and get clobbered by createDeployment to a stuck
+  // `deploying` state. The endpoint must include the port; otherwise chat
+  // calls fail and the UI sits on "Desplegando" forever.
+  const sharedRuntimeEndpoint =
+    typeof process.env.HERMES_API_BASE_URL === 'string' ? process.env.HERMES_API_BASE_URL.trim() : ''
+  const sharedRuntimeApiKey =
+    typeof process.env.HERMES_API_KEY === 'string' ? process.env.HERMES_API_KEY.trim() : ''
 
   for (let slotIndex = seeded.length; slotIndex < targetCount; slotIndex += 1) {
     const blueprint = placeholderAgentBlueprints[slotIndex % placeholderAgentBlueprints.length]
@@ -1453,8 +1650,8 @@ export async function seedPlaceholderAgents(workspaceId: string, count = 3) {
     usedRoles.add(role)
 
     const name = buildUniqueAgentName(blueprint.name, usedNames)
-    const objective = blueprint.objective
-    const soulMd = blueprint.soulMd
+    const objective = buildSeedObjective(blueprint.objective, options.companyName)
+    const soulMd = sharedSoulMd
 
     try {
       const created = await createAgentDefinition({
@@ -1476,10 +1673,13 @@ export async function seedPlaceholderAgents(workspaceId: string, count = 3) {
         integrationConfig: {
           runtime: 'hermes',
           source: 'workspace_seed',
+          ...(sharedRuntimeEndpoint ? { endpoint: sharedRuntimeEndpoint } : {}),
+          ...(sharedRuntimeApiKey ? { apiKey: sharedRuntimeApiKey } : {}),
           knowledgeScope: {
             read: [],
             write: [],
             channels: [],
+            ...(options.companyName?.trim() ? { companyName: options.companyName.trim() } : {}),
           },
           cronJobs: [],
         },
@@ -1626,15 +1826,43 @@ export async function createDeployment(input: CreateDeploymentInput) {
 
   const supabase = getSupabaseAdmin()
   if (supabase) {
-    const endpointHost = input.dropletHost.startsWith('http') ? input.dropletHost : `http://${input.dropletHost}`
-    const endpoint = endpointHost.replace(/\/$/, '')
+    // Read the current row first so we don't clobber a working api_endpoint
+    // (e.g. the shared Hermes runtime URL with port) with the bare droplet
+    // host label, and so we don't downgrade an already-active agent to
+    // paused when only registering a deployment record.
+    const existing = await supabase
+      .from('workspace_agents')
+      .select('id, api_endpoint, status')
+      .eq('id', input.agentDefinitionId)
+      .eq('workspace_id', input.workspaceId)
+      .maybeSingle()
+
+    const dropletEndpoint = input.dropletHost.startsWith('http')
+      ? input.dropletHost.replace(/\/$/, '')
+      : `http://${input.dropletHost}`.replace(/\/$/, '')
+    const existingEndpoint =
+      existing.data && typeof (existing.data as { api_endpoint?: unknown }).api_endpoint === 'string'
+        ? String((existing.data as { api_endpoint?: string }).api_endpoint).trim()
+        : ''
+    const nextEndpoint = existingEndpoint || dropletEndpoint
+    const existingStatus =
+      existing.data && typeof (existing.data as { status?: unknown }).status === 'string'
+        ? String((existing.data as { status?: string }).status)
+        : ''
+    const computedStatus = runtimeStatusFromDeployment(input.status ?? 'pending')
+    // Preserve a healthy/active agent when a deployment record is just being
+    // registered. Only overwrite the status if the deployment input is
+    // explicitly active/failed/etc.
+    const nextStatus =
+      existingStatus === 'active' && computedStatus === 'paused' ? existingStatus : computedStatus
+
     const runtimeUpdate = await supabase
       .from('workspace_agents')
       .update({
         container_name: input.containerName,
-        api_endpoint: endpoint,
+        api_endpoint: nextEndpoint,
         hermes_version: input.imageRef,
-        status: runtimeStatusFromDeployment(input.status ?? 'pending'),
+        status: nextStatus,
         updated_at: nowIso(),
       })
       .eq('id', input.agentDefinitionId)

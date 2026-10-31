@@ -2,6 +2,7 @@ import { getCurrentAppUser } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
 import { listWorkspaceMembershipsForUser } from "@/lib/workspaceStore";
 import { computeFieldDiff, logRecordHistory } from "@/lib/recordHistory";
+import { safeEmitEvent } from "@/lib/workflows/engine";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -151,9 +152,15 @@ export async function PATCH(request: Request, context: Context) {
       return Response.json({ error: "Record not found." }, { status: 404 });
     }
 
+    const previousData =
+      existingRecord.data && typeof existingRecord.data === "object" && !Array.isArray(existingRecord.data)
+        ? (existingRecord.data as Record<string, unknown>)
+        : {};
+    const mergedData = { ...previousData, ...body.data };
+
     const { data: updatedRecord, error } = await supabase
       .from("records")
-      .update({ data: body.data })
+      .update({ data: mergedData })
       .eq("id", recordId)
       .eq("workspace_id", authorization.membership.workspaceId)
       .is("deleted_at", null)
@@ -168,10 +175,6 @@ export async function PATCH(request: Request, context: Context) {
       return Response.json({ error: "Record not found." }, { status: 404 });
     }
 
-    const previousData =
-      existingRecord.data && typeof existingRecord.data === "object" && !Array.isArray(existingRecord.data)
-        ? (existingRecord.data as Record<string, unknown>)
-        : {};
     const nextData =
       updatedRecord.data && typeof updatedRecord.data === "object" && !Array.isArray(updatedRecord.data)
         ? (updatedRecord.data as Record<string, unknown>)
@@ -231,6 +234,33 @@ export async function PATCH(request: Request, context: Context) {
       }
     }
 
+    const { data: objectKindRow } = await supabase
+      .from("workspace_objects")
+      .select("kind")
+      .eq("id", String(existingRecord.object_id))
+      .eq("workspace_id", authorization.membership.workspaceId)
+      .maybeSingle();
+    const objectKind = (objectKindRow as { kind?: string } | null)?.kind;
+    await safeEmitEvent({
+      supabase,
+      workspaceId: authorization.membership.workspaceId,
+      type: "record.updated",
+      record: {
+        id: recordId,
+        objectId: String(existingRecord.object_id),
+        kind:
+          objectKind === "crm_people" || objectKind === "crm_companies" || objectKind === "crm_deals"
+            ? objectKind
+            : null,
+        data: nextData,
+      },
+      extra: {
+        source: "api.records.update",
+        changedFields: diff.map((entry) => entry.field),
+      },
+      actorUserId: authorization.user.id,
+    });
+
     return Response.json({ record: mapRecordRow(updatedRecord as Record<string, unknown>) });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to update record.";
@@ -281,6 +311,31 @@ export async function DELETE(_request: Request, context: Context) {
         recordId,
         actor: { userId: authorization.user.id },
         type: "record.deleted",
+      });
+      const { data: objectKindRow } = await supabase
+        .from("workspace_objects")
+        .select("kind")
+        .eq("id", String(existingRecord.object_id))
+        .eq("workspace_id", authorization.membership.workspaceId)
+        .maybeSingle();
+      const objectKind = (objectKindRow as { kind?: string } | null)?.kind;
+      await safeEmitEvent({
+        supabase,
+        workspaceId: authorization.membership.workspaceId,
+        type: "record.deleted",
+        record: {
+          id: recordId,
+          objectId: String(existingRecord.object_id),
+          kind:
+            objectKind === "crm_people" || objectKind === "crm_companies" || objectKind === "crm_deals"
+              ? objectKind
+              : null,
+          data: null,
+        },
+        extra: {
+          source: "api.records.delete",
+        },
+        actorUserId: authorization.user.id,
       });
     }
 

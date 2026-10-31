@@ -29,6 +29,7 @@ import type {
 } from "@/lib/workspaceStore";
 import { deriveQueueItems } from "@/lib/workspaceStore";
 import { consumeCompleteSseDataLines } from "@/lib/chatSseClient";
+import { stripInlineToolCallsFromText } from "@/lib/stripInlineToolCalls";
 import { parseCsvForPreview, smartExtractSheet } from "@/lib/spreadsheetParser";
 import { ImagePickerCard, type ImagePickerCandidate } from "@/components/workspace/chat/ImagePickerCard";
 import { WriteProposalCard, type WriteProposalPayload } from "@/components/workspace/chat/WriteProposalCard";
@@ -314,6 +315,7 @@ type WriteProposalBlock = {
   toolName: string;
   proposal: WriteProposalPayload;
   confirmToken: string;
+  originalArgs?: Record<string, unknown> | null;
   expiresAt?: string | null;
   state: "pending" | "confirmed" | "cancelled";
 };
@@ -2747,6 +2749,7 @@ export function ChatPanel({
             name?: string;
             toolName?: string;
             confirmToken?: string;
+            originalArgs?: unknown;
             expiresAt?: string | null;
             result?: {
               ok?: boolean;
@@ -2771,16 +2774,17 @@ export function ChatPanel({
                 ? payload.text
                 : "";
           if (payload.type === "delta" && deltaPiece) {
-            assistantContent = `${assistantContent}${deltaPiece}`;
-            const isFirstDelta = !receivedFirstDelta;
-            receivedFirstDelta = true;
+            assistantContent = stripInlineToolCallsFromText(`${assistantContent}${deltaPiece}`);
+            if (assistantContent.trim().length > 0) {
+              receivedFirstDelta = true;
+            }
             updateSession(selectedSession.id, (session) => ({
               ...session,
               messages: session.messages.map((message) =>
                 message.id === assistantId
                   ? {
                       ...message,
-                      content: isFirstDelta ? deltaPiece : `${message.content}${deltaPiece}`,
+                      content: assistantContent,
                     }
                   : message,
               ),
@@ -2848,6 +2852,7 @@ export function ChatPanel({
                 message.id === assistantId
                   ? {
                       ...message,
+                      content: receivedFirstDelta ? message.content : "",
                       blocks: [...(message.blocks ?? []), pickerBlock],
                     }
                   : message,
@@ -2870,6 +2875,10 @@ export function ChatPanel({
               toolName,
               proposal,
               confirmToken: payload.confirmToken,
+              originalArgs:
+                payload.originalArgs && typeof payload.originalArgs === "object" && !Array.isArray(payload.originalArgs)
+                  ? (payload.originalArgs as Record<string, unknown>)
+                  : null,
               expiresAt: payload.expiresAt ?? null,
               state: "pending",
             };
@@ -2877,7 +2886,11 @@ export function ChatPanel({
               ...session,
               messages: session.messages.map((message) =>
                 message.id === assistantId
-                  ? { ...message, blocks: [...(message.blocks ?? []), block] }
+                  ? {
+                      ...message,
+                      content: receivedFirstDelta ? message.content : "",
+                      blocks: [...(message.blocks ?? []), block],
+                    }
                   : message,
               ),
               updatedAt: new Date().toISOString(),
@@ -2948,6 +2961,142 @@ export function ChatPanel({
     } finally {
       setIsLoading(false);
       window.setTimeout(() => { if (typeof window !== "undefined") { router.replace(`${window.location.pathname}${window.location.search}`); router.refresh(); } }, 400);
+    }
+  }
+
+  async function confirmWriteProposal(block: WriteProposalBlock) {
+    if (!selectedSession || !selectedAgent || isLoading) {
+      return;
+    }
+    if (!block.originalArgs) {
+      setError("Esta propuesta no tiene los argumentos originales. Genera una propuesta nueva y confírmala desde la tarjeta actualizada.");
+      return;
+    }
+
+    setIsLoading(true);
+    setError(null);
+    const commitArgs = { ...block.originalArgs, dryRun: false, confirmToken: block.confirmToken };
+    const hiddenConfirmation = `Confirmo la acción propuesta.\n\n<<CONFIRM_PROPOSAL toolName=${block.toolName} token=${block.confirmToken} args=${encodeURIComponent(JSON.stringify(commitArgs))}>>`;
+    const assistantId = `assistant-confirm-${Date.now()}`;
+    const assistantMessage: ChatMessage = {
+      id: assistantId,
+      role: "assistant",
+      content: "Aplicando confirmación…",
+      timestamp: currentTimeLabel(),
+      blocks: [],
+    };
+
+    updateSession(selectedSession.id, (session) => ({
+      ...session,
+      messages: [...session.messages, assistantMessage],
+      updatedAt: new Date().toISOString(),
+    }));
+
+    try {
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId,
+          agentId: selectedAgent.id,
+          conversationId: selectedSession.runtimeConversationId,
+          appContext: {
+            current_tab: contextSummary.activeTab,
+            current_object: contextSummary.activeObjectName ?? null,
+            current_view: contextSummary.activeViewName ?? null,
+            current_record_title: contextSummary.activeRecordName ?? null,
+            queue_preview: contextSummary.queueTitles,
+          },
+          message: hiddenConfirmation,
+          attachmentRefs: [],
+        }),
+      });
+
+      if (!response.ok || !response.body) {
+        const failurePayload = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(failurePayload.error ?? "No se pudo aplicar la confirmación.");
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let assistantContent = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const { remainder, dataLines } = consumeCompleteSseDataLines(buffer);
+        buffer = remainder;
+        for (const raw of dataLines) {
+          if (raw === "[DONE]") continue;
+          let payload: { type: string; content?: string; text?: string; error?: string };
+          try {
+            payload = JSON.parse(raw) as typeof payload;
+          } catch {
+            continue;
+          }
+          const deltaPiece =
+            typeof payload.content === "string"
+              ? payload.content
+              : typeof payload.text === "string"
+                ? payload.text
+                : "";
+          if (payload.type === "delta" && deltaPiece) {
+            assistantContent = `${assistantContent}${deltaPiece}`;
+            updateSession(selectedSession.id, (session) => ({
+              ...session,
+              messages: session.messages.map((message) =>
+                message.id === assistantId ? { ...message, content: assistantContent } : message,
+              ),
+              updatedAt: new Date().toISOString(),
+            }));
+          }
+          if (payload.type === "error") {
+            throw new Error(payload.error ?? "Error al aplicar la confirmación.");
+          }
+        }
+      }
+
+      const finalContent = assistantContent.trim() || "Confirmación aplicada. El cambio quedó guardado en el workspace.";
+      updateSession(selectedSession.id, (session) => ({
+        ...session,
+        messages: session.messages.map((message) =>
+          message.id === assistantId ? { ...message, content: finalContent } : message,
+        ),
+        updatedAt: new Date().toISOString(),
+      }));
+
+      void fetch(`/api/workspaces/${workspaceSlug}/conversations/${selectedSession.id}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          role: "assistant",
+          content: finalContent,
+          metadata: {
+            origin: "workspace_chat",
+            confirmation_tool: block.toolName,
+          },
+        }),
+      });
+    } catch (caughtError) {
+      const message = caughtError instanceof Error ? caughtError.message : "No se pudo aplicar la confirmación.";
+      setError(message);
+      updateSession(selectedSession.id, (session) => ({
+        ...session,
+        messages: session.messages.map((entry) =>
+          entry.id === assistantId ? { ...entry, content: message } : entry,
+        ),
+        updatedAt: new Date().toISOString(),
+      }));
+    } finally {
+      setIsLoading(false);
+      window.setTimeout(() => {
+        if (typeof window !== "undefined") {
+          router.replace(`${window.location.pathname}${window.location.search}`);
+          router.refresh();
+        }
+      }, 400);
     }
   }
 
@@ -3562,27 +3711,21 @@ export function ChatPanel({
                               updatedAt: new Date().toISOString(),
                             }));
                           };
-                          const submitFollowUp = (text: string) => {
-                            setInput(text);
-                            requestAnimationFrame(() => {
-                              void sendMessage();
-                            });
-                          };
                           return (
                             <div key={`${message.id}-write-${blockIndex}`}>
                               <WriteProposalCard
                                 toolName={block.toolName}
                                 proposal={block.proposal}
                                 confirmToken={block.confirmToken}
+                                originalArgs={block.originalArgs ?? null}
                                 expiresAt={block.expiresAt ?? null}
                                 state={block.state}
-                                onConfirm={(text) => {
+                                onConfirm={() => {
                                   markState("confirmed");
-                                  submitFollowUp(text);
+                                  void confirmWriteProposal(block);
                                 }}
-                                onCancel={(text) => {
+                                onCancel={() => {
                                   markState("cancelled");
-                                  submitFollowUp(text);
                                 }}
                               />
                             </div>
@@ -4307,6 +4450,14 @@ export function AgentsPanel({
       content: "Crea el agente y luego usa este chat para definir su rol, responsabilidades y conexiones.",
     },
   ]);
+  const [workspaceBuilderSummary, setWorkspaceBuilderSummary] = useState<{
+    skills: {
+      builtIn: Array<{ slug: string; title: string; enabled: boolean }>;
+      local: Array<{ slug: string; title: string; promoted: boolean }>;
+    };
+    workflows: Array<{ id: string; name: string; enabled: boolean; description: string | null }>;
+    integrations: Array<{ slug: string; provider: string | null; status: string }>;
+  } | null>(null);
   const selectedAgent = localAgents.find((agent) => agent.id === selectedAgentId) ?? localAgents[0] ?? null;
   const credentialEntries = getCredentialEnvEntries(selectedAgent?.channelConfig);
   const activeAgentCount = localAgents.length;
@@ -4428,8 +4579,8 @@ export function AgentsPanel({
     return {
       role: "assistant" as const,
       content: agentName
-        ? `Estoy listo para configurar a ${agentName}. Cuéntame su rol, responsabilidades y conexiones.`
-        : "Crea el agente y luego usa este chat para definir su rol, responsabilidades y conexiones.",
+        ? `Estoy listo para configurar a ${agentName}. Cuéntame su persona (esto se guarda en su SOUL.md), las skills que necesita y qué APIs debería conectar. Ej.: “Eres Jaime, un sales rep directo y breve”.`
+        : "Crea el agente y luego usa este chat para definir su persona (SOUL.md), skills, automations y conexiones API.",
     };
   }
 
@@ -4575,6 +4726,14 @@ export function AgentsPanel({
           lastCronRunAt?: string | null;
           channelConfig?: Record<string, unknown>;
         };
+        workspaceSummary?: {
+          skills: {
+            builtIn: Array<{ slug: string; title: string; enabled: boolean }>;
+            local: Array<{ slug: string; title: string; promoted: boolean }>;
+          };
+          workflows: Array<{ id: string; name: string; enabled: boolean; description: string | null }>;
+          integrations: Array<{ slug: string; provider: string | null; status: string }>;
+        };
       };
       if (!response.ok) {
         throw new Error(payload.error ?? "No se pudo contactar al builder del agente.");
@@ -4584,6 +4743,10 @@ export function AgentsPanel({
         setLocalAgents((current) =>
           current.map((agent) => (agent.id === payload.agent!.id ? payload.agent! : agent)),
         );
+      }
+
+      if (payload.workspaceSummary) {
+        setWorkspaceBuilderSummary(payload.workspaceSummary);
       }
 
       const appliedSummary =
@@ -4692,7 +4855,16 @@ export function AgentsPanel({
                 <p style={eyebrowStyle}>{isCreateMode ? "Nuevo agente" : "Builder"}</p>
                 <h3 style={agentDetailTitleStyle}>{isCreateMode ? "Crear agente" : draft.name || "Editar agente"}</h3>
                 <p style={agentDescriptionStyle}>
-                  Habla con el builder para ajustar rol, responsabilidades, skills y conexiones.
+                  Habla con el builder para ajustar el SOUL.md (persona principal del agente, ver{" "}
+                  <a
+                    href="https://hermes-agent.nousresearch.com/docs/user-guide/features/personality"
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{ color: "inherit", textDecoration: "underline" }}
+                  >
+                    docs de Hermes
+                  </a>
+                  ), skills, automations y conexiones API.
                 </p>
               </div>
               {!isCreateMode && selectedAgent ? (
@@ -4713,7 +4885,8 @@ export function AgentsPanel({
                   <div style={detailRailStyle}>
                     <h4 style={detailRailTitleStyle}>Builder chat</h4>
                     <p style={detailRailCopyStyle}>
-                      Describe el rol del agente en lenguaje natural. El builder aplica cambios de configuración automáticamente.
+                      Describe la persona y el rol del agente en lenguaje natural. El builder lo escribe en su
+                      SOUL.md (identidad principal Hermes) y aplica el resto de la configuración automáticamente.
                     </p>
                     <div style={agentChatThreadStyle}>
                       {chatMessages.map((message, index) => (
@@ -4739,7 +4912,7 @@ export function AgentsPanel({
                         onChange={(event) => setChatInput(event.target.value)}
                         placeholder={
                           selectedAgent
-                            ? `Ejemplo: “Quiero que ${selectedAgent.name} monitoree Close cada hora y cree follow-ups”.`
+                            ? `Ejemplo: “Quiero que ${selectedAgent.name} sea breve y directo, monitoree Close cada hora y cree follow-ups”.`
                             : "Primero crea el agente para habilitar el chat del builder."
                         }
                         style={chatInputStyle}
@@ -4835,6 +5008,55 @@ export function AgentsPanel({
                         </a>
                       ) : null}
                     </div>
+
+                    {workspaceBuilderSummary ? (
+                      <div style={{ marginTop: "0.75rem", display: "grid", gap: "0.5rem" }}>
+                        <h4 style={detailRailTitleStyle}>Recursos del workspace</h4>
+                        <p style={detailRailCopyStyle}>
+                          Slugs disponibles para el builder. Pídele al chat enlazar uno por nombre y los agregará al
+                          agente.
+                        </p>
+                        <div style={{ display: "grid", gap: "0.4rem" }}>
+                          <p style={detailRailMetaStyle}>
+                            Skills built-in:{" "}
+                            {workspaceBuilderSummary.skills.builtIn.length === 0
+                              ? "ninguna"
+                              : workspaceBuilderSummary.skills.builtIn
+                                  .filter((skill) => skill.enabled)
+                                  .slice(0, 6)
+                                  .map((skill) => skill.slug)
+                                  .join(", ") || "todas desactivadas"}
+                          </p>
+                          <p style={detailRailMetaStyle}>
+                            Skills locales promovidas:{" "}
+                            {workspaceBuilderSummary.skills.local.length === 0
+                              ? "ninguna"
+                              : workspaceBuilderSummary.skills.local
+                                  .slice(0, 6)
+                                  .map((skill) => skill.slug)
+                                  .join(", ")}
+                          </p>
+                          <p style={detailRailMetaStyle}>
+                            Automations:{" "}
+                            {workspaceBuilderSummary.workflows.length === 0
+                              ? "ninguna"
+                              : workspaceBuilderSummary.workflows
+                                  .slice(0, 6)
+                                  .map((wf) => `${wf.name}${wf.enabled ? "" : " (off)"}`)
+                                  .join(", ")}
+                          </p>
+                          <p style={detailRailMetaStyle}>
+                            Integraciones:{" "}
+                            {workspaceBuilderSummary.integrations.length === 0
+                              ? "ninguna"
+                              : workspaceBuilderSummary.integrations
+                                  .slice(0, 6)
+                                  .map((integration) => integration.slug)
+                                  .join(", ")}
+                          </p>
+                        </div>
+                      </div>
+                    ) : null}
 
                     <div style={actionsStyle}>
                       <button type="button" style={primaryButtonStyle} onClick={saveAgent} disabled={isSaving}>

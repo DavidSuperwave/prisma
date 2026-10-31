@@ -9,6 +9,12 @@ import "./tools/recipes";
 import "./tools/automations";
 import "./tools/documents";
 import "./tools/bindings";
+import "./tools/connections";
+import "./tools/delegation";
+import "./tools/agents";
+import "./tools/operationalPilots";
+import "./tools/skills";
+import "./tools/spreadsheet";
 
 export type RunToolParams = {
   name: string;

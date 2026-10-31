@@ -1,6 +1,8 @@
 import { resolveWorkspaceRequestContext } from "@/lib/auth";
+import { checkWorkspaceAccess, writeWorkspaceAuditLog } from "@/lib/clearance/checkAccess";
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
 import { computeFieldDiff, logRecordHistory } from "@/lib/recordHistory";
+import { safeEmitEvent } from "@/lib/workflows/engine";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -39,7 +41,23 @@ export async function POST(request: Request, context: Context) {
     const resolved = await resolveWorkspaceRequestContext(workspaceSlug);
     if (resolved instanceof Response) return resolved;
     const { user, membership } = resolved;
-    if (!membership.isPlatformAdmin && membership.role === "viewer") {
+    const access = await checkWorkspaceAccess({
+      workspaceId: membership.workspaceId,
+      userId: user.id,
+      isPlatformAdmin: membership.isPlatformAdmin || user.isPlatformAdmin,
+      requiredSection: "records",
+      requiredClearanceLevel: 3,
+      allowedRoles: ["admin", "operator"],
+    });
+    if (!access.allowed) {
+      await writeWorkspaceAuditLog({
+        workspaceId: membership.workspaceId,
+        userId: user.id,
+        action: "records.create.denied",
+        resourceType: "record",
+        riskLevel: "medium",
+        metadata: { reason: access.reason },
+      });
       return Response.json({ error: "You do not have permission to modify records." }, { status: 403 });
     }
 
@@ -57,7 +75,7 @@ export async function POST(request: Request, context: Context) {
     const supabase = requireSupabaseAdmin();
     const { data: objectRow, error: objectError } = await supabase
       .from("workspace_objects")
-      .select("id")
+      .select("id, kind")
       .eq("id", objectId)
       .eq("workspace_id", membership.workspaceId)
       .maybeSingle();
@@ -97,6 +115,40 @@ export async function POST(request: Request, context: Context) {
       actor: { userId: user.id },
       type: "record.created",
       diff: computeFieldDiff({}, createdData),
+    });
+
+    await safeEmitEvent({
+      supabase,
+      workspaceId: membership.workspaceId,
+      type: "record.created",
+      record: {
+        id: String(created.id),
+        objectId,
+        kind:
+          (objectRow as { kind?: string } | null)?.kind === "crm_people" ||
+          (objectRow as { kind?: string } | null)?.kind === "crm_companies" ||
+          (objectRow as { kind?: string } | null)?.kind === "crm_deals"
+            ? ((objectRow as { kind: "crm_people" | "crm_companies" | "crm_deals" }).kind as
+                | "crm_people"
+                | "crm_companies"
+                | "crm_deals")
+            : null,
+        data: createdData,
+      },
+      extra: {
+        source: "api.records.create",
+      },
+      actorUserId: user.id,
+    });
+
+    await writeWorkspaceAuditLog({
+      workspaceId: membership.workspaceId,
+      userId: user.id,
+      action: "records.create",
+      resourceType: "record",
+      resourceId: String(created.id),
+      riskLevel: "low",
+      metadata: { objectId },
     });
 
     return Response.json({ record: mapRecordRow(created as Record<string, unknown>) }, { status: 201 });

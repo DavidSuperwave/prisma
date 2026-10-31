@@ -10,6 +10,8 @@ export const dynamic = "force-dynamic";
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
 import { fetchWhatsappChannelStatus } from "@/lib/whatsappSidecar";
 import { listWorkspaceMembershipsForUser } from "@/lib/workspaceStore";
+import { ensureWorkspaceHermesHome } from "@/lib/hermesHome";
+import { probeAgentLiveness } from "@/lib/hermesLiveness";
 
 type Context = {
   params: Promise<{ workspaceSlug: string; agentId: string }>;
@@ -35,9 +37,16 @@ type AgentUpdateRequest = {
   soulMd?: string;
   skills?: string[];
   knowledgeScope?: Record<string, unknown>;
+  mcpToolsInclude?: string[];
+  skillsScope?: string[];
+  modelOverrides?: Record<string, unknown>;
   cronJobs?: unknown[];
   isActive?: boolean;
   setAsPrimaryCopilot?: boolean;
+};
+
+type AgentHealthRequest = {
+  skipCron?: boolean;
 };
 
 type AgentRow = {
@@ -52,6 +61,9 @@ type AgentRow = {
   status: "active" | "paused" | "deploying" | "error";
   soul_md: string | null;
   skills: string[] | null;
+  mcp_tools_include: string[] | null;
+  skills_scope: string[] | null;
+  model_overrides: Record<string, unknown> | null;
   knowledge_scope: Record<string, unknown> | null;
   cron_jobs: unknown[] | null;
   channel_config: Record<string, unknown> | null;
@@ -130,9 +142,34 @@ function buildWorkspaceAgentPayload(row: AgentRow, isPrimaryCopilot = false) {
   const channels = Array.isArray(knowledgeScope.channels)
     ? (knowledgeScope.channels as unknown[]).map((entry) => String(entry))
     : [];
+  const surfaces = Array.isArray(knowledgeScope.surfaces)
+    ? (knowledgeScope.surfaces as unknown[]).map((entry) => String(entry))
+    : [];
   const readinessState = knowledgeScope.readiness_state === "ready" ? "ready" : "draft";
   const readinessIssues = Array.isArray(knowledgeScope.readiness_issues)
     ? (knowledgeScope.readiness_issues as unknown[]).map((entry) => String(entry))
+    : [];
+
+  const mcpToolsInclude = Array.isArray(row.mcp_tools_include)
+    ? row.mcp_tools_include
+    : Array.isArray(knowledgeScope.mcp_tools_include)
+      ? (knowledgeScope.mcp_tools_include as string[])
+      : [];
+  const skillsScope = Array.isArray(row.skills_scope)
+    ? row.skills_scope
+    : Array.isArray(knowledgeScope.skills_scope)
+      ? (knowledgeScope.skills_scope as string[])
+      : [];
+  const modelOverrides =
+    row.model_overrides && typeof row.model_overrides === "object" && !Array.isArray(row.model_overrides)
+      ? row.model_overrides
+      : knowledgeScope.model_overrides &&
+          typeof knowledgeScope.model_overrides === "object" &&
+          !Array.isArray(knowledgeScope.model_overrides)
+        ? (knowledgeScope.model_overrides as Record<string, unknown>)
+        : {};
+  const mcpServerSlugs = Array.isArray(knowledgeScope.mcp_server_slugs)
+    ? (knowledgeScope.mcp_server_slugs as unknown[]).map((entry) => String(entry))
     : [];
 
   return {
@@ -147,18 +184,26 @@ function buildWorkspaceAgentPayload(row: AgentRow, isPrimaryCopilot = false) {
     read,
     write,
     channels,
+    surfaces,
     cronJobs: Array.isArray(row.cron_jobs) ? row.cron_jobs : [],
     memoryLabel: Number(row.memory_limit_mb ?? 0) > 0 ? "Activada" : "Desactivada",
     soulMd: row.soul_md ?? null,
+    updatedAt: String(row.updated_at ?? row.created_at),
     runtimeLabel: row.container_name,
     apiEndpoint: row.api_endpoint ?? "",
     apiKey: "",
     containerName: row.container_name,
     lastHealthCheckAt:
       typeof knowledgeScope.last_health_check_at === "string" ? String(knowledgeScope.last_health_check_at) : null,
+    lastHealthStatus:
+      typeof knowledgeScope.last_health_status === "string" ? String(knowledgeScope.last_health_status) : null,
     lastCronRunAt:
       typeof knowledgeScope.last_cron_run_at === "string" ? String(knowledgeScope.last_cron_run_at) : null,
     channelConfig: (row.channel_config as Record<string, unknown> | null) ?? {},
+    mcpToolsInclude,
+    mcpServerSlugs,
+    skillsScope,
+    modelOverrides,
     readinessState,
     readinessIssues,
     isReadyForExecution: readinessState === "ready" && readinessIssues.length === 0 && row.status === "active",
@@ -195,6 +240,94 @@ async function fetchChannelStatus(
   return fetchWhatsappChannelStatus(endpoint, apiKey, channelConfig ?? null);
 }
 
+async function syncAgentCronJobsToWorkflows(args: {
+  supabase: ReturnType<typeof requireSupabaseAdmin>;
+  workspaceId: string;
+  agentId: string;
+  agentName: string;
+  cronJobs: unknown[];
+}) {
+  const { supabase, workspaceId, agentId, agentName, cronJobs } = args;
+  const jobs = Array.isArray(cronJobs) ? cronJobs : [];
+  const { error: deleteError } = await supabase
+    .from("workspace_workflows")
+    .delete()
+    .eq("workspace_id", workspaceId)
+    .contains("metadata", { managed_by: "agent_cron_sync", agent_id: agentId });
+  const metadataColumnMissing =
+    deleteError?.code === "42703" || /column .*metadata.* does not exist/i.test(deleteError?.message ?? "");
+  if (metadataColumnMissing) {
+    // Older schemas may not have workspace_workflows.metadata yet.
+    // Fallback to deleting rows by naming convention for this agent.
+    const { error: fallbackDeleteError } = await supabase
+      .from("workspace_workflows")
+      .delete()
+      .eq("workspace_id", workspaceId)
+      .like("name", `${agentName} • %`);
+    if (fallbackDeleteError && fallbackDeleteError.code !== "42P01") {
+      throw new Error(fallbackDeleteError.message);
+    }
+  } else if (deleteError && deleteError.code !== "42P01") {
+    throw new Error(deleteError.message);
+  }
+  if (jobs.length === 0) {
+    return;
+  }
+  const workflowRows = jobs
+    .map((entry, index) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
+      const row = entry as Record<string, unknown>;
+      const cron = typeof row.cron === "string" ? row.cron.trim() : "";
+      if (!cron) return null;
+      const prompt =
+        typeof row.prompt === "string" && row.prompt.trim().length > 0
+          ? row.prompt.trim()
+          : `Run scheduled job ${index + 1} for ${agentName}.`;
+      const cronJobId =
+        typeof row.id === "string" && row.id.trim().length > 0 ? row.id.trim() : `agent-job-${index + 1}`;
+      return {
+        workspace_id: workspaceId,
+        name: `${agentName} • ${cronJobId}`,
+        description: prompt,
+        enabled: row.enabled !== false,
+        trigger: {
+          type: "cron",
+          schedule: cron,
+          timezone:
+            typeof row.timezone === "string" && row.timezone.trim().length > 0 ? row.timezone.trim() : "UTC",
+        },
+        steps: [
+          {
+            type: "agent_prompt",
+            target_agent_id: agentId,
+            prompt,
+          },
+        ],
+        metadata: {
+          managed_by: "agent_cron_sync",
+          agent_id: agentId,
+          cron_job_id: cronJobId,
+        },
+      };
+    })
+    .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
+  if (workflowRows.length === 0) {
+    return;
+  }
+  const { error: insertError } = await supabase.from("workspace_workflows").insert(workflowRows);
+  if (insertError?.code === "42703" || /column .*metadata.* does not exist/i.test(insertError?.message ?? "")) {
+    const rowsWithoutMetadata = workflowRows.map(({ metadata: _metadata, ...rest }) => rest);
+    const { error: retryError } = await supabase.from("workspace_workflows").insert(rowsWithoutMetadata);
+    if (retryError && retryError.code !== "42P01") {
+      throw new Error(retryError.message);
+    }
+    return;
+  }
+  if (insertError && insertError.code !== "42P01") {
+    throw new Error(insertError.message);
+  }
+}
+
 export async function GET(request: Request, context: Context) {
   try {
     const { workspaceSlug, agentId } = await context.params;
@@ -206,7 +339,7 @@ export async function GET(request: Request, context: Context) {
     const supabase = requireSupabaseAdmin();
     const { data: agentRow, error } = await supabase
       .from("workspace_agents")
-      .select("id, workspace_id, name, type, description, api_endpoint, api_key, container_name, status, soul_md, skills, knowledge_scope, cron_jobs, channel_config, memory_limit_mb, cpu_limit, created_at, updated_at")
+      .select("id, workspace_id, name, type, description, api_endpoint, api_key, container_name, status, soul_md, skills, mcp_tools_include, skills_scope, model_overrides, knowledge_scope, cron_jobs, channel_config, memory_limit_mb, cpu_limit, created_at, updated_at")
       .eq("id", agentId)
       .eq("workspace_id", authorization.membership.workspaceId)
       .maybeSingle();
@@ -294,7 +427,7 @@ export async function PATCH(request: Request, context: Context) {
     const supabase = requireSupabaseAdmin();
     const { data: existingRow, error: existingError } = await supabase
       .from("workspace_agents")
-      .select("id, workspace_id, name, type, description, api_endpoint, api_key, container_name, status, soul_md, skills, knowledge_scope, cron_jobs, channel_config, memory_limit_mb, cpu_limit, created_at, updated_at")
+      .select("id, workspace_id, name, type, description, api_endpoint, api_key, container_name, status, soul_md, skills, mcp_tools_include, skills_scope, model_overrides, knowledge_scope, cron_jobs, channel_config, memory_limit_mb, cpu_limit, created_at, updated_at")
       .eq("id", agentId)
       .eq("workspace_id", authorization.membership.workspaceId)
       .maybeSingle();
@@ -384,6 +517,33 @@ export async function PATCH(request: Request, context: Context) {
         return Response.json({ error: error instanceof Error ? error.message : "Invalid skills payload." }, { status: 400 });
       }
     }
+    if (payload.mcpToolsInclude !== undefined) {
+      try {
+        update.mcp_tools_include = normalizeStringArray(payload.mcpToolsInclude, "mcpToolsInclude");
+        nextKnowledgeScope.mcp_tools_include = update.mcp_tools_include;
+      } catch (error) {
+        return Response.json({ error: error instanceof Error ? error.message : "Invalid mcpToolsInclude payload." }, { status: 400 });
+      }
+    }
+    if (payload.skillsScope !== undefined) {
+      try {
+        update.skills_scope = normalizeStringArray(payload.skillsScope, "skillsScope");
+        nextKnowledgeScope.skills_scope = update.skills_scope;
+      } catch (error) {
+        return Response.json({ error: error instanceof Error ? error.message : "Invalid skillsScope payload." }, { status: 400 });
+      }
+    }
+    if (payload.modelOverrides !== undefined) {
+      if (
+        !payload.modelOverrides ||
+        typeof payload.modelOverrides !== "object" ||
+        Array.isArray(payload.modelOverrides)
+      ) {
+        return Response.json({ error: "modelOverrides must be an object." }, { status: 400 });
+      }
+      update.model_overrides = payload.modelOverrides;
+      nextKnowledgeScope.model_overrides = payload.modelOverrides;
+    }
 
     if (payload.role !== undefined) {
       update.type = mapRoleToRuntimeType(payload.role);
@@ -408,6 +568,20 @@ export async function PATCH(request: Request, context: Context) {
         }
         if ("channels" in payload.knowledgeScope) {
           nextKnowledgeScope.channels = normalizeStringArray(payload.knowledgeScope.channels, "knowledgeScope.channels");
+        }
+        if ("surfaces" in payload.knowledgeScope) {
+          nextKnowledgeScope.surfaces = normalizeStringArray(payload.knowledgeScope.surfaces, "knowledgeScope.surfaces");
+        }
+        if ("mcpServerSlugs" in payload.knowledgeScope) {
+          nextKnowledgeScope.mcp_server_slugs = normalizeStringArray(
+            payload.knowledgeScope.mcpServerSlugs,
+            "knowledgeScope.mcpServerSlugs",
+          );
+        } else if ("mcp_server_slugs" in payload.knowledgeScope) {
+          nextKnowledgeScope.mcp_server_slugs = normalizeStringArray(
+            payload.knowledgeScope.mcp_server_slugs,
+            "knowledgeScope.mcp_server_slugs",
+          );
         }
       } catch (error) {
         return Response.json({ error: error instanceof Error ? error.message : "Invalid knowledgeScope." }, { status: 400 });
@@ -471,6 +645,32 @@ export async function PATCH(request: Request, context: Context) {
       }
       update.status = "paused";
     }
+    if (requestedActivation && readiness.isReady) {
+      const liveness = await probeAgentLiveness({
+        workspaceId: authorization.membership.workspaceId,
+        workspaceSlug,
+        agentId,
+        endpoint: candidateEndpoint,
+        apiKey: candidateApiKey,
+      });
+      mergedKnowledgeScope.last_health_check_at = new Date().toISOString();
+      mergedKnowledgeScope.last_health_status = liveness.status;
+      update.knowledge_scope = mergedKnowledgeScope;
+      if (!liveness.ok) {
+        return Response.json(
+          {
+            error: `Agent cannot be activated until runtime verification passes: ${liveness.message}`,
+            liveness: {
+              ok: liveness.ok,
+              status: liveness.status,
+              message: liveness.message,
+            },
+          },
+          { status: 400 },
+        );
+      }
+      update.status = "active";
+    }
     if (payload.setAsPrimaryCopilot === true && targetType !== "copilot") {
       return Response.json({ error: "Only copilot agents can be set as primary CEO." }, { status: 400 });
     }
@@ -490,7 +690,7 @@ export async function PATCH(request: Request, context: Context) {
       .update(update)
       .eq("id", agentId)
       .eq("workspace_id", authorization.membership.workspaceId)
-      .select("id, workspace_id, name, type, description, api_endpoint, api_key, container_name, status, soul_md, skills, knowledge_scope, cron_jobs, channel_config, memory_limit_mb, cpu_limit, created_at, updated_at")
+      .select("id, workspace_id, name, type, description, api_endpoint, api_key, container_name, status, soul_md, skills, mcp_tools_include, skills_scope, model_overrides, knowledge_scope, cron_jobs, channel_config, memory_limit_mb, cpu_limit, created_at, updated_at")
       .maybeSingle();
 
     if (error) {
@@ -502,6 +702,24 @@ export async function PATCH(request: Request, context: Context) {
     }
 
     const typedUpdatedAgent = updatedAgent as AgentRow;
+    if (payload.cronJobs !== undefined) {
+      await syncAgentCronJobsToWorkflows({
+        supabase,
+        workspaceId: authorization.membership.workspaceId,
+        agentId: typedUpdatedAgent.id,
+        agentName: typedUpdatedAgent.name,
+        cronJobs: Array.isArray(typedUpdatedAgent.cron_jobs) ? typedUpdatedAgent.cron_jobs : [],
+      });
+    }
+    try {
+      await ensureWorkspaceHermesHome({
+        workspaceId: authorization.membership.workspaceId,
+        workspaceSlug,
+        agentId: typedUpdatedAgent.id,
+      });
+    } catch (error) {
+      console.error("agents PATCH ensureWorkspaceHermesHome failed", error);
+    }
     const shouldSetPrimary = payload.setAsPrimaryCopilot === true;
     if (shouldSetPrimary) {
       const { data: workspaceRow, error: workspaceError } = await supabase
@@ -591,32 +809,23 @@ export async function POST(_request: Request, context: Context) {
       return Response.json({ error: "Agent API key is not configured." }, { status: 400 });
     }
 
-    let healthy = false;
-    let errorMessage = "";
-
-    try {
-      const healthResponse = await fetch(`${endpoint}/health`, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "x-api-key": apiKey,
-        },
-      });
-      healthy = healthResponse.ok;
-      if (!healthResponse.ok) {
-        const body = await healthResponse.text().catch(() => "");
-        errorMessage = body || `Health check failed with status ${healthResponse.status}.`;
-      }
-    } catch (error) {
-      errorMessage = error instanceof Error ? error.message : "Failed to contact agent endpoint.";
-    }
+    const healthRequest = (await _request.json().catch(() => ({}))) as AgentHealthRequest;
+    const liveness = await probeAgentLiveness({
+      workspaceId: authorization.membership.workspaceId,
+      workspaceSlug,
+      agentId,
+      endpoint,
+      apiKey,
+    });
+    const healthy = liveness.ok;
+    const errorMessage = liveness.ok ? "" : liveness.message;
 
     let cronRegistered = false;
     let cronError = "";
     const cronJobs = Array.isArray(agentRow.cron_jobs)
       ? (agentRow.cron_jobs as Array<Record<string, unknown>>)
       : [];
-    if (healthy && cronJobs.length > 0) {
+    if (healthy && cronJobs.length > 0 && healthRequest.skipCron !== true) {
       try {
         const previousKnowledgeScope = (agentRow.knowledge_scope as Record<string, unknown>) ?? {};
         const lastRunCandidate =
@@ -666,35 +875,61 @@ export async function POST(_request: Request, context: Context) {
     const nextKnowledgeScope = mergeReadinessIntoKnowledgeScope({
       ...previousKnowledgeScope,
       last_health_check_at: lastHealthCheckAt,
+      last_health_status: !readiness.isReady ? "draft" : liveness.status,
       ...(nextCronRunAt ? { last_cron_run_at: nextCronRunAt } : {}),
     }, readiness);
 
     const nextStatus: "active" | "paused" | "error" =
       !readiness.isReady ? "paused" : healthy ? "active" : "error";
-    const { error: updateError } = await supabase
+    const { data: updatedAgentRow, error: updateError } = await supabase
       .from("workspace_agents")
       .update({
         status: nextStatus,
         knowledge_scope: nextKnowledgeScope,
         updated_at: new Date().toISOString(),
       })
+      .select("id, workspace_id, name, type, description, api_endpoint, api_key, container_name, status, soul_md, skills, mcp_tools_include, skills_scope, model_overrides, knowledge_scope, cron_jobs, channel_config, memory_limit_mb, cpu_limit, created_at, updated_at")
       .eq("id", agentId)
-      .eq("workspace_id", authorization.membership.workspaceId);
+      .eq("workspace_id", authorization.membership.workspaceId)
+      .maybeSingle();
 
     if (updateError) {
       throw new Error(updateError.message);
+    }
+    if (!updatedAgentRow) {
+      return Response.json({ error: "Agent not found." }, { status: 404 });
     }
 
     const channelStatus = healthy
       ? await fetchChannelStatus(endpoint, apiKey, agentRow.channel_config)
       : null;
+    const membershipMetadata =
+      authorization.membership.workspace.metadata &&
+      typeof authorization.membership.workspace.metadata === "object" &&
+      !Array.isArray(authorization.membership.workspace.metadata)
+        ? (authorization.membership.workspace.metadata as Record<string, unknown>)
+        : {};
+    const isPrimaryCopilot =
+      typeof membershipMetadata.primary_copilot_agent_id === "string" &&
+      membershipMetadata.primary_copilot_agent_id === agentId;
 
     return Response.json({
+      agent: {
+        ...buildWorkspaceAgentPayload(updatedAgentRow as AgentRow, isPrimaryCopilot),
+        channelStatus,
+      },
       health: {
         ok: healthy,
         error: healthy && !cronError ? undefined : cronError || errorMessage || "Unable to connect.",
       },
       healthy,
+      liveness: {
+        ok: liveness.ok,
+        status: liveness.status,
+        message: liveness.message,
+        runtime: liveness.runtime,
+        workspaceHome: liveness.workspaceHome,
+      },
       readiness: {
         state: readiness.state,
         issues: readiness.issues,
@@ -706,6 +941,10 @@ export async function POST(_request: Request, context: Context) {
       },
       status: nextStatus,
       lastHealthCheckAt,
+      lastHealthStatus:
+        typeof nextKnowledgeScope.last_health_status === "string"
+          ? String(nextKnowledgeScope.last_health_status)
+          : null,
       lastCronRunAt:
         typeof nextKnowledgeScope.last_cron_run_at === "string"
           ? String(nextKnowledgeScope.last_cron_run_at)
@@ -714,6 +953,161 @@ export async function POST(_request: Request, context: Context) {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to run agent health check.";
+    return Response.json({ error: message }, { status: 400 });
+  }
+}
+
+export async function DELETE(_request: Request, context: Context) {
+  try {
+    const { workspaceSlug, agentId } = await context.params;
+    const authorization = await authorizeWorkspaceAdmin(workspaceSlug);
+    if ("error" in authorization) {
+      return authorization.error;
+    }
+
+    const supabase = requireSupabaseAdmin();
+    const workspaceId = authorization.membership.workspaceId;
+    const { data: existingAgent, error: existingAgentError } = await supabase
+      .from("workspace_agents")
+      .select("id, workspace_id, name, type")
+      .eq("id", agentId)
+      .eq("workspace_id", workspaceId)
+      .maybeSingle();
+    if (existingAgentError) {
+      throw new Error(existingAgentError.message);
+    }
+    if (!existingAgent) {
+      return Response.json({ error: "Agent not found." }, { status: 404 });
+    }
+
+    const { count: conversationCount, error: conversationCountError } = await supabase
+      .from("workspace_conversations")
+      .select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId)
+      .eq("agent_id", agentId);
+    if (conversationCountError && conversationCountError.code !== "42P01") {
+      throw new Error(conversationCountError.message);
+    }
+
+    const { data: workspaceRow, error: workspaceError } = await supabase
+      .from("workspaces")
+      .select("id, metadata")
+      .eq("id", workspaceId)
+      .maybeSingle();
+    if (workspaceError) {
+      throw new Error(workspaceError.message);
+    }
+    const workspaceMetadata =
+      workspaceRow?.metadata && typeof workspaceRow.metadata === "object" && !Array.isArray(workspaceRow.metadata)
+        ? (workspaceRow.metadata as Record<string, unknown>)
+        : {};
+    const wasPrimaryCopilot =
+      typeof workspaceMetadata.primary_copilot_agent_id === "string" &&
+      workspaceMetadata.primary_copilot_agent_id === agentId;
+
+    let ownedTasksReassigned = 0;
+    const { count: ownedTaskCount, error: ownedTaskCountError } = await supabase
+      .from("workspace_tasks")
+      .select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId)
+      .eq("owner_agent_id", agentId);
+    if (ownedTaskCountError && ownedTaskCountError.code !== "42P01") {
+      throw new Error(ownedTaskCountError.message);
+    }
+    if ((ownedTaskCount ?? 0) > 0) {
+      const { error: clearTaskOwnerError } = await supabase
+        .from("workspace_tasks")
+        .update({
+          owner_agent_id: null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("workspace_id", workspaceId)
+        .eq("owner_agent_id", agentId);
+      if (clearTaskOwnerError && clearTaskOwnerError.code !== "42P01") {
+        throw new Error(clearTaskOwnerError.message);
+      }
+      ownedTasksReassigned = ownedTaskCount ?? 0;
+    }
+
+    await syncAgentCronJobsToWorkflows({
+      supabase,
+      workspaceId,
+      agentId,
+      agentName: String(existingAgent.name),
+      cronJobs: [],
+    });
+
+    const { error: deleteError } = await supabase
+      .from("workspace_agents")
+      .delete()
+      .eq("id", agentId)
+      .eq("workspace_id", workspaceId);
+    if (deleteError) {
+      throw new Error(deleteError.message);
+    }
+
+    let nextPrimaryCopilotId: string | null =
+      typeof workspaceMetadata.primary_copilot_agent_id === "string"
+        ? workspaceMetadata.primary_copilot_agent_id
+        : null;
+    if (wasPrimaryCopilot) {
+      const { data: remainingCopilots, error: remainingCopilotsError } = await supabase
+        .from("workspace_agents")
+        .select("id, status, created_at")
+        .eq("workspace_id", workspaceId)
+        .eq("type", "copilot")
+        .order("created_at", { ascending: true });
+      if (remainingCopilotsError) {
+        throw new Error(remainingCopilotsError.message);
+      }
+      const typedRemainingCopilots = (remainingCopilots ?? []).map((row) => ({
+        id: String(row.id),
+        status: String(row.status ?? ""),
+      }));
+      nextPrimaryCopilotId =
+        typedRemainingCopilots.find((row) => row.status === "active")?.id ??
+        typedRemainingCopilots[0]?.id ??
+        null;
+
+      const nextMetadata = { ...workspaceMetadata };
+      if (nextPrimaryCopilotId) {
+        nextMetadata.primary_copilot_agent_id = nextPrimaryCopilotId;
+      } else {
+        delete nextMetadata.primary_copilot_agent_id;
+      }
+      const { error: metadataUpdateError } = await supabase
+        .from("workspaces")
+        .update({
+          metadata: nextMetadata,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", workspaceId);
+      if (metadataUpdateError) {
+        throw new Error(metadataUpdateError.message);
+      }
+
+      if (nextPrimaryCopilotId) {
+        try {
+          await ensureWorkspaceHermesHome({
+            workspaceId,
+            workspaceSlug,
+            agentId: nextPrimaryCopilotId,
+          });
+        } catch (error) {
+          console.error("agents DELETE ensureWorkspaceHermesHome failed", error);
+        }
+      }
+    }
+
+    return Response.json({
+      ok: true,
+      deletedAgentId: agentId,
+      deletedConversationCount: conversationCount ?? 0,
+      ownedTasksReassigned,
+      primaryCopilotAgentId: nextPrimaryCopilotId,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unable to delete agent.";
     return Response.json({ error: message }, { status: 400 });
   }
 }

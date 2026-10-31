@@ -1,20 +1,24 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 
-const supabaseUrl = process.env.SUPABASE_URL
-const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
-
 let cachedClient: SupabaseClient | null | undefined
+let cachedConfigKey: string | null = null
 
 export function hasSupabaseAdminConfig() {
-  return Boolean(supabaseUrl && supabaseServiceRoleKey)
+  return Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY)
 }
 
 export function getSupabaseAdmin() {
+  const supabaseUrl = process.env.SUPABASE_URL
+  const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+
   if (!hasSupabaseAdminConfig()) {
+    cachedClient = null
+    cachedConfigKey = null
     return null
   }
 
-  if (cachedClient !== undefined) {
+  const configKey = `${supabaseUrl}:${supabaseServiceRoleKey?.slice(0, 12)}`
+  if (cachedClient !== undefined && cachedConfigKey === configKey) {
     return cachedClient
   }
 
@@ -24,6 +28,7 @@ export function getSupabaseAdmin() {
       persistSession: false,
     },
   })
+  cachedConfigKey = configKey
 
   return cachedClient
 }

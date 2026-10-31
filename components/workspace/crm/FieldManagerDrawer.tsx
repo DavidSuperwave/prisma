@@ -29,8 +29,10 @@ const FIELD_TYPES: Array<{ value: string; label: string }> = [
   { value: "boolean", label: "Booleano" },
   { value: "select", label: "Selección" },
   { value: "status", label: "Estado" },
+  { value: "collection", label: "Colección" },
   { value: "relation", label: "Relación" },
   { value: "file", label: "Archivo" },
+  { value: "image", label: "Foto / imagen" },
 ];
 
 /**
@@ -55,6 +57,7 @@ export function FieldManagerDrawer({
   const [isCreating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
   const [newType, setNewType] = useState<string>("text");
+  const [newOptionsText, setNewOptionsText] = useState("");
   const dragIndexRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -125,13 +128,24 @@ export function FieldManagerDrawer({
   async function handleCreate() {
     const trimmed = newName.trim();
     if (!trimmed) return;
+    const optionValues = newOptionsText
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean);
     setBusy(true);
     setError(null);
     try {
       const response = await fetch(`/api/workspaces/${encodeURIComponent(workspaceSlug)}/fields`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ objectId, name: trimmed, type: newType }),
+        body: JSON.stringify({
+          objectId,
+          name: trimmed,
+          type: newType,
+          ...(newType === "select" || newType === "status"
+            ? { options: { values: optionValues } }
+            : {}),
+        }),
       });
       if (!response.ok) {
         const body = (await response.json().catch(() => ({}))) as { error?: string };
@@ -143,6 +157,7 @@ export function FieldManagerDrawer({
       onChange?.(next);
       setNewName("");
       setNewType("text");
+      setNewOptionsText("");
       setCreating(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : "No se pudo crear el campo.");
@@ -310,6 +325,14 @@ export function FieldManagerDrawer({
                   </option>
                 ))}
               </select>
+              {newType === "select" || newType === "status" ? (
+                <input
+                  placeholder="Opciones separadas por coma"
+                  value={newOptionsText}
+                  onChange={(event) => setNewOptionsText(event.target.value)}
+                  style={inlineInputStyle}
+                />
+              ) : null}
               <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
                 <button type="button" onClick={() => setCreating(false)} style={ghostButtonStyle}>
                   Cancelar

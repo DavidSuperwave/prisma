@@ -9,7 +9,7 @@
  * flow through as status + error text only.
  */
 
-import { registerTool, type ToolContext } from "../registry";
+import { registerTool, type ToolContext, type ToolResult } from "../registry";
 import { fetchInternalJson } from "../executor";
 import {
   createIntegration,
@@ -121,7 +121,7 @@ registerTool({
     body: { type: "object", description: "Request JSON body" },
     headers: { type: "object", description: "Optional extra headers" },
   },
-  handler: async (args, ctx) => {
+  handler: async (args, ctx): Promise<ToolResult> => {
     const workspaceId = await resolveWorkspaceId(ctx);
     if (!workspaceId) return { ok: false, error: "Workspace not found.", status: 404 };
     const slug = String(args.slug ?? "").trim();
@@ -589,7 +589,7 @@ registerTool({
 /* MCP onboarding from chat                                                    */
 /* -------------------------------------------------------------------------- */
 
-registerTool({
+registerTool<Record<string, unknown>, Record<string, unknown>>({
   name: "integrations.connect_mcp",
   description:
     "Register an MCP (Model Context Protocol) server in this workspace so Hermes picks it up on the next bootstrap. Defaults to dryRun:true and returns a confirmToken — re-issue with dryRun:false and the token to commit. Once active, the server's tools are listed by the /agents/:id/mcp-config endpoint Hermes fetches at bootstrap. See https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp.",
@@ -633,7 +633,14 @@ registerTool({
       const token = signProposal(proposal);
       return { ok: true, data: { proposal, confirmToken: token.token, expiresAt: token.expiresAt, dryRun: true } };
     }
-    if (typeof args.confirmToken !== "string" || !verifyProposal(args.confirmToken).ok) {
+    const proposal = {
+      action: "integrations.connect_mcp",
+      summary: `Connect MCP server “${name}” at ${url}. Active after next agent bootstrap.`,
+      targets: [],
+      count: 1,
+      diff: [{ id: null, before: null, after: { name, url, hasBearer: typeof args.bearer === "string" && args.bearer.length > 0 } }],
+    };
+    if (typeof args.confirmToken !== "string" || !verifyProposal(args.confirmToken, proposal).ok) {
       return { ok: false, error: "Invalid or expired confirmToken.", status: 400 };
     }
 

@@ -12,7 +12,7 @@
 import { getIntegrationBySlug } from "@/lib/integrations/store";
 
 export type HermesMemoryConfig = {
-  provider: "supermemory" | "none";
+  provider: "honcho" | "supermemory" | "none";
   config?: Record<string, unknown>;
 };
 
@@ -30,6 +30,44 @@ export async function resolveHermesMemoryConfig(
 ): Promise<HermesMemoryConfig> {
   const { workspaceId, agentId } = opts;
   const namespace = buildNamespace(workspaceId, agentId);
+
+  const honchoEnvKey = process.env.HONCHO_API_KEY?.trim();
+  if (honchoEnvKey && honchoEnvKey.length > 0) {
+    return {
+      provider: "honcho",
+      config: {
+        api_key_ref: "env:HONCHO_API_KEY",
+        workspace: workspaceId,
+        member_peer: "user-peer",
+        agent_peer: "AI-peer",
+        namespace,
+      },
+    };
+  }
+
+  try {
+    const integration = await getIntegrationBySlug(workspaceId, "honcho");
+    if (
+      integration &&
+      integration.status === "active" &&
+      integration.authType === "api_key" &&
+      integration.hasSecrets
+    ) {
+      return {
+        provider: "honcho",
+        config: {
+          api_key_ref: "vault:honcho:api_key",
+          workspace: workspaceId,
+          member_peer: "user-peer",
+          agent_peer: "AI-peer",
+          namespace,
+          integration_id: integration.id,
+        },
+      };
+    }
+  } catch (error) {
+    console.error("resolveHermesMemoryConfig: honcho vault lookup failed", error);
+  }
 
   const envKey = process.env.SUPERMEMORY_API_KEY?.trim();
   if (envKey && envKey.length > 0) {

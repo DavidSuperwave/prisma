@@ -16,6 +16,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { registerTool, type ToolContext } from "../registry";
+import { ensureWorkspaceHermesHome, resolveWorkspaceHermesHome } from "@/lib/hermesHome";
 import { getIntegrationBySlug } from "@/lib/integrations/store";
 import {
   deleteRecipe,
@@ -169,16 +170,30 @@ registerTool({
   },
 });
 
-/**
- * Resolve the workspace-local skills directory. Files live on disk alongside
- * the app source so Hermes can load them via the existing skills/ convention.
- */
-function skillsRoot(): string {
-  return path.join(process.cwd(), "skills");
-}
-
 function safeSegment(input: string): string {
   return input.replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64) || "unnamed";
+}
+
+function workspaceSkillRelativePath(folderName: string): string {
+  return `skills/${folderName}/SKILL.md`;
+}
+
+async function writeWorkspaceSkillMarkdown(params: {
+  workspaceId: string;
+  workspaceSlug: string;
+  folderName: string;
+  markdown: string;
+}): Promise<{ absolutePath: string; relativePath: string }> {
+  await ensureWorkspaceHermesHome({
+    workspaceId: params.workspaceId,
+    workspaceSlug: params.workspaceSlug,
+  });
+  const home = resolveWorkspaceHermesHome(params.workspaceId);
+  const relativePath = workspaceSkillRelativePath(params.folderName);
+  const absolutePath = path.join(home, relativePath);
+  await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+  await fs.writeFile(absolutePath, params.markdown, "utf8");
+  return { absolutePath, relativePath };
 }
 
 function formatSkillMarkdown(params: {
@@ -250,7 +265,7 @@ function formatSkillMarkdown(params: {
 registerTool({
   name: "skills.publish_recipe",
   description:
-    "Emit a Hermes SKILL.md file for a saved recipe so future sessions inherit it. Writes to skills/integration-{provider}-{recipeSlug}/SKILL.md. Returns the file path.",
+    "Emit a workspace-local Hermes SKILL.md file for a saved recipe so future sessions in the same workspace inherit it. Returns the workspace-relative file path.",
   args: {
     recipeId: { type: "string", required: true, description: "Recipe id from recipes.save / recipes.list" },
   },
@@ -271,10 +286,7 @@ registerTool({
     const integrationSlug = String((integrationRow as { slug?: string } | null)?.slug ?? "integration");
     const provider = String((integrationRow as { provider?: string } | null)?.provider ?? "custom");
     const folderName = `integration-${safeSegment(provider)}-${safeSegment(recipe.slug)}`;
-    const dirPath = path.join(skillsRoot(), folderName);
-    const filePath = path.join(dirPath, "SKILL.md");
     try {
-      await fs.mkdir(dirPath, { recursive: true });
       const markdown = formatSkillMarkdown({
         integrationSlug,
         integrationProvider: provider,
@@ -288,11 +300,16 @@ registerTool({
         headersTemplate: recipe.headersTemplate,
         sampleResponse: recipe.sampleResponse,
       });
-      await fs.writeFile(filePath, markdown, "utf8");
+      const written = await writeWorkspaceSkillMarkdown({
+        workspaceId,
+        workspaceSlug: ctx.workspaceSlug,
+        folderName,
+        markdown,
+      });
       return {
         ok: true,
         data: {
-          path: `skills/${folderName}/SKILL.md`,
+          path: written.relativePath,
           integrationSlug,
           recipeSlug: recipe.slug,
         },
@@ -306,7 +323,7 @@ registerTool({
 registerTool({
   name: "skills.publish_automation",
   description:
-    "Emit a Hermes SKILL.md summarizing a cron workflow the agent authored, so future sessions see it exists. Writes to skills/automation-{name}/SKILL.md.",
+    "Emit a workspace-local Hermes SKILL.md summarizing a cron workflow the agent authored, so future sessions in the same workspace see it exists.",
   args: {
     workflowId: { type: "string", required: true, description: "workspace_workflows.id" },
     notes: { type: "string", description: "Optional free-form notes the agent wants future sessions to see" },
@@ -334,8 +351,6 @@ registerTool({
       steps: unknown[] | null;
     };
     const folderName = `automation-${safeSegment(row.name || row.id)}`;
-    const dirPath = path.join(skillsRoot(), folderName);
-    const filePath = path.join(dirPath, "SKILL.md");
     const notes = typeof args.notes === "string" && args.notes ? args.notes : null;
     const markdown = [
       `# ${row.name || "Agent automation"}`,
@@ -364,9 +379,13 @@ registerTool({
       "",
     ].join("\n");
     try {
-      await fs.mkdir(dirPath, { recursive: true });
-      await fs.writeFile(filePath, markdown, "utf8");
-      return { ok: true, data: { path: `skills/${folderName}/SKILL.md`, workflowId: row.id } };
+      const written = await writeWorkspaceSkillMarkdown({
+        workspaceId,
+        workspaceSlug: ctx.workspaceSlug,
+        folderName,
+        markdown,
+      });
+      return { ok: true, data: { path: written.relativePath, workflowId: row.id } };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : "Failed to write skill file.", status: 500 };
     }

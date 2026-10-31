@@ -1,81 +1,54 @@
 'use client'
 
-import { FormEvent, useEffect, useMemo, useState } from 'react'
+import { FormEvent, useMemo, useState } from 'react'
 
-type Status = 'idle' | 'submitting' | 'error'
+type Status = 'idle' | 'submitting' | 'error' | 'success'
 
-const industries = [
-  'Legal',
-  'Salud',
-  'Inmobiliaria',
-  'Belleza',
-  'Educacion',
-  'Restaurantes',
-  'Servicios profesionales',
-  'Otro',
+const BRAND_ASSET_OPTIONS = [
+  'Logo',
+  'Colores',
+  'Fotos',
+  'Ninguno',
 ]
 
 export default function IntakePage() {
   const [status, setStatus] = useState<Status>('idle')
   const [error, setError] = useState<string>('')
-  const [successState, setSuccessState] = useState<'none' | 'paid' | 'cancelled'>('none')
-  const [files, setFiles] = useState<FileList | null>(null)
+  const [leadScore, setLeadScore] = useState<number | null>(null)
 
   const statusMessage = useMemo(() => {
-    if (successState === 'paid') {
-      return 'Pago confirmado. Ya recibimos tu solicitud y nuestro equipo iniciara onboarding.'
-    }
-    if (successState === 'cancelled') {
-      return 'Checkout cancelado. Puedes volver a intentarlo cuando quieras.'
+    if (status === 'success') {
+      return `Solicitud enviada. Te contactaremos pronto${leadScore === null ? '.' : ` (lead score: ${leadScore})`}`
     }
     return ''
-  }, [successState])
-
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search)
-    const statusParam = params.get('status')
-    if (statusParam === 'success') {
-      setSuccessState('paid')
-    } else if (statusParam === 'cancelled') {
-      setSuccessState('cancelled')
-    }
-  }, [])
+  }, [leadScore, status])
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     setStatus('submitting')
     setError('')
+    setLeadScore(null)
 
     try {
       const formElement = event.currentTarget
       const formData = new FormData(formElement)
-
-      if (files) {
-        Array.from(files).forEach((file) => formData.append('assets', file))
-      }
-
       const intakeResponse = await fetch('/api/intake', {
         method: 'POST',
         body: formData,
       })
 
-      const intakePayload = (await intakeResponse.json()) as { intakeId?: string; error?: string }
+      const intakePayload = (await intakeResponse.json()) as {
+        intakeId?: string
+        leadScore?: number
+        error?: string
+      }
       if (!intakeResponse.ok || !intakePayload.intakeId) {
         throw new Error(intakePayload.error ?? 'No pudimos guardar tu intake.')
       }
 
-      const checkoutResponse = await fetch('/api/stripe/checkout', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ intakeId: intakePayload.intakeId }),
-      })
-
-      const checkoutPayload = (await checkoutResponse.json()) as { checkoutUrl?: string; error?: string }
-      if (!checkoutResponse.ok || !checkoutPayload.checkoutUrl) {
-        throw new Error(checkoutPayload.error ?? 'No pudimos crear el checkout.')
-      }
-
-      window.location.assign(checkoutPayload.checkoutUrl)
+      setLeadScore(typeof intakePayload.leadScore === 'number' ? intakePayload.leadScore : null)
+      formElement.reset()
+      setStatus('success')
     } catch (submitError) {
       setStatus('error')
       setError(submitError instanceof Error ? submitError.message : 'Error inesperado.')
@@ -105,7 +78,7 @@ export default function IntakePage() {
         <p style={{ color: 'var(--giga-law)', marginBottom: 10, fontWeight: 700 }}>Prisma Intake</p>
         <h1 style={{ fontSize: 'clamp(1.7rem, 4vw, 2.5rem)', marginBottom: 10 }}>Cuentanos sobre tu negocio</h1>
         <p style={{ color: 'var(--giga-muted)', marginBottom: 24 }}>
-          Completa el formulario y al final te enviaremos al checkout para iniciar el setup de tu agente.
+          Completa este formulario para evaluar tu proyecto y preparar la propuesta inicial.
         </p>
 
         {statusMessage ? (
@@ -138,86 +111,49 @@ export default function IntakePage() {
 
         <form onSubmit={handleSubmit} style={{ display: 'grid', gap: 14 }}>
           <label>
-            Nombre legal del negocio
-            <input name="businessName" required style={inputStyle} />
+            Nombre completo
+            <input name="full_name" required style={inputStyle} />
           </label>
           <label>
-            Persona de contacto
-            <input name="contactName" required style={inputStyle} />
+            ¿Que negocio tienes?
+            <input name="business_name" required style={inputStyle} />
           </label>
           <label>
-            Email de contacto
-            <input name="contactEmail" type="email" required style={inputStyle} />
-          </label>
-          <label>
-            WhatsApp de contacto
-            <input name="whatsappNumber" required style={inputStyle} placeholder="+52..." />
-          </label>
-          <label>
-            Industria
-            <select name="industry" required style={inputStyle}>
-              <option value="">Selecciona una industria</option>
-              {industries.map((industry) => (
-                <option key={industry} value={industry}>
-                  {industry}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Website (opcional)
-            <input name="websiteUrl" type="url" style={inputStyle} placeholder="https://..." />
-          </label>
-
-          <div style={grid2Style}>
-            <label>
-              Instagram (opcional)
-              <input name="instagram" type="url" style={inputStyle} />
-            </label>
-            <label>
-              Facebook (opcional)
-              <input name="facebook" type="url" style={inputStyle} />
-            </label>
-            <label>
-              TikTok (opcional)
-              <input name="tiktok" type="url" style={inputStyle} />
-            </label>
-            <label>
-              LinkedIn (opcional)
-              <input name="linkedin" type="url" style={inputStyle} />
-            </label>
-          </div>
-
-          <label>
-            Color principal de marca (opcional)
-            <input name="primaryColor" type="color" defaultValue="#4f46e5" style={colorInputStyle} />
-          </label>
-
-          <label>
-            Describe tus servicios y objetivo principal
-            <textarea name="serviceDescription" required rows={4} style={inputStyle} />
-          </label>
-          <label>
-            Instrucciones de tono y estilo (opcional)
-            <textarea name="toneGuidance" rows={3} style={inputStyle} />
-          </label>
-          <label>
-            Comentarios adicionales (opcional)
-            <textarea name="notes" rows={3} style={inputStyle} />
-          </label>
-          <label>
-            Assets (logo, brand kit, docs, media)
+            Sitio web (opcional)
             <input
-              type="file"
-              multiple
-              onChange={(event) => setFiles(event.target.files)}
-              accept=".pdf,.doc,.docx,.png,.jpg,.jpeg,.svg,.zip,.mp4,.mov"
+              name="website_url"
+              type="text"
               style={inputStyle}
+              placeholder="Si no tienes, dejalo en blanco"
             />
           </label>
+          <label>
+            Ubicacion del negocio
+            <input name="business_location" required style={inputStyle} />
+          </label>
+          <label>
+            ¿Por que quieres actualizar o crear tu sitio web?
+            <textarea name="reason" required rows={4} style={inputStyle} />
+          </label>
+          <label>
+            Email
+            <input name="email" type="email" required style={inputStyle} />
+          </label>
+
+          <fieldset style={fieldsetStyle}>
+            <legend style={{ padding: '0 4px' }}>Activos de marca</legend>
+            <div style={brandAssetsGridStyle}>
+              {BRAND_ASSET_OPTIONS.map((asset) => (
+                <label key={asset} style={checkboxLabelStyle}>
+                  <input type="checkbox" name="brand_assets" value={asset} />
+                  <span>{asset}</span>
+                </label>
+              ))}
+            </div>
+          </fieldset>
 
           <button type="submit" disabled={status === 'submitting'} style={buttonStyle}>
-            {status === 'submitting' ? 'Procesando...' : 'Continuar a checkout'}
+            {status === 'submitting' ? 'Enviando...' : 'Enviar solicitud'}
           </button>
         </form>
       </section>
@@ -237,12 +173,6 @@ const inputStyle: React.CSSProperties = {
   fontSize: 14,
 }
 
-const colorInputStyle: React.CSSProperties = {
-  ...inputStyle,
-  height: 44,
-  padding: 4,
-}
-
 const buttonStyle: React.CSSProperties = {
   border: 0,
   borderRadius: 12,
@@ -254,8 +184,21 @@ const buttonStyle: React.CSSProperties = {
   cursor: 'pointer',
 }
 
-const grid2Style: React.CSSProperties = {
+const fieldsetStyle: React.CSSProperties = {
+  border: '1px solid var(--giga-border)',
+  borderRadius: 10,
+  padding: '8px 12px 12px',
+}
+
+const brandAssetsGridStyle: React.CSSProperties = {
   display: 'grid',
   gap: 10,
   gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+}
+
+const checkboxLabelStyle: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  fontSize: 14,
 }

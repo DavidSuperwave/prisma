@@ -2,42 +2,44 @@ import Link from 'next/link'
 import type { ReactNode } from 'react'
 import { requireAdminUser } from '@/lib/auth'
 
+export const runtime = 'nodejs'
+export const dynamic = 'force-dynamic'
+export const revalidate = 0
+
 const navItems = [
   { href: '/admin', label: 'Overview' },
+  { href: '/admin/leads', label: 'Leads' },
   { href: '/admin/new-project', label: 'Create Workspace' },
   { href: '/admin/clients', label: 'Workspaces' },
   { href: '/admin/templates', label: 'Templates' },
   { href: '/admin/agents', label: 'Agent Monitor' },
+  { href: '/admin/billing', label: 'Billing' },
   { href: '/admin/deployments', label: 'Deployments' },
   { href: '/admin/usage', label: 'Usage' },
   { href: '/admin/users', label: 'Users' },
 ]
 
-export default function AdminDashboardLayout({ children }: { children: ReactNode }) {
-  async function renderLayout() {
-    await requireAdminUser('/admin')
+export default async function AdminDashboardLayout({ children }: { children: ReactNode }) {
+  await requireAdminUser('/admin')
 
-    return (
-      <div style={shellStyle}>
-        <aside style={sidebarStyle}>
-          <div style={brandBlockStyle}>
-            <p style={brandStyle}>Prisma Admin</p>
-            <p style={brandCopyStyle}>Launch and monitor workspaces.</p>
-          </div>
-          <nav style={navStyle}>
-            {navItems.map((item) => (
-              <Link key={item.href} href={item.href} style={linkStyle}>
-                {item.label}
-              </Link>
-            ))}
-          </nav>
-        </aside>
-        <main style={contentStyle}>{children}</main>
-      </div>
-    )
-  }
-
-  return renderLayout()
+  return (
+    <div style={shellStyle}>
+      <aside style={sidebarStyle}>
+        <div style={brandBlockStyle}>
+          <p style={brandStyle}>Prisma Admin</p>
+          <p style={brandCopyStyle}>Launch and monitor workspaces.</p>
+        </div>
+        <nav style={navStyle}>
+          {navItems.map((item) => (
+            <Link key={item.href} href={item.href} style={linkStyle}>
+              {item.label}
+            </Link>
+          ))}
+        </nav>
+      </aside>
+      <main style={contentStyle}>{children}</main>
+    </div>
+  )
 }
 
 const shellStyle: React.CSSProperties = {

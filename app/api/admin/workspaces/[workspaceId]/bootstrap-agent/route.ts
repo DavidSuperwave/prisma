@@ -20,6 +20,9 @@ import { bootstrapDocuments } from '@/lib/documentsBootstrap'
 import { listIntegrations } from '@/lib/integrations/store'
 import { resolveHermesMemoryConfig } from '@/lib/hermesMemoryConfig'
 import { resolveHermesGatewayConfig } from '@/lib/hermesGatewayConfig'
+import { ensureWorkspaceHermesHome } from '@/lib/hermesHome'
+import { probeAgentLiveness } from '@/lib/hermesLiveness'
+import { listDefaultOperatorToolNames } from '@/lib/agentTools/mcpPolicy'
 
 type Context = {
   params: Promise<{ workspaceId: string }>
@@ -36,30 +39,6 @@ function sanitizeContainerName(input: string) {
 
 function normalizeRuntimeBaseUrl(input: string) {
   return input.trim().replace(/\/+$/, '')
-}
-
-async function verifyRuntimeHealth(baseUrl: string, apiKey: string) {
-  const checks = [
-    { path: '/health', useAuth: false },
-    { path: '/v1/models', useAuth: true },
-  ] as const
-
-  for (const check of checks) {
-    try {
-      const response = await fetch(`${baseUrl}${check.path}`, {
-        method: 'GET',
-        headers: check.useAuth ? { Authorization: `Bearer ${apiKey}` } : undefined,
-        cache: 'no-store',
-      })
-      if (response.ok) {
-        return { ok: true as const, path: check.path }
-      }
-    } catch {
-      // Try the next check target.
-    }
-  }
-
-  return { ok: false as const }
 }
 
 export async function POST(request: Request, context: Context) {
@@ -144,12 +123,19 @@ export async function POST(request: Request, context: Context) {
   }
 
   const normalizedRuntimeBaseUrl = normalizeRuntimeBaseUrl(runtimeBaseUrl)
-  const runtimeHealth = await verifyRuntimeHealth(normalizedRuntimeBaseUrl, runtimeApiKey)
-  if (!runtimeHealth.ok) {
+  const runtimeLiveness = await probeAgentLiveness({
+    workspaceId,
+    workspaceSlug: workspace.slug,
+    agentId: agent.id,
+    endpoint: normalizedRuntimeBaseUrl,
+    apiKey: runtimeApiKey,
+  })
+  if (!runtimeLiveness.ok) {
     return Response.json(
       {
-        error: 'Hermes runtime is unreachable. Bootstrap aborted before activating agent.',
+        error: `Hermes runtime verification failed. Bootstrap aborted before activating agent: ${runtimeLiveness.message}`,
         runtimeBaseUrl: normalizedRuntimeBaseUrl,
+        liveness: runtimeLiveness,
       },
       { status: 502 },
     )
@@ -197,6 +183,18 @@ export async function POST(request: Request, context: Context) {
   )
   mergedScope.mcp_servers = mcpServerSlugs
   mergedScope.mcp_config_url = `/api/workspaces/${workspace.slug}/agents/${agent.id}/mcp-config`
+  const mcpToolsInclude = Array.isArray(mergedScope.mcp_tools_include) && mergedScope.mcp_tools_include.length > 0
+    ? (mergedScope.mcp_tools_include as string[])
+    : listDefaultOperatorToolNames()
+  const skillsScope = Array.isArray(mergedScope.skills_scope)
+    ? (mergedScope.skills_scope as string[])
+    : []
+  const modelOverrides =
+    mergedScope.model_overrides &&
+    typeof mergedScope.model_overrides === 'object' &&
+    !Array.isArray(mergedScope.model_overrides)
+      ? (mergedScope.model_overrides as Record<string, unknown>)
+      : {}
 
   try {
     const memoryConfig = await resolveHermesMemoryConfig({ workspaceId, agentId: agent.id })
@@ -219,6 +217,24 @@ export async function POST(request: Request, context: Context) {
     mergedScope.gateway_channels = []
   }
 
+  const lastHealthCheckAt = new Date().toISOString()
+  mergedScope.last_health_check_at = lastHealthCheckAt
+  mergedScope.last_health_status = runtimeLiveness.status
+
+  try {
+    await ensureWorkspaceHermesHome({
+      workspaceId,
+      workspaceSlug: workspace.slug,
+      agentId: agent.id,
+    })
+  } catch (error) {
+    console.error("bootstrap-agent ensureWorkspaceHermesHome failed", error)
+    return Response.json(
+      { error: 'Hermes home sync failed before activation.', details: error instanceof Error ? error.message : 'unknown error' },
+      { status: 500 },
+    )
+  }
+
   const { error: runtimeUpdateError } = await supabase
     .from('workspace_agents')
     .update({
@@ -227,6 +243,9 @@ export async function POST(request: Request, context: Context) {
       api_key: runtimeApiKey,
       hermes_version: imageRef,
       status: 'active',
+      mcp_tools_include: mcpToolsInclude,
+      skills_scope: skillsScope,
+      model_overrides: modelOverrides,
       knowledge_scope: mergedScope,
       updated_at: new Date().toISOString(),
     })
@@ -253,7 +272,8 @@ export async function POST(request: Request, context: Context) {
       dropletHost,
       imageRef,
       runtimeBaseUrl: normalizedRuntimeBaseUrl,
-      runtimeHealthPath: runtimeHealth.path,
+      runtimeHealthPath: runtimeLiveness.runtime.path ?? null,
+      lastHealthCheckAt,
     },
   })
 

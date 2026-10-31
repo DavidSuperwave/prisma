@@ -4,6 +4,9 @@ import { render } from "@/lib/templates/render";
 import { evaluateFilter, type Filter } from "@/lib/workflows/filter";
 
 export type WorkflowEventType =
+  | "record.created"
+  | "record.updated"
+  | "record.deleted"
   | "lead.created"
   | "lead.updated"
   | "lead.stage_changed"
@@ -88,6 +91,17 @@ export type AgentHandoffStep = WorkflowStepBase & {
   title?: string;
 };
 
+export type AgentPromptStep = WorkflowStepBase & {
+  type: "agent_prompt";
+  target_agent_id?: string;
+  targetAgentId?: string;
+  prompt: string;
+  attached_skills?: string[];
+  attachedSkills?: string[];
+  deliver_to?: string;
+  deliverTo?: string;
+};
+
 export type DelayStep = WorkflowStepBase & {
   type: "delay" | "wait";
   hours?: number;
@@ -123,6 +137,38 @@ export type RunRecipeStep = WorkflowStepBase & {
   vars?: Record<string, unknown>;
 };
 
+export type RunConnectionSyncStep = WorkflowStepBase & {
+  type: "run_connection_sync";
+  connectionId?: string;
+  connectionSlug?: string;
+  saveAs?: string;
+};
+
+export type CreateExtractionReviewItemStep = WorkflowStepBase & {
+  type: "create_extraction_review_item";
+  recordId?: string;
+  objectId?: string;
+  fieldId: string;
+  extractionConfigId?: string;
+  provenanceId?: string;
+  reason?: "low_confidence" | "missing_value" | "conflict" | "validation_failed" | "manual_flag";
+  proposedValue?: unknown;
+  currentValue?: unknown;
+  confidence?: number | string | null;
+  notes?: string;
+  metadata?: Record<string, unknown>;
+  saveAs?: string;
+};
+
+export type RunWorkflowStep = WorkflowStepBase & {
+  type: "run_workflow";
+  workflowId?: string;
+  workflowName?: string;
+  waitForCompletion?: boolean;
+  context?: Record<string, unknown>;
+  saveAs?: string;
+};
+
 export type WorkflowStep =
   | SendTemplateStep
   | UpdateRecordStep
@@ -130,10 +176,14 @@ export type WorkflowStep =
   | CreateDealStep
   | CreateNoteStep
   | AgentHandoffStep
+  | AgentPromptStep
   | DelayStep
   | BranchStep
   | EnrollInSequenceStep
-  | RunRecipeStep;
+  | RunRecipeStep
+  | RunConnectionSyncStep
+  | CreateExtractionReviewItemStep
+  | RunWorkflowStep;
 
 type WorkflowRow = {
   id: string;
@@ -594,6 +644,92 @@ export async function executeStep(
         return { kind: "ok" };
       }
 
+      case "agent_prompt": {
+        const targetAgentId = String(step.target_agent_id ?? step.targetAgentId ?? "").trim();
+        const prompt = String(step.prompt ?? "").trim();
+        if (!targetAgentId || !prompt) {
+          return { kind: "error", message: "agent_prompt requires target_agent_id and prompt" };
+        }
+        const attachedSkillsRaw = Array.isArray(step.attached_skills)
+          ? step.attached_skills
+          : Array.isArray(step.attachedSkills)
+            ? step.attachedSkills
+            : [];
+        const attachedSkills = attachedSkillsRaw
+          .map((entry) => String(entry ?? "").trim())
+          .filter((entry) => entry.length > 0);
+        const deliverTo = String(step.deliver_to ?? step.deliverTo ?? "").trim() || null;
+        const shimUrl = process.env.PRISMA_HERMES_SHIM_URL?.trim();
+        const shimDelegateEnabled = process.env.PRISMA_ENABLE_SHIM_DELEGATE === "true";
+        if (!shimUrl) {
+          return { kind: "error", message: "PRISMA_HERMES_SHIM_URL is required for agent_prompt steps" };
+        }
+        if (!shimDelegateEnabled) {
+          return {
+            kind: "error",
+            message: "agent_prompt shim dispatch disabled (PRISMA_ENABLE_SHIM_DELEGATE!=true)",
+          };
+        }
+
+        const response = await fetch(`${shimUrl.replace(/\/$/, "")}/delegate`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            ...(process.env.PRISMA_HERMES_SHIM_SHARED_SECRET
+              ? { "x-prisma-shim-secret": process.env.PRISMA_HERMES_SHIM_SHARED_SECRET }
+              : {}),
+          },
+          body: JSON.stringify({
+            workspaceId,
+            sourceAgentId: null,
+            targetAgentId,
+            goal: prompt,
+            context: {
+              source: "workflow.agent_prompt",
+              workflowRunId: params.context.run_id ?? null,
+              workflowId: params.context.workflow_id ?? null,
+              recordId,
+              attachedSkills,
+              deliverTo,
+            },
+          }),
+        });
+
+        const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+        if (!response.ok) {
+          const errorMessage =
+            typeof payload.error === "string" && payload.error.trim().length > 0
+              ? payload.error
+              : `agent_prompt delegate failed (${response.status})`;
+          return { kind: "error", message: errorMessage };
+        }
+
+        await emitEventRow(supabase, {
+          workspaceId,
+          type: "workflow.agent_prompt_dispatched",
+          payload: {
+            targetAgentId,
+            recordId,
+            workflowRunId: params.context.run_id ?? null,
+            workflowId: params.context.workflow_id ?? null,
+            deliverTo,
+            attachedSkills,
+          },
+        });
+
+        return {
+          kind: "ok",
+          contextPatch: {
+            last_agent_prompt: {
+              targetAgentId,
+              prompt,
+              dispatchedAt: nowIso(),
+              shim: payload,
+            },
+          },
+        };
+      }
+
       case "delay":
       case "wait": {
         const minutes =
@@ -652,6 +788,187 @@ export async function executeStep(
         return { kind: "ok", contextPatch: { steps: nextStepsCtx } };
       }
 
+      case "run_connection_sync": {
+        const { runConnectionSync } = await import("@/lib/connections/runtime");
+        const connectionId =
+          typeof step.connectionId === "string" && step.connectionId.trim()
+            ? step.connectionId.trim()
+            : undefined;
+        const connectionSlug =
+          typeof step.connectionSlug === "string" && step.connectionSlug.trim()
+            ? step.connectionSlug.trim()
+            : undefined;
+        if (!connectionId && !connectionSlug) {
+          return { kind: "error", message: "run_connection_sync requires connectionId or connectionSlug" };
+        }
+        const report = await runConnectionSync({
+          workspaceId,
+          ...(connectionId ? { connectionId } : { connectionSlug }),
+        });
+        const saveAs = step.saveAs ?? connectionSlug ?? connectionId ?? "connection_sync";
+        const stepsCtx = (params.context.steps as Record<string, unknown> | undefined) ?? {};
+        const nextStepsCtx: Record<string, unknown> = {
+          ...stepsCtx,
+          [saveAs]: report,
+        };
+        return { kind: "ok", contextPatch: { steps: nextStepsCtx } };
+      }
+
+      case "create_extraction_review_item": {
+        const resolved = renderVars(step, params.context) as CreateExtractionReviewItemStep;
+        const targetRecordId =
+          typeof resolved.recordId === "string" && resolved.recordId.trim()
+            ? resolved.recordId.trim()
+            : recordId;
+        const fieldId =
+          typeof resolved.fieldId === "string" && resolved.fieldId.trim()
+            ? resolved.fieldId.trim()
+            : "";
+        if (!targetRecordId) {
+          return { kind: "error", message: "create_extraction_review_item requires record context" };
+        }
+        if (!fieldId) {
+          return { kind: "error", message: "create_extraction_review_item requires fieldId" };
+        }
+        let objectId =
+          typeof resolved.objectId === "string" && resolved.objectId.trim()
+            ? resolved.objectId.trim()
+            : "";
+        if (!objectId) {
+          const { data: recordRow, error: recordError } = await supabase
+            .from("records")
+            .select("object_id")
+            .eq("workspace_id", workspaceId)
+            .eq("id", targetRecordId)
+            .maybeSingle();
+          if (recordError) return { kind: "error", message: recordError.message };
+          if (!recordRow) return { kind: "error", message: "record not found for extraction review item" };
+          objectId = String((recordRow as { object_id: string }).object_id);
+        }
+        const parsedConfidence =
+          typeof resolved.confidence === "number"
+            ? resolved.confidence
+            : typeof resolved.confidence === "string" && resolved.confidence.trim()
+              ? Number(resolved.confidence)
+              : null;
+        const { data: inserted, error: insertError } = await supabase
+          .from("extraction_review_items")
+          .insert({
+            workspace_id: workspaceId,
+            record_id: targetRecordId,
+            object_id: objectId,
+            field_id: fieldId,
+            extraction_config_id:
+              typeof resolved.extractionConfigId === "string" && resolved.extractionConfigId.trim()
+                ? resolved.extractionConfigId.trim()
+                : null,
+            provenance_id:
+              typeof resolved.provenanceId === "string" && resolved.provenanceId.trim()
+                ? resolved.provenanceId.trim()
+                : null,
+            reason: resolved.reason ?? "manual_flag",
+            proposed_value: resolved.proposedValue ?? null,
+            current_value: resolved.currentValue ?? null,
+            confidence:
+              parsedConfidence !== null && Number.isFinite(parsedConfidence) ? parsedConfidence : null,
+            notes:
+              typeof resolved.notes === "string" && resolved.notes.trim().length > 0
+                ? resolved.notes.trim()
+                : null,
+            metadata:
+              resolved.metadata && typeof resolved.metadata === "object" && !Array.isArray(resolved.metadata)
+                ? resolved.metadata
+                : {},
+          })
+          .select("id, status, reason, confidence")
+          .single();
+        if (insertError) {
+          return { kind: "error", message: insertError.message };
+        }
+        const saveAs = resolved.saveAs ?? `review_${fieldId}`;
+        const stepsCtx = (params.context.steps as Record<string, unknown> | undefined) ?? {};
+        const nextStepsCtx: Record<string, unknown> = {
+          ...stepsCtx,
+          [saveAs]: {
+            id: String((inserted as { id: string }).id),
+            status: String((inserted as { status: string }).status),
+            reason: String((inserted as { reason: string }).reason),
+            confidence: (inserted as { confidence?: number | null }).confidence ?? null,
+            fieldId,
+            recordId: targetRecordId,
+          },
+        };
+        return { kind: "ok", contextPatch: { steps: nextStepsCtx } };
+      }
+
+      case "run_workflow": {
+        const resolved = renderVars(step, params.context) as RunWorkflowStep;
+        let targetWorkflowId =
+          typeof resolved.workflowId === "string" && resolved.workflowId.trim()
+            ? resolved.workflowId.trim()
+            : "";
+        if (!targetWorkflowId) {
+          const workflowName =
+            typeof resolved.workflowName === "string" && resolved.workflowName.trim()
+              ? resolved.workflowName.trim()
+              : "";
+          if (!workflowName) {
+            return { kind: "error", message: "run_workflow requires workflowId or workflowName" };
+          }
+          const { data: workflowRow, error: workflowLookupError } = await supabase
+            .from("workspace_workflows")
+            .select("id")
+            .eq("workspace_id", workspaceId)
+            .eq("name", workflowName)
+            .maybeSingle();
+          if (workflowLookupError) return { kind: "error", message: workflowLookupError.message };
+          if (!workflowRow) return { kind: "error", message: `workflow '${workflowName}' not found` };
+          targetWorkflowId = String((workflowRow as { id: string }).id);
+        }
+        if (targetWorkflowId === String(params.context.workflow_id ?? "")) {
+          return { kind: "error", message: "run_workflow cannot call the current workflow directly" };
+        }
+        const nestedContext =
+          resolved.context && typeof resolved.context === "object" && !Array.isArray(resolved.context)
+            ? resolved.context
+            : {};
+        const { data: inserted, error: insertError } = await supabase
+          .from("workspace_workflow_runs")
+          .insert({
+            workflow_id: targetWorkflowId,
+            workspace_id: workspaceId,
+            record_id: recordId,
+            status: "pending",
+            current_step: 0,
+            context: {
+              ...nestedContext,
+              event_type: "subworkflow",
+              parent_run_id: params.context.run_id ?? null,
+              parent_workflow_id: params.context.workflow_id ?? null,
+              enqueued_at: nowIso(),
+              source: "run_workflow",
+            },
+          })
+          .select("id")
+          .single();
+        if (insertError) return { kind: "error", message: insertError.message };
+        const runId = String((inserted as { id: string }).id);
+        const waitForCompletion = resolved.waitForCompletion !== false;
+        const completed = waitForCompletion ? await processRun(supabase, runId) : null;
+        const saveAs = resolved.saveAs ?? targetWorkflowId;
+        const stepsCtx = (params.context.steps as Record<string, unknown> | undefined) ?? {};
+        const nextStepsCtx: Record<string, unknown> = {
+          ...stepsCtx,
+          [saveAs]: {
+            runId,
+            workflowId: targetWorkflowId,
+            status: completed?.status ?? "pending",
+            error: completed?.error ?? null,
+          },
+        };
+        return { kind: "ok", contextPatch: { steps: nextStepsCtx } };
+      }
+
       case "branch":
         // handled by flatten
         return { kind: "ok" };
@@ -685,6 +1002,8 @@ export async function processRun(supabase: SupabaseClient, runId: string): Promi
     ...(run.context ?? {}),
     record_id: run.record_id,
     workspace_id: run.workspace_id,
+    run_id: run.id,
+    workflow_id: run.workflow_id,
   };
   const steps = flattenSteps(rawSteps, context);
 

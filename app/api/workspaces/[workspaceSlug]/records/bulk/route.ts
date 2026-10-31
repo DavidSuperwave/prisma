@@ -6,6 +6,7 @@ import { signProposal, verifyProposal } from "@/lib/agentTools/confirmToken";
 import { evaluateFilter, normalizeFilterInput } from "@/lib/recordsQuery";
 import { resolveObject } from "@/lib/objectResolver";
 import { appendDocumentProvenance } from "@/lib/documents/provenance";
+import { safeEmitEvent } from "@/lib/workflows/engine";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -224,6 +225,27 @@ export async function POST(request: Request, context: Context) {
             subject: "Actualización masiva confirmada",
           });
         }
+        await safeEmitEvent({
+          supabase,
+          workspaceId: membership.workspaceId,
+          type: "record.updated",
+          record: {
+            id: row.id,
+            objectId: targetObject.id,
+            kind:
+              targetObject.kind === "crm_people" ||
+              targetObject.kind === "crm_companies" ||
+              targetObject.kind === "crm_deals"
+                ? targetObject.kind
+                : null,
+            data: newData,
+          },
+          extra: {
+            source: "api.records.bulk_update",
+            changedFields: diff.map((entry) => entry.field),
+          },
+          actorUserId: user.id,
+        });
         committed.push({ id: row.id, diff });
       }
     } else if (action === "delete") {
@@ -243,6 +265,26 @@ export async function POST(request: Request, context: Context) {
           actor: { userId: user.id, agentId: body.actorAgentId ?? null },
           type: "record.deleted",
           subject: "Eliminación masiva confirmada",
+        });
+        await safeEmitEvent({
+          supabase,
+          workspaceId: membership.workspaceId,
+          type: "record.deleted",
+          record: {
+            id: row.id,
+            objectId: targetObject.id,
+            kind:
+              targetObject.kind === "crm_people" ||
+              targetObject.kind === "crm_companies" ||
+              targetObject.kind === "crm_deals"
+                ? targetObject.kind
+                : null,
+            data: null,
+          },
+          extra: {
+            source: "api.records.bulk_delete",
+          },
+          actorUserId: user.id,
         });
         committed.push({ id: row.id });
       }

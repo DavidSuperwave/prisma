@@ -1,6 +1,7 @@
 import { authorizeWorkspaceMember } from "@/app/api/workspaces/[workspaceSlug]/conversations/_shared";
 import { resolveMcpToolPolicy } from "@/lib/agentTools/mcpPolicy";
 import { issuePrismaMcpSessionToken } from "@/lib/agentMcpSession";
+import { getConnectionSecrets, listConnections } from "@/lib/connections/store";
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
 import {
   getIntegrationBySlug,
@@ -9,6 +10,7 @@ import {
 } from "@/lib/integrations/store";
 import { resolveHermesMemoryConfig } from "@/lib/hermesMemoryConfig";
 import { resolveHermesGatewayConfig } from "@/lib/hermesGatewayConfig";
+import { ensureWorkspaceHermesHome } from "@/lib/hermesHome";
 
 const BROWSER_USE_TOOL_NAMES = [
   "browser.run",
@@ -37,6 +39,9 @@ type AgentConfigRow = {
   workspace_id: string;
   name: string;
   type: "copilot" | "channel" | "worker";
+  mcp_tools_include: string[] | null;
+  skills_scope: string[] | null;
+  model_overrides: Record<string, unknown> | null;
   knowledge_scope: Record<string, unknown> | null;
   channel_config: Record<string, unknown> | null;
 };
@@ -61,6 +66,10 @@ function normalizeStringArray(value: unknown): string[] {
   return value
     .map((entry) => String(entry ?? "").trim())
     .filter((entry) => entry.length > 0);
+}
+
+function isAllowedExternalMcpSlug(allowedSlugs: string[], slug: string) {
+  return allowedSlugs.length === 0 || allowedSlugs.includes(slug);
 }
 
 function readCookieValue(headerValue: string | null, key: string): string | null {
@@ -150,23 +159,41 @@ export async function GET(request: Request, context: Context) {
 
     const { data: agent } = await supabase
       .from("workspace_agents")
-      .select("id, workspace_id, name, type, knowledge_scope, channel_config")
+      .select("id, workspace_id, name, type, mcp_tools_include, skills_scope, model_overrides, knowledge_scope, channel_config")
       .eq("id", agentId)
       .eq("workspace_id", auth.context.workspaceId)
       .maybeSingle();
     if (!agent) return Response.json({ error: "Agent not found." }, { status: 404 });
 
     const agentRow = agent as unknown as AgentConfigRow;
-    const knowledgeScope = (agentRow.knowledge_scope ?? {}) as Record<string, unknown>;
+    const knowledgeScope: Record<string, unknown> = {
+      ...((agentRow.knowledge_scope ?? {}) as Record<string, unknown>),
+      ...(Array.isArray(agentRow.mcp_tools_include)
+        ? { mcp_tools_include: agentRow.mcp_tools_include }
+        : {}),
+      ...(Array.isArray(agentRow.skills_scope) ? { skills_scope: agentRow.skills_scope } : {}),
+      ...(agentRow.model_overrides &&
+      typeof agentRow.model_overrides === "object" &&
+      !Array.isArray(agentRow.model_overrides)
+        ? { model_overrides: agentRow.model_overrides }
+        : {}),
+    };
     const legacyRole = typeof knowledgeScope.legacy_role === "string" ? knowledgeScope.legacy_role : null;
     const policy = resolveMcpToolPolicy({
       agentType: agentRow.type,
       legacyRole,
       knowledgeScope,
     });
+    const allowedMcpServerSlugs = normalizeStringArray(knowledgeScope.mcp_server_slugs);
 
-    const integrations = await listIntegrations(auth.context.workspaceId);
+    const [integrations, connections] = await Promise.all([
+      listIntegrations(auth.context.workspaceId),
+      listConnections(auth.context.workspaceId),
+    ]);
     const mcpRows = integrations.filter((row) => row.authType === "mcp" && row.status === "active");
+    const mcpConnections = connections.filter(
+      (row) => row.authType === "mcp" && row.status === "active" && row.mode === "mcp_server",
+    );
 
     const mcp_servers: Record<string, HermesMcpServerConfig> = {};
 
@@ -195,6 +222,7 @@ export async function GET(request: Request, context: Context) {
     });
 
     for (const row of mcpRows) {
+      if (!isAllowedExternalMcpSlug(allowedMcpServerSlugs, row.slug)) continue;
       const cfg = row.config ?? {};
       const url = typeof cfg.url === "string" ? cfg.url : null;
       if (!url) continue;
@@ -207,6 +235,33 @@ export async function GET(request: Request, context: Context) {
           if (typeof v === "string") headers[k] = v;
         }
       }
+      mcp_servers[row.slug] = buildMcpServerConfig({
+        url,
+        headers: Object.keys(headers).length > 0 ? headers : undefined,
+        config: cfg,
+      });
+    }
+
+    for (const row of mcpConnections) {
+      if (!isAllowedExternalMcpSlug(allowedMcpServerSlugs, row.slug)) continue;
+      const cfg = (row.config as Record<string, unknown> | null) ?? {};
+      const url =
+        typeof cfg.url === "string" && cfg.url.trim().length > 0
+          ? cfg.url
+          : typeof row.baseUrl === "string" && row.baseUrl.trim().length > 0
+            ? row.baseUrl
+            : null;
+      if (!url) continue;
+      const secrets = await getConnectionSecrets(row.id);
+      const headers: Record<string, string> = {};
+      if (secrets.bearer) headers.Authorization = `Bearer ${secrets.bearer}`;
+      else if (secrets.apiKey) headers.Authorization = `Bearer ${secrets.apiKey}`;
+      if (typeof cfg.extraHeaders === "object" && cfg.extraHeaders) {
+        for (const [k, v] of Object.entries(cfg.extraHeaders as Record<string, unknown>)) {
+          if (typeof v === "string") headers[k] = v;
+        }
+      }
+      if (mcp_servers[row.slug]) continue;
       mcp_servers[row.slug] = buildMcpServerConfig({
         url,
         headers: Object.keys(headers).length > 0 ? headers : undefined,
@@ -253,6 +308,16 @@ export async function GET(request: Request, context: Context) {
         channelConfig: agentRow.channel_config ?? null,
       }),
     ]);
+
+    try {
+      await ensureWorkspaceHermesHome({
+        workspaceId: auth.context.workspaceId,
+        workspaceSlug,
+        agentId,
+      });
+    } catch (error) {
+      console.error("mcp-config ensureWorkspaceHermesHome failed", error);
+    }
 
     return Response.json({
       agentId: String(agentRow.id),

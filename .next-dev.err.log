@@ -1,0 +1,34 @@
+[chat] Hermes shim request failed; falling back to direct runtime. fetch failed
+[chat] Hermes shim request failed; falling back to direct runtime. fetch failed
+[chat] Hermes shim request failed; falling back to direct runtime. fetch failed
+[chat] Hermes shim request failed; falling back to direct runtime. fetch failed
+[chat] Hermes shim request failed; falling back to direct runtime. fetch failed
+[chat] Hermes shim request failed; falling back to direct runtime. fetch failed
+⚠ Fast Refresh had to perform a full reload due to a runtime error.
+TypeError: fetch failed
+    at async getCurrentAppUser (lib\auth.ts:151:27)
+    at async requireAuthenticatedUser (lib\auth.ts:181:16)
+    at async WorkspaceDetailPage (app\workspaces\[workspaceSlug]\page.tsx:208:16)
+  149 |
+  150 |   const supabase = requireSupabaseAdmin();
+> 151 |   const { data, error } = await supabase.auth.getUser(accessToken);
+      |                           ^
+  152 |   if (error || !data.user) {
+  153 |     return null;
+  154 |   } {
+  [cause]: Error: read ECONNRESET
+      at ignore-listed frames {
+    errno: -4077,
+    code: 'ECONNRESET',
+    syscall: 'read'
+  }
+}
+Error: Both middleware file "./middleware.ts" and proxy file "./proxy.ts" are detected. Please use "./proxy.ts" only. Learn more: https://nextjs.org/docs/messages/middleware-to-proxy
+    at ignore-listed frames
+⨯ unhandledRejection: Error: Both middleware file "./middleware.ts" and proxy file "./proxy.ts" are detected. Please use "./proxy.ts" only. Learn more: https://nextjs.org/docs/messages/middleware-to-proxy
+    at ignore-listed frames
+⨯ unhandledRejection:  Error: Both middleware file "./middleware.ts" and proxy file "./proxy.ts" are detected. Please use "./proxy.ts" only. Learn more: https://nextjs.org/docs/messages/middleware-to-proxy
+    at ignore-listed frames
+[chat] Hermes shim request failed; falling back to direct runtime. fetch failed
+[chat] Hermes shim request failed; falling back to direct runtime. fetch failed
+[chat] Hermes shim request failed; falling back to direct runtime. fetch failed

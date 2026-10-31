@@ -25,6 +25,7 @@ export type ToolContext = {
   workspaceSlug: string;
   origin: string;
   cookieHeader?: string;
+  agentId?: string | null;
   /** Optional bearer used for internal server-to-server calls */
   internalToken?: string;
 };
@@ -62,8 +63,19 @@ export function getTool(name: string): ToolDefinition | undefined {
   return registry.get(name);
 }
 
-export function listTools(): ToolDefinition[] {
-  return Array.from(registry.values());
+function toNameSet(names?: Iterable<string>): Set<string> | null {
+  if (!names) return null;
+  const set = new Set<string>();
+  for (const name of names) {
+    const trimmed = String(name ?? "").trim();
+    if (trimmed) set.add(trimmed);
+  }
+  return set;
+}
+
+export function listTools(allowedNames?: Iterable<string>): ToolDefinition[] {
+  const allowed = toNameSet(allowedNames);
+  return Array.from(registry.values()).filter((tool) => !allowed || allowed.has(tool.name));
 }
 
 /** Shape returned from `listToolsForPrompt` to embed in agent system prompt */
@@ -73,6 +85,20 @@ export function describeToolsForPrompt(): Array<{
   args: ToolArgShape;
 }> {
   return listTools().map((t) => ({
+    name: t.name,
+    description: t.description,
+    args: t.args,
+  }));
+}
+
+export function describeSelectedToolsForPrompt(
+  allowedNames?: Iterable<string>,
+): Array<{
+  name: string;
+  description: string;
+  args: ToolArgShape;
+}> {
+  return listTools(allowedNames).map((t) => ({
     name: t.name,
     description: t.description,
     args: t.args,

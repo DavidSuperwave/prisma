@@ -1,3 +1,5 @@
+import { getCurrentAppUser } from "@/lib/auth";
+import { getWorkspaceMembershipForSlug } from "@/lib/workspaceStore";
 import { runTool } from "@/lib/agentTools/executor";
 
 export const runtime = "nodejs";
@@ -9,7 +11,15 @@ type Body = {
   workspaceSlug?: string;
 };
 
+/**
+ * Development helper to invoke a tool with the caller's session.
+ * Not intended for unauthenticated or cross-workspace use.
+ */
 export async function POST(request: Request) {
+  const user = await getCurrentAppUser();
+  if (!user) {
+    return Response.json({ error: "Authentication required." }, { status: 401 });
+  }
   const body = (await request.json().catch(() => ({}))) as Body;
   const name = body.name;
   const workspaceSlug = body.workspaceSlug;
@@ -18,6 +28,14 @@ export async function POST(request: Request) {
       { error: "Both `name` and `workspaceSlug` are required." },
       { status: 400 },
     );
+  }
+  const membership = await getWorkspaceMembershipForSlug(
+    user.id,
+    workspaceSlug,
+    user.isPlatformAdmin,
+  );
+  if (!membership) {
+    return Response.json({ error: "You do not have access to this workspace." }, { status: 403 });
   }
 
   const origin = request.headers.get("origin") ?? new URL(request.url).origin;

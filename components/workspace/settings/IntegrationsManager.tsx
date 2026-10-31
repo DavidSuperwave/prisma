@@ -344,7 +344,7 @@ export function IntegrationsManager({ workspaceSlug }: Props) {
                               padding: "6px 8px",
                               border: "1px solid var(--workspace-border, #e5e7eb)",
                               borderRadius: 6,
-                              background: "#fff",
+                              background: "var(--workspace-panel-soft, #f9fafb)",
                             }}
                           >
                             <div style={{ flex: 1, minWidth: 0 }}>

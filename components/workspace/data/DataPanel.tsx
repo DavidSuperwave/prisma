@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
-import { FileStack, History, MessageSquare, Plus, Settings2, Sparkles, Trash2, X } from "lucide-react";
+import { FileStack, History, ImagePlus, MessageSquare, Plus, Settings2, Sparkles, Trash2, X } from "lucide-react";
 import type {
   PrismaWorkspaceField,
   PrismaWorkspaceObject,
@@ -675,9 +675,10 @@ export function DataPanel({
                     {field.type === "status" || field.type === "select" ? (
                       <Select
                         value={String(value ?? "")}
-                        onChange={(event) =>
-                          setRecordDraft((current) => ({ ...current, [field.key]: event.currentTarget.value }))
-                        }
+                        onChange={(event) => {
+                          const nextValue = event.currentTarget.value;
+                          setRecordDraft((current) => ({ ...current, [field.key]: nextValue }));
+                        }}
                       >
                         <option value="">{field.required ? "Selecciona" : "Sin valor"}</option>
                         {options.map((option) => (
@@ -700,6 +701,17 @@ export function DataPanel({
                         />
                         Activo
                       </label>
+                    ) : field.type === "image" ? (
+                      <ImageFieldUpload
+                        workspaceSlug={workspaceSlug}
+                        objectId={object.id}
+                        field={field}
+                        value={String(value ?? "")}
+                        disabled={isBusy}
+                        onChange={(url) => {
+                          setRecordDraft((current) => ({ ...current, [field.key]: url }));
+                        }}
+                      />
                     ) : (
                       <input
                         className="ws-input"
@@ -901,6 +913,80 @@ export function DataPanel({
   );
 }
 
+function ImageFieldUpload({
+  workspaceSlug,
+  objectId,
+  field,
+  value,
+  disabled,
+  onChange,
+}: {
+  workspaceSlug: string;
+  objectId: string;
+  field: PrismaWorkspaceField;
+  value: string;
+  disabled: boolean;
+  onChange: (url: string) => void;
+}) {
+  const [isUploading, setIsUploading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function upload(file: File) {
+    setIsUploading(true);
+    setError(null);
+    try {
+      const formData = new FormData();
+      formData.set("file", file);
+      formData.set("objectId", objectId);
+      formData.set("fieldId", field.id);
+
+      const response = await fetch(`/api/workspaces/${encodeURIComponent(workspaceSlug)}/field-uploads`, {
+        method: "POST",
+        body: formData,
+      });
+      const payload = (await response.json().catch(() => ({}))) as { publicUrl?: string; error?: string };
+      if (!response.ok || !payload.publicUrl) {
+        throw new Error(payload.error ?? "No se pudo subir la imagen.");
+      }
+      onChange(payload.publicUrl);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "No se pudo subir la imagen.");
+    } finally {
+      setIsUploading(false);
+    }
+  }
+
+  return (
+    <div style={imageUploadWrapStyle}>
+      {value ? (
+        <div style={imagePreviewRowStyle}>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={value} alt="" style={imagePreviewStyle} />
+          <Button variant="ghost" compact onClick={() => onChange("")} disabled={disabled || isUploading}>
+            Quitar
+          </Button>
+        </div>
+      ) : null}
+      <label style={imageUploadButtonStyle}>
+        <ImagePlus size={14} aria-hidden />
+        <span>{isUploading ? "Subiendo..." : value ? "Cambiar foto" : "Subir foto"}</span>
+        <input
+          type="file"
+          accept="image/*"
+          disabled={disabled || isUploading}
+          onChange={(event) => {
+            const file = event.currentTarget.files?.[0];
+            event.currentTarget.value = "";
+            if (file) void upload(file);
+          }}
+          style={{ display: "none" }}
+        />
+      </label>
+      {error ? <span style={imageUploadErrorStyle}>{error}</span> : null}
+    </div>
+  );
+}
+
 const pageRootStyle: CSSProperties = {
   display: "flex",
   flexDirection: "column",
@@ -1087,6 +1173,48 @@ const modalFieldLabelStyle: CSSProperties = {
   textTransform: "uppercase",
   letterSpacing: "0.04em",
   color: "var(--workspace-muted)",
+};
+
+const imageUploadWrapStyle: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 8,
+};
+
+const imagePreviewRowStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 10,
+};
+
+const imagePreviewStyle: CSSProperties = {
+  width: 84,
+  height: 62,
+  objectFit: "cover",
+  borderRadius: 6,
+  border: "1px solid var(--workspace-border)",
+  background: "#f3f4f6",
+};
+
+const imageUploadButtonStyle: CSSProperties = {
+  minHeight: 38,
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: 8,
+  padding: "0 12px",
+  border: "1px dashed var(--workspace-border)",
+  borderRadius: "var(--radius-md)",
+  background: "var(--workspace-surface-muted, #f8f9fc)",
+  color: "var(--workspace-text)",
+  fontSize: 13,
+  fontWeight: 600,
+  cursor: "pointer",
+};
+
+const imageUploadErrorStyle: CSSProperties = {
+  fontSize: 12,
+  color: "#b91c1c",
 };
 
 const dangerZoneStyle: CSSProperties = {

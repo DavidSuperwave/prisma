@@ -11,6 +11,7 @@ import {
 
 const ACCESS_TOKEN_COOKIE = "prisma-access-token";
 const REFRESH_TOKEN_COOKIE = "prisma-refresh-token";
+const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
 
 export type AuthenticatedAppUser = {
   id: string;
@@ -120,7 +121,7 @@ export async function createAuthSession(email: string, password: string) {
     sameSite: "lax",
     secure,
     path: "/",
-    maxAge: data.session.expires_in ?? 60 * 60,
+    maxAge: SESSION_MAX_AGE_SECONDS,
   });
 
   cookieStore.set(REFRESH_TOKEN_COOKIE, data.session.refresh_token, {
@@ -128,7 +129,7 @@ export async function createAuthSession(email: string, password: string) {
     sameSite: "lax",
     secure,
     path: "/",
-    maxAge: 60 * 60 * 24 * 30,
+    maxAge: SESSION_MAX_AGE_SECONDS,
   });
 
   return data.user;

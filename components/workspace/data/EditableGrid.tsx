@@ -118,6 +118,7 @@ export function EditableGrid({
 
   function startEdit(record: PrismaWorkspaceRecord, field: PrismaWorkspaceField) {
     if (!canWrite) return;
+    if (field.type === "image") return;
     const rawValue = getRecordFieldValue(record, field.key);
     setEditingCell({ recordId: record.id, fieldKey: field.key });
     if (field.type === "boolean") {
@@ -385,6 +386,26 @@ function CellDisplay({
 }) {
   if (field.type === "boolean") {
     return <span>{Boolean(value) ? "Sí" : "No"}</span>;
+  }
+  if (field.type === "image") {
+    const src = value === null || value === undefined ? "" : String(value);
+    if (!src) return <span style={emptyCellStyle}>—</span>;
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        src={src}
+        alt=""
+        style={{
+          width: 56,
+          height: 42,
+          objectFit: "cover",
+          borderRadius: 6,
+          border: "1px solid var(--workspace-border)",
+          background: "#f3f4f6",
+          display: "block",
+        }}
+      />
+    );
   }
   if ((field.type === "status" || field.type === "select") && value) {
     return <span style={statusPillStyle}>{formatStatusLabel(String(value))}</span>;

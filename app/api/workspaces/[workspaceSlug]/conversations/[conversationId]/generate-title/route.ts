@@ -52,28 +52,47 @@ async function loadRecentMessages(workspaceId: string, conversationId: string) {
   return ((data ?? []) as ConversationMessageRow[]).reverse();
 }
 
-function extractOpenRouterText(payload: unknown) {
-  const choice = Array.isArray((payload as { choices?: unknown[] })?.choices)
-    ? (payload as { choices: unknown[] }).choices[0]
-    : null;
-  const content = (choice as { message?: { content?: unknown } } | null)?.message?.content;
-  if (typeof content === "string") {
-    return content;
+function extractHermesText(payload: unknown) {
+  const parsed = payload as Record<string, unknown>;
+  if (typeof parsed.output_text === "string" && parsed.output_text.trim().length > 0) {
+    return parsed.output_text;
   }
-  if (!Array.isArray(content)) {
-    return "";
+
+  const output = parsed.output;
+  if (Array.isArray(output)) {
+    for (const item of output) {
+      if (!item || typeof item !== "object") continue;
+      const content = (item as { content?: unknown[] }).content;
+      if (!Array.isArray(content)) continue;
+      for (const part of content) {
+        if (!part || typeof part !== "object") continue;
+        const text = (part as { text?: unknown }).text;
+        if (typeof text === "string" && text.trim().length > 0) {
+          return text;
+        }
+      }
+    }
   }
-  return content
-    .map((chunk) => {
-      if (typeof chunk === "string") {
-        return chunk;
-      }
-      if (chunk && typeof chunk === "object" && "text" in chunk && typeof chunk.text === "string") {
-        return chunk.text;
-      }
-      return "";
-    })
-    .join(" ");
+
+  const choices = parsed.choices;
+  if (Array.isArray(choices)) {
+    const choice = choices[0] as { message?: { content?: unknown } } | undefined;
+    const content = choice?.message?.content;
+    if (typeof content === "string") return content;
+    if (Array.isArray(content)) {
+      return content
+        .map((chunk) => {
+          if (typeof chunk === "string") return chunk;
+          if (chunk && typeof chunk === "object" && "text" in chunk && typeof chunk.text === "string") {
+            return chunk.text;
+          }
+          return "";
+        })
+        .join(" ");
+    }
+  }
+
+  return "";
 }
 
 function normalizeTitle(rawTitle: string) {
@@ -94,14 +113,19 @@ function buildTranscript(messages: ConversationMessageRow[]) {
     .join("\n");
 }
 
-async function generateTitleWithOpenRouter(transcript: string) {
-  const apiKey = process.env.OPENROUTER_API_KEY?.trim();
-  const model = process.env.OPENROUTER_MODEL ?? "openai/gpt-4o-mini";
-  if (!apiKey) {
-    return { error: "OPENROUTER_API_KEY is missing for automatic titles." as const };
+async function generateTitleWithHermes(transcript: string) {
+  const baseUrl = process.env.HERMES_API_BASE_URL?.trim();
+  const apiKey = process.env.HERMES_API_KEY?.trim();
+  const model =
+    process.env.HERMES_LIGHT_MODEL?.trim() ||
+    process.env.HERMES_MODEL?.trim() ||
+    process.env.HERMES_DEFAULT_MODEL?.trim() ||
+    "hermes-agent";
+  if (!baseUrl || !apiKey) {
+    return { error: "Hermes runtime is required for automatic titles." as const };
   }
 
-  const upstream = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+  const upstream = await fetch(`${baseUrl.replace(/\/$/, "")}/v1/responses`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -110,33 +134,27 @@ async function generateTitleWithOpenRouter(transcript: string) {
     body: JSON.stringify({
       model,
       stream: false,
-      temperature: 0.2,
-      max_tokens: 24,
-      messages: [
-        {
-          role: "system",
-          content:
-            "Eres un asistente que resume conversaciones en un titulo corto. Devuelve una sola linea, clara, en espanol neutro, sin comillas y de maximo 8 palabras.",
-        },
-        {
-          role: "user",
-          content: `Genera un titulo para esta conversacion:\n${transcript}`,
-        },
-      ],
+      store: false,
+      max_output_tokens: 48,
+      input: [
+        "Eres un asistente que resume conversaciones en un titulo corto.",
+        "Devuelve una sola linea, clara, en espanol neutro, sin comillas y de maximo 8 palabras.",
+        `Genera un titulo para esta conversacion:\n${transcript}`,
+      ].join("\n"),
     }),
   });
 
   if (!upstream.ok) {
     const errorText = await upstream.text();
     return {
-      error: errorText || "Unable to reach OpenRouter for title generation." as const,
+      error: errorText || "Unable to reach Hermes for title generation." as const,
     };
   }
 
   const payload = (await upstream.json().catch(() => ({}))) as unknown;
-  const title = normalizeTitle(extractOpenRouterText(payload));
+  const title = normalizeTitle(extractHermesText(payload));
   if (!title) {
-    return { error: "OpenRouter did not return a valid conversation title." as const };
+    return { error: "Hermes did not return a valid conversation title." as const };
   }
   return { title };
 }
@@ -167,7 +185,7 @@ export async function POST(_request: Request, context: Context) {
       return Response.json({ error: "Not enough conversation content to generate a title." }, { status: 400 });
     }
 
-    const generated = await generateTitleWithOpenRouter(transcript);
+    const generated = await generateTitleWithHermes(transcript);
     if ("error" in generated) {
       return Response.json({ error: generated.error }, { status: 503 });
     }

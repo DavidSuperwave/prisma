@@ -1,0 +1,18 @@
+TypeError: fetch failed
+    at async createAuthSession (lib\auth.ts:106:27)
+    at async loginAction (app\login\actions.ts:17:5)
+  104 | export async function createAuthSession(email: string, password: string) {
+  105 |   const supabase = requireSupabaseAdmin();
+> 106 |   const { data, error } = await supabase.auth.signInWithPassword({
+      |                           ^
+  107 |     email,
+  108 |     password,
+  109 |   }); {
+  [cause]: Error: getaddrinfo ENOTFOUND ahxnjhqnmudixefxbxdg.supabase.co
+      at ignore-listed frames {
+    errno: -3008,
+    code: 'ENOTFOUND',
+    syscall: 'getaddrinfo',
+    hostname: 'ahxnjhqnmudixefxbxdg.supabase.co'
+  }
+}

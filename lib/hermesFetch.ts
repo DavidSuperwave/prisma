@@ -12,6 +12,7 @@
  */
 
 type AnyDispatcher = unknown;
+type DynamicImport = (specifier: string) => Promise<unknown>;
 
 let dispatcherPromise: Promise<AnyDispatcher | null> | null = null;
 
@@ -19,11 +20,13 @@ async function getDispatcher(): Promise<AnyDispatcher | null> {
   if (dispatcherPromise) return dispatcherPromise;
   dispatcherPromise = (async () => {
     try {
-      // `undici` is bundled with Node 18+. Use a variable specifier so the
-      // edge bundler does not attempt to statically resolve the module, and
-      // so we do not need @types/undici in devDependencies.
-      const specifier = "undici";
-      const mod: unknown = await import(specifier);
+      // Load `undici` only at runtime. Turbopack statically resolves direct
+      // import("undici") and can fail in environments where it is absent.
+      const runtimeImport = Function(
+        "specifier",
+        "return import(specifier);",
+      ) as unknown as DynamicImport;
+      const mod: unknown = await runtimeImport("undici");
       const AgentCtor = (mod as { Agent?: new (options: unknown) => AnyDispatcher }).Agent;
       if (!AgentCtor) return null;
       return new AgentCtor({

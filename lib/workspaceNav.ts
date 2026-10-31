@@ -131,8 +131,8 @@ export function buildWorkspaceNavItems(
       id: "inbox",
       label: "Inbox",
       href: `/workspaces/${workspaceSlug}?tab=inbox`,
-      meta: "Proximamente",
-      disabled: true,
+      meta: "Email y WhatsApp",
+      active: selectedTab === "inbox",
     },
     {
       id: "crm",

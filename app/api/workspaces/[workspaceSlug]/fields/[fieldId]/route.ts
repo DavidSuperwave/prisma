@@ -1,4 +1,6 @@
 import { getCurrentAppUser } from "@/lib/auth";
+import { normalizeExtractionConstraint } from "@/lib/fieldExtraction";
+import { buildFieldPropertyBuilder, parseFieldOptionValues } from "@/lib/fieldPropertyBuilder";
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
 import { listWorkspaceMembershipsForUser } from "@/lib/workspaceStore";
 
@@ -15,6 +17,15 @@ type UpdateFieldRequest = {
   options?: Record<string, unknown>;
   defaultValue?: string | null;
   sortOrder?: number;
+  extractionConfig?: {
+    sourceRef?: string | null;
+    promptTemplate?: string;
+    validationRule?: Record<string, unknown>;
+    confidenceThreshold?: number;
+    enabled?: boolean;
+    version?: number;
+    metadata?: Record<string, unknown>;
+  } | null;
 };
 
 function requireSupabaseAdmin() {
@@ -25,7 +36,27 @@ function requireSupabaseAdmin() {
   return supabase;
 }
 
-function mapFieldRow(row: Record<string, unknown>) {
+function mapFieldRow(
+  row: Record<string, unknown>,
+  extractionConfig?: Record<string, unknown> | null,
+) {
+  const options = (row.options as Record<string, unknown>) ?? {};
+  const normalizedConstraint =
+    extractionConfig && typeof extractionConfig === "object" && !Array.isArray(extractionConfig)
+      ? {
+          ...extractionConfig,
+          metadata:
+            extractionConfig.metadata && typeof extractionConfig.metadata === "object" && !Array.isArray(extractionConfig.metadata)
+              ? extractionConfig.metadata
+              : {},
+          validationRule:
+            extractionConfig.validationRule &&
+            typeof extractionConfig.validationRule === "object" &&
+            !Array.isArray(extractionConfig.validationRule)
+              ? extractionConfig.validationRule
+              : {},
+        }
+      : null;
   return {
     id: String(row.id),
     workspaceId: String(row.workspace_id),
@@ -34,10 +65,17 @@ function mapFieldRow(row: Record<string, unknown>) {
     key: String(row.key),
     type: String(row.type),
     required: Boolean(row.required),
-    options: (row.options as Record<string, unknown>) ?? {},
+    options,
     defaultValue: row.default_value ? String(row.default_value) : null,
     sortOrder: Number(row.sort_order ?? 0),
     isLocked: Boolean(row.is_locked),
+    propertyBuilder: buildFieldPropertyBuilder({
+      type: String(row.type),
+      required: Boolean(row.required),
+      options,
+      extractionValidationRule: (normalizedConstraint?.validationRule as Record<string, unknown> | undefined) ?? {},
+    }),
+    extractionConfig: normalizedConstraint,
   };
 }
 
@@ -48,7 +86,7 @@ async function loadField(
 ) {
   const preferred = await supabase
     .from("workspace_fields")
-    .select("id, key, name, is_locked")
+    .select("id, key, name, type, is_locked")
     .eq("id", fieldId)
     .eq("workspace_id", workspaceId)
     .maybeSingle();
@@ -63,7 +101,7 @@ async function loadField(
 
   const fallback = await supabase
     .from("workspace_fields")
-    .select("id, key, name")
+    .select("id, key, name, type")
     .eq("id", fieldId)
     .eq("workspace_id", workspaceId)
     .maybeSingle();
@@ -90,7 +128,7 @@ async function authorizeWorkspaceAdmin(workspaceSlug: string) {
     return { error: Response.json({ error: "Only workspace admins can manage fields." }, { status: 403 }) };
   }
 
-  return { membership };
+  return { user, membership };
 }
 
 export async function PATCH(request: Request, context: Context) {
@@ -116,11 +154,14 @@ export async function PATCH(request: Request, context: Context) {
     if (payload.required !== undefined) {
       update.required = Boolean(payload.required);
     }
-    if (payload.options !== undefined) {
-      if (!payload.options || typeof payload.options !== "object" || Array.isArray(payload.options)) {
-        return Response.json({ error: "options must be an object." }, { status: 400 });
-      }
-      update.options = payload.options;
+    const rawOptions =
+      payload.options === undefined
+        ? undefined
+        : payload.options && typeof payload.options === "object" && !Array.isArray(payload.options)
+          ? (payload.options as Record<string, unknown>)
+          : null;
+    if (payload.options !== undefined && rawOptions === null) {
+      return Response.json({ error: "options must be an object." }, { status: 400 });
     }
     if (payload.defaultValue !== undefined) {
       if (payload.defaultValue !== null && typeof payload.defaultValue !== "string") {
@@ -135,10 +176,21 @@ export async function PATCH(request: Request, context: Context) {
       }
       update.sort_order = parsedSortOrder;
     }
+    const extractionConfig =
+      payload.extractionConfig === null
+        ? null
+        : payload.extractionConfig &&
+            typeof payload.extractionConfig === "object" &&
+            !Array.isArray(payload.extractionConfig)
+          ? payload.extractionConfig
+          : undefined;
 
-    if (Object.keys(update).length === 1) {
+    if (Object.keys(update).length === 1 && extractionConfig === undefined) {
       return Response.json(
-        { error: "At least one update field is required: name, required, options, defaultValue, sortOrder." },
+        {
+          error:
+            "At least one update field is required: name, required, options, defaultValue, sortOrder, or extractionConfig.",
+        },
         { status: 400 },
       );
     }
@@ -167,6 +219,14 @@ export async function PATCH(request: Request, context: Context) {
         );
       }
     }
+    if (rawOptions) {
+      update.options = {
+        ...rawOptions,
+        ...((existing.data?.type === "select" || existing.data?.type === "status")
+          ? { values: parseFieldOptionValues(rawOptions) }
+          : {}),
+      };
+    }
 
     const { data, error } = await supabase
       .from("workspace_fields")
@@ -183,7 +243,110 @@ export async function PATCH(request: Request, context: Context) {
       return Response.json({ error: "Field not found." }, { status: 404 });
     }
 
-    return Response.json({ field: mapFieldRow(data as Record<string, unknown>) });
+    let persistedExtractionConfig: Record<string, unknown> | null = null;
+    if (extractionConfig !== undefined) {
+      if (extractionConfig === null) {
+        const { error: deleteConfigError } = await supabase
+          .from("field_extraction_configs")
+          .delete()
+          .eq("workspace_id", authorization.membership.workspaceId)
+          .eq("field_id", fieldId);
+        if (deleteConfigError && deleteConfigError.code !== "42P01") {
+          throw new Error(deleteConfigError.message);
+        }
+      } else {
+        const confidenceThreshold = Number(extractionConfig.confidenceThreshold ?? 0.7);
+        const normalizedConstraint = normalizeExtractionConstraint({
+          fieldName: String((data as { name: string }).name),
+          fieldType: String((data as { type: string }).type),
+          fieldOptions: ((data as { options?: Record<string, unknown> }).options ?? {}) as Record<string, unknown>,
+          validationRule:
+            extractionConfig.validationRule &&
+            typeof extractionConfig.validationRule === "object" &&
+            !Array.isArray(extractionConfig.validationRule)
+              ? extractionConfig.validationRule
+              : {},
+          metadata:
+            extractionConfig.metadata &&
+            typeof extractionConfig.metadata === "object" &&
+            !Array.isArray(extractionConfig.metadata)
+              ? extractionConfig.metadata
+              : {},
+        });
+        const { data: configRow, error: upsertConfigError } = await supabase
+          .from("field_extraction_configs")
+          .upsert(
+            {
+              workspace_id: authorization.membership.workspaceId,
+              object_id: String((data as { object_id: string }).object_id),
+              field_id: fieldId,
+              source_ref:
+                typeof extractionConfig.sourceRef === "string" && extractionConfig.sourceRef.trim().length > 0
+                  ? extractionConfig.sourceRef.trim()
+                  : null,
+              prompt_template:
+                typeof extractionConfig.promptTemplate === "string" ? extractionConfig.promptTemplate : "",
+              validation_rule: normalizedConstraint.validationRule,
+              confidence_threshold:
+                Number.isFinite(confidenceThreshold) && confidenceThreshold >= 0 && confidenceThreshold <= 1
+                  ? confidenceThreshold
+                  : 0.7,
+              enabled: extractionConfig.enabled !== false,
+              version:
+                Number.isInteger(extractionConfig.version) && Number(extractionConfig.version) > 0
+                  ? Number(extractionConfig.version)
+                  : 1,
+              metadata: normalizedConstraint.metadata,
+              updated_by: authorization.user.id,
+            },
+            { onConflict: "workspace_id,field_id" },
+          )
+          .select(
+            "id, source_ref, prompt_template, validation_rule, confidence_threshold, enabled, version, metadata, updated_at",
+          )
+          .maybeSingle();
+        if (upsertConfigError && upsertConfigError.code !== "42P01") {
+          throw new Error(upsertConfigError.message);
+        }
+        if (configRow) {
+          persistedExtractionConfig = {
+            id: String(configRow.id),
+            sourceRef: configRow.source_ref ? String(configRow.source_ref) : null,
+            promptTemplate: String(configRow.prompt_template ?? ""),
+            validationRule: (configRow.validation_rule as Record<string, unknown>) ?? {},
+            confidenceThreshold: Number(configRow.confidence_threshold ?? 0.7),
+            enabled: Boolean(configRow.enabled),
+            version: Number(configRow.version ?? 1),
+            metadata: (configRow.metadata as Record<string, unknown>) ?? {},
+            updatedAt: String(configRow.updated_at),
+          };
+        }
+      }
+    } else {
+      const { data: configRow } = await supabase
+        .from("field_extraction_configs")
+        .select(
+          "id, source_ref, prompt_template, validation_rule, confidence_threshold, enabled, version, metadata, updated_at",
+        )
+        .eq("workspace_id", authorization.membership.workspaceId)
+        .eq("field_id", fieldId)
+        .maybeSingle();
+      if (configRow) {
+        persistedExtractionConfig = {
+          id: String(configRow.id),
+          sourceRef: configRow.source_ref ? String(configRow.source_ref) : null,
+          promptTemplate: String(configRow.prompt_template ?? ""),
+          validationRule: (configRow.validation_rule as Record<string, unknown>) ?? {},
+          confidenceThreshold: Number(configRow.confidence_threshold ?? 0.7),
+          enabled: Boolean(configRow.enabled),
+          version: Number(configRow.version ?? 1),
+          metadata: (configRow.metadata as Record<string, unknown>) ?? {},
+          updatedAt: String(configRow.updated_at),
+        };
+      }
+    }
+
+    return Response.json({ field: mapFieldRow(data as Record<string, unknown>, persistedExtractionConfig) });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to update field.";
     return Response.json({ error: message }, { status: 400 });

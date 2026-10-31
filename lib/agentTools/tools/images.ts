@@ -62,7 +62,7 @@ registerTool({
 registerTool({
   name: "images.generate",
   description:
-    "Generate images with Gemini nano-banana-pro. Supports text-to-image and image-to-image when `refs` contains URLs or data: URIs. Returns candidates the user can pick from.",
+    "Generate images through Hermes runtime (image_generate). Supports text-to-image and image-to-image when `refs` contains URLs or data: URIs. Returns candidates the user can pick from.",
   args: {
     prompt: { type: "string", required: true },
     refs: { type: "array", description: "Optional reference image URLs (HTTP(S) or data:). Enables img2img." },

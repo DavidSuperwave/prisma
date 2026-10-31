@@ -1,0 +1,82 @@
+{
+  "client": {
+    "name": "GB Automotriz",
+    "workspaceSlug": "gb-automotriz-demo",
+    "primaryColor": "#0F766E",
+    "landingSiteSubdomain": "gb-automotriz-demo",
+    "githubRepository": "https://github.com/jorgeaz2001-lgtm/gb-automotriz-web",
+    "vertical": "automotive"
+  },
+  "vehicles": [
+    {
+      "stock_number": "GB-1001",
+      "year": 2024,
+      "make": "Toyota",
+      "model": "Corolla",
+      "trim": "LE",
+      "vin": "JTDEPRAE4RJ100001",
+      "price": 345000,
+      "currency": "MXN",
+      "mileage": 8200,
+      "status": "available",
+      "exterior_color": "Blanco",
+      "website_url": "https://gb-automotriz-demo.vercel.app/inventory/gb-1001"
+    },
+    {
+      "stock_number": "GB-1002",
+      "year": 2023,
+      "make": "Honda",
+      "model": "CR-V",
+      "trim": "Touring",
+      "vin": "2HKRS6H93PH100002",
+      "price": 575000,
+      "currency": "MXN",
+      "mileage": 18400,
+      "status": "available",
+      "exterior_color": "Gris",
+      "website_url": "https://gb-automotriz-demo.vercel.app/inventory/gb-1002"
+    },
+    {
+      "stock_number": "GB-1003",
+      "year": 2022,
+      "make": "Mazda",
+      "model": "CX-5",
+      "trim": "i Grand Touring",
+      "vin": "JM3KFBDM4N1100003",
+      "price": 489000,
+      "currency": "MXN",
+      "mileage": 29100,
+      "status": "reserved",
+      "exterior_color": "Rojo",
+      "website_url": "https://gb-automotriz-demo.vercel.app/inventory/gb-1003"
+    },
+    {
+      "stock_number": "GB-1004",
+      "year": 2021,
+      "make": "Volkswagen",
+      "model": "Jetta",
+      "trim": "R-Line",
+      "vin": "3VWCB7BU5MM100004",
+      "price": 329000,
+      "currency": "MXN",
+      "mileage": 36750,
+      "status": "available",
+      "exterior_color": "Negro",
+      "website_url": "https://gb-automotriz-demo.vercel.app/inventory/gb-1004"
+    },
+    {
+      "stock_number": "GB-1005",
+      "year": 2020,
+      "make": "Ford",
+      "model": "Lobo",
+      "trim": "XLT",
+      "vin": "1FTEW1E50LFA00005",
+      "price": 625000,
+      "currency": "MXN",
+      "mileage": 55200,
+      "status": "available",
+      "exterior_color": "Azul",
+      "website_url": "https://gb-automotriz-demo.vercel.app/inventory/gb-1005"
+    }
+  ]
+}

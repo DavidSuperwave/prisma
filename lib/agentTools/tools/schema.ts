@@ -165,6 +165,28 @@ registerTool({
 });
 
 registerTool({
+  name: "schema.create_object",
+  description:
+    "Create a workspace database/object for an operational workflow. Use this before adding fields when the needed object does not exist. Admin-only via the workspace API.",
+  args: {
+    name: { type: "string", required: true },
+    singularName: { type: "string" },
+    pluralName: { type: "string" },
+    description: { type: "string" },
+    icon: { type: "string" },
+    slug: { type: "string", description: "Optional stable slug; usually omit so Prisma generates one." },
+  },
+  handler: async (args, ctx) => {
+    const res = await fetchInternalJson(ctx, `/api/workspaces/${slug(ctx)}/objects`, {
+      method: "POST",
+      body: JSON.stringify(args),
+    });
+    if (!res.ok) return { ok: false, error: res.error ?? "Failed", status: res.status };
+    return { ok: true, data: res.data as Record<string, unknown> };
+  },
+});
+
+registerTool({
   name: "schema.add_field",
   description: "Add a custom field to a workspace object.",
   args: {
@@ -181,9 +203,23 @@ registerTool({
     isRequired: { type: "boolean" },
   },
   handler: async (args, ctx) => {
+    const options =
+      args.config && typeof args.config === "object" && !Array.isArray(args.config)
+        ? { ...(args.config as Record<string, unknown>) }
+        : {};
+    if (Array.isArray(args.options)) {
+      options.values = args.options.map((entry) => String(entry ?? "").trim()).filter(Boolean);
+    }
     const res = await fetchInternalJson(ctx, `/api/workspaces/${slug(ctx)}/fields`, {
       method: "POST",
-      body: JSON.stringify(args),
+      body: JSON.stringify({
+        objectId: args.objectId,
+        key: args.key,
+        name: args.label,
+        type: args.type,
+        required: Boolean(args.isRequired),
+        options,
+      }),
     });
     if (!res.ok) return { ok: false, error: res.error ?? "Failed", status: res.status };
     return { ok: true, data: res.data as Record<string, unknown> };

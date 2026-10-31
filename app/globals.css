@@ -1214,6 +1214,11 @@ button {
   transition: border-color 120ms ease, box-shadow 120ms ease;
 }
 
+.workspace-app .ws-input::placeholder {
+  color: var(--workspace-muted);
+  opacity: 1;
+}
+
 .ws-input:focus {
   border-color: var(--workspace-accent);
   box-shadow: 0 0 0 3px var(--workspace-accent-soft);

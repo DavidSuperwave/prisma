@@ -1,3 +1,5 @@
+import { normalizeExtractionConstraint } from "@/lib/fieldExtraction";
+import { buildFieldPropertyBuilder, type FieldPropertyBuilder } from "@/lib/fieldPropertyBuilder";
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
 
 export type PrismaWorkspace = {
@@ -41,6 +43,24 @@ export type PrismaWorkspaceField = {
   defaultValue: string | null;
   sortOrder: number;
   isLocked: boolean;
+  propertyBuilder?: FieldPropertyBuilder;
+  extractionConfig?: PrismaFieldExtractionConfig | null;
+};
+
+export type PrismaFieldExtractionConfig = {
+  id: string;
+  workspaceId: string;
+  objectId: string;
+  fieldId: string;
+  sourceRef: string | null;
+  promptTemplate: string;
+  validationRule: Record<string, unknown>;
+  confidenceThreshold: number;
+  enabled: boolean;
+  version: number;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type PrismaPipeline = {
@@ -160,12 +180,16 @@ export type PrismaWorkspaceAgent = {
   status: "active" | "paused" | "deploying" | "error";
   soulMd: string | null;
   skills: string[];
+  mcpToolsInclude: string[];
+  skillsScope: string[];
+  modelOverrides: Record<string, unknown>;
   knowledgeScope: Record<string, unknown>;
   cronJobs: unknown[];
   channelConfig: Record<string, unknown>;
   memoryLimitMb: number;
   cpuLimit: number;
   createdAt: string;
+  updatedAt: string;
 };
 
 export type PrismaWorkspaceActivity = {
@@ -360,9 +384,48 @@ function mapObject(row: Record<string, unknown>): PrismaWorkspaceObject {
   };
 }
 
-function mapField(row: Record<string, unknown>): PrismaWorkspaceField {
+function mapExtractionConfig(row: Record<string, unknown>): PrismaFieldExtractionConfig {
   return {
     id: String(row.id),
+    workspaceId: String(row.workspace_id),
+    objectId: String(row.object_id),
+    fieldId: String(row.field_id),
+    sourceRef: row.source_ref ? String(row.source_ref) : null,
+    promptTemplate: String(row.prompt_template ?? ""),
+    validationRule: (row.validation_rule as Record<string, unknown>) ?? {},
+    confidenceThreshold: Number(row.confidence_threshold ?? 0.7),
+    enabled: Boolean(row.enabled),
+    version: Number(row.version ?? 1),
+    metadata: (row.metadata as Record<string, unknown>) ?? {},
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+function mapField(
+  row: Record<string, unknown>,
+  extractionConfigByFieldId?: Map<string, PrismaFieldExtractionConfig>,
+): PrismaWorkspaceField {
+  const fieldId = String(row.id);
+  const rawExtractionConfig = extractionConfigByFieldId?.get(fieldId) ?? null;
+  const normalizedExtractionConfig = rawExtractionConfig
+    ? (() => {
+        const normalizedConstraint = normalizeExtractionConstraint({
+          fieldName: String(row.name),
+          fieldType: String(row.type),
+          fieldOptions: (row.options as Record<string, unknown>) ?? {},
+          validationRule: rawExtractionConfig.validationRule,
+          metadata: rawExtractionConfig.metadata,
+        });
+        return {
+          ...rawExtractionConfig,
+          validationRule: normalizedConstraint.validationRule,
+          metadata: normalizedConstraint.metadata,
+        };
+      })()
+    : null;
+  return {
+    id: fieldId,
     workspaceId: String(row.workspace_id),
     objectId: String(row.object_id),
     name: String(row.name),
@@ -373,6 +436,13 @@ function mapField(row: Record<string, unknown>): PrismaWorkspaceField {
     defaultValue: row.default_value ? String(row.default_value) : null,
     sortOrder: Number(row.sort_order ?? 0),
     isLocked: Boolean(row.is_locked),
+    propertyBuilder: buildFieldPropertyBuilder({
+      type: String(row.type),
+      required: Boolean(row.required),
+      options: (row.options as Record<string, unknown>) ?? {},
+      extractionValidationRule: normalizedExtractionConfig?.validationRule ?? {},
+    }),
+    extractionConfig: normalizedExtractionConfig,
   };
 }
 
@@ -481,6 +551,25 @@ function mapRecord(row: Record<string, unknown>): PrismaWorkspaceRecord {
 }
 
 function mapAgent(row: Record<string, unknown>): PrismaWorkspaceAgent {
+  const knowledgeScope = (row.knowledge_scope as Record<string, unknown>) ?? {};
+  const mcpToolsInclude = Array.isArray(row.mcp_tools_include)
+    ? (row.mcp_tools_include as string[])
+    : Array.isArray(knowledgeScope.mcp_tools_include)
+      ? (knowledgeScope.mcp_tools_include as string[])
+      : [];
+  const skillsScope = Array.isArray(row.skills_scope)
+    ? (row.skills_scope as string[])
+    : Array.isArray(knowledgeScope.skills_scope)
+      ? (knowledgeScope.skills_scope as string[])
+      : [];
+  const modelOverridesRaw =
+    row.model_overrides && typeof row.model_overrides === "object" && !Array.isArray(row.model_overrides)
+      ? (row.model_overrides as Record<string, unknown>)
+      : knowledgeScope.model_overrides &&
+          typeof knowledgeScope.model_overrides === "object" &&
+          !Array.isArray(knowledgeScope.model_overrides)
+        ? (knowledgeScope.model_overrides as Record<string, unknown>)
+        : {};
   return {
     id: String(row.id),
     workspaceId: String(row.workspace_id),
@@ -493,12 +582,16 @@ function mapAgent(row: Record<string, unknown>): PrismaWorkspaceAgent {
     status: row.status as PrismaWorkspaceAgent["status"],
     soulMd: row.soul_md ? String(row.soul_md) : null,
     skills: Array.isArray(row.skills) ? (row.skills as string[]) : [],
-    knowledgeScope: (row.knowledge_scope as Record<string, unknown>) ?? {},
+    mcpToolsInclude,
+    skillsScope,
+    modelOverrides: modelOverridesRaw,
+    knowledgeScope,
     cronJobs: Array.isArray(row.cron_jobs) ? (row.cron_jobs as unknown[]) : [],
     channelConfig: (row.channel_config as Record<string, unknown>) ?? {},
     memoryLimitMb: Number(row.memory_limit_mb ?? 0),
     cpuLimit: Number(row.cpu_limit ?? 0),
     createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at ?? row.created_at),
   };
 }
 
@@ -527,6 +620,18 @@ function mapPlatformStateAgent(row: {
     (row.toolsConfig?.knowledgeScope as Record<string, unknown> | undefined) ??
     {};
   const cronJobs = Array.isArray(row.integrationConfig?.cronJobs) ? (row.integrationConfig?.cronJobs as unknown[]) : [];
+  const mcpToolsInclude = Array.isArray(row.integrationConfig?.mcpToolsInclude)
+    ? (row.integrationConfig?.mcpToolsInclude as string[])
+    : [];
+  const skillsScope = Array.isArray(row.integrationConfig?.skillsScope)
+    ? (row.integrationConfig?.skillsScope as string[])
+    : [];
+  const modelOverrides =
+    row.integrationConfig?.modelOverrides &&
+    typeof row.integrationConfig.modelOverrides === "object" &&
+    !Array.isArray(row.integrationConfig.modelOverrides)
+      ? (row.integrationConfig.modelOverrides as Record<string, unknown>)
+      : {};
 
   return {
     id: row.id,
@@ -545,12 +650,16 @@ function mapPlatformStateAgent(row: {
     status: row.isActive === false ? "paused" : "active",
     soulMd: typeof row.promptPack?.soulMd === "string" ? row.promptPack.soulMd : null,
     skills,
+    mcpToolsInclude,
+    skillsScope,
+    modelOverrides,
     knowledgeScope,
     cronJobs,
     channelConfig: (row.integrationConfig?.channelConfig as Record<string, unknown> | undefined) ?? {},
     memoryLimitMb: 512,
     cpuLimit: 0.5,
     createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
   };
 }
 
@@ -871,6 +980,20 @@ export async function listWorkspaceSummariesForUser(userId: string, isPlatformAd
 }
 
 /**
+ * Workspaces backed by real `workspace_members` rows only (no platform-admin
+ * expansion to all tenants). Use for `/workspaces` auto-redirect and chooser
+ * for customer users.
+ */
+export async function listMemberWorkspaceSummariesOnly(userId: string): Promise<PrismaWorkspace[]> {
+  const membershipRows = await listWorkspaceMembershipRows(userId);
+  return membershipRows.map((row) =>
+    mapWorkspace(
+      ((row as Record<string, unknown>).workspaces as Record<string, unknown>) ?? ({} as Record<string, unknown>),
+    ),
+  );
+}
+
+/**
  * Resolve the user's membership for a single workspace (by slug) in a single
  * Postgres round-trip. This is the preferred call for API routes that only
  * care about one workspace — it avoids fetching and materialising the user's
@@ -1013,6 +1136,25 @@ export async function listWorkspaceObjects(workspaceId: string) {
 
 export async function listWorkspaceFields(workspaceId: string) {
   const supabase = requireSupabaseAdmin();
+  const loadExtractionConfigByFieldId = async () => {
+    const { data, error } = await supabase
+      .from("field_extraction_configs")
+      .select(
+        "id, workspace_id, object_id, field_id, source_ref, prompt_template, validation_rule, confidence_threshold, enabled, version, metadata, created_at, updated_at",
+      )
+      .eq("workspace_id", workspaceId);
+    if (error) {
+      if (error.code === "42P01") return new Map<string, PrismaFieldExtractionConfig>();
+      throw new Error(error.message);
+    }
+    const map = new Map<string, PrismaFieldExtractionConfig>();
+    for (const row of data ?? []) {
+      const mapped = mapExtractionConfig(row as Record<string, unknown>);
+      map.set(mapped.fieldId, mapped);
+    }
+    return map;
+  };
+  const extractionConfigByFieldId = await loadExtractionConfigByFieldId();
   const preferredSelect =
     "id, workspace_id, object_id, name, key, type, required, options, default_value, sort_order, is_locked";
   const fallbackSelect = "id, workspace_id, object_id, name, key, type, required, options, default_value, sort_order";
@@ -1024,7 +1166,9 @@ export async function listWorkspaceFields(workspaceId: string) {
     .order("sort_order", { ascending: true });
 
   if (!preferred.error) {
-    return (preferred.data ?? []).map((row) => mapField(row as Record<string, unknown>));
+    return (preferred.data ?? []).map((row) =>
+      mapField(row as Record<string, unknown>, extractionConfigByFieldId),
+    );
   }
 
   if (!preferred.error.message.includes("is_locked")) {
@@ -1041,7 +1185,9 @@ export async function listWorkspaceFields(workspaceId: string) {
     throw new Error(fallback.error.message);
   }
 
-  return (fallback.data ?? []).map((row) => mapField(row as Record<string, unknown>));
+  return (fallback.data ?? []).map((row) =>
+    mapField(row as Record<string, unknown>, extractionConfigByFieldId),
+  );
 }
 
 export async function getCrmObject(workspaceId: string, kind: PrismaCrmKind) {
@@ -1324,7 +1470,7 @@ export async function listWorkspaceAgents(workspaceId: string) {
     const { data, error } = await supabase
       .from("workspace_agents")
       .select(
-        "id, workspace_id, name, type, description, api_endpoint, api_key, container_name, status, soul_md, skills, knowledge_scope, cron_jobs, channel_config, memory_limit_mb, cpu_limit, created_at",
+        "id, workspace_id, name, type, description, api_endpoint, api_key, container_name, status, soul_md, skills, mcp_tools_include, skills_scope, model_overrides, knowledge_scope, cron_jobs, channel_config, memory_limit_mb, cpu_limit, created_at, updated_at",
       )
       .eq("workspace_id", workspaceId)
       .order("created_at", { ascending: true });
@@ -1349,7 +1495,7 @@ export async function getWorkspaceAgent(workspaceId: string, agentId: string) {
   const { data, error } = await supabase
     .from("workspace_agents")
     .select(
-      "id, workspace_id, name, type, description, api_endpoint, api_key, container_name, status, soul_md, skills, knowledge_scope, cron_jobs, channel_config, memory_limit_mb, cpu_limit, created_at",
+      "id, workspace_id, name, type, description, api_endpoint, api_key, container_name, status, soul_md, skills, mcp_tools_include, skills_scope, model_overrides, knowledge_scope, cron_jobs, channel_config, memory_limit_mb, cpu_limit, created_at, updated_at",
     )
     .eq("workspace_id", workspaceId)
     .eq("id", agentId)

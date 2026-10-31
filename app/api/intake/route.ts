@@ -1,15 +1,10 @@
-import { mkdir, writeFile } from 'node:fs/promises'
-import path from 'node:path'
-import { getAssetBucketName, getSupabaseAdmin } from '@/lib/supabaseAdmin'
-import { createIntakeSubmission, type IntakeAsset } from '@/lib/intakeStore'
+import { createIntakeSubmission } from '@/lib/intakeStore'
+import { computeLeadScore } from '@/lib/intake/leadScore'
 import { notifyOps } from '@/lib/opsNotify'
-import { queueProvisioningFromIntake } from '@/lib/platformStore'
+import { getSupabaseAdmin } from '@/lib/supabaseAdmin'
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-const MAX_FILES = 6
-const MAX_FILE_BYTES = 10 * 1024 * 1024
 
 function requiredText(formData: FormData, key: string) {
   const value = formData.get(key)
@@ -28,10 +23,6 @@ function optionalText(formData: FormData, key: string) {
   return trimmed ? trimmed : undefined
 }
 
-function sanitizeStorageName(fileName: string) {
-  return fileName.replace(/[^a-zA-Z0-9._-]/g, '_')
-}
-
 function normalizeUrl(url?: string) {
   if (!url) {
     return undefined
@@ -45,108 +36,102 @@ function normalizeUrl(url?: string) {
   }
 }
 
-async function uploadAssets(intakeId: string, files: File[]) {
-  const assets: IntakeAsset[] = []
-  const supabase = getSupabaseAdmin()
-  const bucketName = getAssetBucketName()
+function normalizeBrandAssets(assets: string[]) {
+  const cleaned = assets.map((asset) => asset.trim()).filter(Boolean)
+  if (cleaned.length === 0) {
+    return ['Ninguno']
+  }
+  if (cleaned.includes('Ninguno')) {
+    return ['Ninguno']
+  }
+  return Array.from(new Set(cleaned))
+}
 
-  for (const file of files) {
-    if (file.size > MAX_FILE_BYTES) {
-      throw new Error(`File too large: ${file.name}. Max size is ${MAX_FILE_BYTES / (1024 * 1024)}MB`)
-    }
-
-    const safeFileName = `${Date.now()}-${sanitizeStorageName(file.name)}`
-    const storagePath = `${intakeId}/${safeFileName}`
-    const fileBuffer = Buffer.from(await file.arrayBuffer())
-
-    if (supabase) {
-      const { error } = await supabase.storage.from(bucketName).upload(storagePath, fileBuffer, {
-        contentType: file.type || 'application/octet-stream',
-        upsert: false,
-      })
-
-      if (error) {
-        throw new Error(`Failed to upload ${file.name}: ${error.message}`)
-      }
-
-      const { data: publicData } = supabase.storage.from(bucketName).getPublicUrl(storagePath)
-      assets.push({
-        fileName: file.name,
-        contentType: file.type || 'application/octet-stream',
-        byteSize: file.size,
-        storagePath,
-        publicUrl: publicData.publicUrl,
-      })
-      continue
-    }
-
-    // Local fallback for environments without Supabase.
-    const localDir = path.join(process.cwd(), 'public', 'intake-assets', intakeId)
-    await mkdir(localDir, { recursive: true })
-    await writeFile(path.join(localDir, safeFileName), fileBuffer)
-    assets.push({
-      fileName: file.name,
-      contentType: file.type || 'application/octet-stream',
-      byteSize: file.size,
-      storagePath: `/intake-assets/${intakeId}/${safeFileName}`,
-      publicUrl: `/intake-assets/${intakeId}/${safeFileName}`,
-    })
+async function maybeCreateIntakeUserShell(email: string, fullName: string) {
+  if (process.env.PRISMA_AUTO_CREATE_USER_ON_INTAKE !== 'true') {
+    return false
   }
 
-  return assets
+  const supabase = getSupabaseAdmin()
+  if (!supabase) {
+    return false
+  }
+
+  const normalizedEmail = email.toLowerCase()
+  const { data, error } = await supabase.auth.admin.generateLink({
+    type: 'magiclink',
+    email: normalizedEmail,
+    options: {
+      data: {
+        source: 'intake',
+        full_name: fullName,
+      },
+    },
+  })
+
+  if (error) {
+    const message = error.message.toLowerCase()
+    if (message.includes('already') || message.includes('exists') || message.includes('registered')) {
+      return false
+    }
+    throw error
+  }
+
+  return Boolean(data)
 }
 
 export async function POST(request: Request) {
   try {
     const formData = await request.formData()
     const intakeId = `intk_${Date.now().toString(36)}_${crypto.randomUUID().slice(0, 8)}`
-    const uploadedFiles = formData
-      .getAll('assets')
-      .filter((entry): entry is File => entry instanceof File && entry.size > 0)
-
-    if (uploadedFiles.length > MAX_FILES) {
-      return Response.json({ error: `Too many files. Max ${MAX_FILES}.` }, { status: 400 })
-    }
-
-    const assets = await uploadAssets(intakeId, uploadedFiles)
-    const submission = await createIntakeSubmission({
-      id: intakeId,
-      businessName: requiredText(formData, 'businessName'),
-      contactName: requiredText(formData, 'contactName'),
-      contactEmail: requiredText(formData, 'contactEmail'),
-      whatsappNumber: requiredText(formData, 'whatsappNumber'),
-      websiteUrl: normalizeUrl(optionalText(formData, 'websiteUrl')),
-      industry: requiredText(formData, 'industry'),
-      primaryColor: optionalText(formData, 'primaryColor'),
-      serviceDescription: requiredText(formData, 'serviceDescription'),
-      toneGuidance: optionalText(formData, 'toneGuidance'),
-      notes: optionalText(formData, 'notes'),
-      socialLinks: {
-        instagram: normalizeUrl(optionalText(formData, 'instagram')),
-        facebook: normalizeUrl(optionalText(formData, 'facebook')),
-        tiktok: normalizeUrl(optionalText(formData, 'tiktok')),
-        linkedin: normalizeUrl(optionalText(formData, 'linkedin')),
-      },
-      assets,
+    const fullName = requiredText(formData, 'full_name')
+    const businessName = requiredText(formData, 'business_name')
+    const websiteUrl = normalizeUrl(optionalText(formData, 'website_url'))
+    const businessLocation = requiredText(formData, 'business_location')
+    const reason = requiredText(formData, 'reason')
+    const email = requiredText(formData, 'email').toLowerCase()
+    const brandAssets = normalizeBrandAssets(
+      formData.getAll('brand_assets').map((entry) => String(entry))
+    )
+    const leadScore = computeLeadScore({
+      websiteUrl,
+      businessLocation,
+      reason,
+      brandAssets,
     })
 
-    await queueProvisioningFromIntake(submission)
+    const submission = await createIntakeSubmission({
+      id: intakeId,
+      fullName,
+      businessName,
+      websiteUrl,
+      businessLocation,
+      reason,
+      brandAssets,
+      email,
+      leadScore,
+      status: 'new',
+    })
+
+    const userShellCreated = await maybeCreateIntakeUserShell(email, fullName)
 
     await notifyOps({
       type: 'intake_submitted',
       message: `Nuevo intake recibido de ${submission.businessName}`,
       metadata: {
         intakeId: submission.id,
-        contactEmail: submission.contactEmail,
-        industry: submission.industry,
-        assets: submission.assets.length,
-        lifecycleStatus: submission.lifecycleStatus,
+        contactEmail: submission.email,
+        location: submission.businessLocation,
+        leadScore: submission.leadScore,
+        status: submission.status,
+        userShellCreated,
       },
     })
 
     return Response.json({
       intakeId: submission.id,
-      status: submission.paymentStatus,
+      status: submission.status,
+      leadScore: submission.leadScore,
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unable to process intake'

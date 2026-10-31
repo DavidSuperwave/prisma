@@ -733,7 +733,7 @@ async function main() {
     container_name: "hermes-m0-copilot",
     api_endpoint: runtimeEndpoint,
     api_key: runtimeApiKey,
-    hermes_version: "v2026.4.1",
+    hermes_version: process.env.HERMES_AGENT_VERSION ?? "v2026.4.30",
     status: "active",
     soul_md:
       "You are the BBC workspace CEO agent. Keep responses operational, concise, and grounded in the workspace state. Prefer next steps over general advice.",
@@ -758,7 +758,7 @@ async function main() {
     container_name: "hermes-bbc-intake-demo",
     api_endpoint: runtimeEndpoint,
     api_key: runtimeApiKey,
-    hermes_version: "v2026.4.1",
+    hermes_version: process.env.HERMES_AGENT_VERSION ?? "v2026.4.30",
     status: "active",
     soul_md:
       "You are the intake agent. Ask concise qualification questions, capture missing information, and stop when a human review is required.",
@@ -786,7 +786,7 @@ async function main() {
     container_name: "hermes-bbc-monitor-demo",
     api_endpoint: runtimeEndpoint,
     api_key: runtimeApiKey,
-    hermes_version: "v2026.4.1",
+    hermes_version: process.env.HERMES_AGENT_VERSION ?? "v2026.4.30",
     status: "active",
     soul_md:
       "You are the receivables monitor. Detect exceptions, summarize risk, and propose next actions without executing them automatically.",

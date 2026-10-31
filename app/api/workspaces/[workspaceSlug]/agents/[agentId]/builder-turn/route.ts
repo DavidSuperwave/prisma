@@ -10,6 +10,86 @@ export const dynamic = "force-dynamic";
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
 import { listWorkspaceMembershipsForUser } from "@/lib/workspaceStore";
 
+type WorkspaceBuilderSummary = {
+  skills: {
+    builtIn: Array<{ slug: string; title: string; enabled: boolean }>;
+    local: Array<{ slug: string; title: string; promoted: boolean }>;
+  };
+  workflows: Array<{ id: string; name: string; enabled: boolean; description: string | null }>;
+  integrations: Array<{ slug: string; provider: string | null; status: string }>;
+};
+
+async function loadWorkspaceBuilderSummary(workspaceId: string): Promise<WorkspaceBuilderSummary> {
+  const supabase = getSupabaseAdmin();
+  if (!supabase) {
+    return { skills: { builtIn: [], local: [] }, workflows: [], integrations: [] };
+  }
+
+  const [{ data: workflowRows }, { data: integrationRows }] = await Promise.all([
+    supabase
+      .from("workspace_workflows")
+      .select("id, name, description, enabled")
+      .eq("workspace_id", workspaceId)
+      .order("updated_at", { ascending: false })
+      .limit(20),
+    supabase
+      .from("workspace_integrations")
+      .select("slug, provider, status")
+      .eq("workspace_id", workspaceId)
+      .order("created_at", { ascending: true })
+      .limit(20),
+  ]);
+
+  let builtIn: Array<{ slug: string; title: string; enabled: boolean }> = [];
+  let local: Array<{ slug: string; title: string; promoted: boolean }> = [];
+  try {
+    const { listPrismaSkillsTap } = await import("@/lib/skillsTap");
+    const { loadWorkspaceSkillsState } = await import("@/lib/hermesHome");
+    const [tap, state] = await Promise.all([
+      listPrismaSkillsTap(),
+      loadWorkspaceSkillsState(workspaceId),
+    ]);
+    const disabled = new Set(state.disabledBuiltIn);
+    const promoted = new Set(state.promotedLocal);
+    builtIn = tap.slice(0, 30).map((skill) => ({
+      slug: skill.slug,
+      title: skill.title,
+      enabled: !disabled.has(skill.slug),
+    }));
+    local = state.promotedLocal.map((slug) => ({
+      slug,
+      title: slug,
+      promoted: promoted.has(slug),
+    }));
+  } catch {
+    // Skills tap or hermes home not available — leave arrays empty.
+  }
+
+  return {
+    skills: { builtIn, local },
+    workflows: ((workflowRows ?? []) as Array<{
+      id: string;
+      name: string;
+      description: string | null;
+      enabled: boolean;
+    }>).map((row) => ({
+      id: String(row.id),
+      name: String(row.name),
+      enabled: Boolean(row.enabled),
+      description: row.description,
+    })),
+    integrations: ((integrationRows ?? []) as Array<{
+      slug: string;
+      provider: string | null;
+      status: string;
+    }>).map((row) => ({
+      slug: String(row.slug),
+      provider: row.provider ? String(row.provider) : null,
+      status: String(row.status ?? "unknown"),
+    })),
+  };
+}
+
 type Context = {
   params: Promise<{ workspaceSlug: string; agentId: string }>;
 };
@@ -171,13 +251,37 @@ function extractRoleFromText(message: string): AgentRole | undefined {
 }
 
 function extractRenameIntent(message: string) {
-  const match = message.match(
-    /(?:rename(?:\s+this\s+agent)?\s+to|renombra(?:r)?(?:\s+este\s+agente)?\s+a|nombre(?:\s+del\s+agente)?\s*[:=])\s*["“]?([^"\n”]+)["”]?/i,
-  );
-  if (!match?.[1]) {
-    return undefined;
+  const patterns: RegExp[] = [
+    /(?:rename(?:\s+(?:this\s+agent|it))?\s+to)\s*["“]?([^"\n”]+)["”]?/i,
+    /(?:renombra(?:r)?(?:\s+(?:este\s+agente|el\s+agente|lo))?\s+(?:a|como))\s*["“]?([^"\n”]+)["”]?/i,
+    /(?:ll[áa]ma(?:lo|le)?|nómbra(?:lo|le)?)\s*["“]?([^"\n”]+)["”]?/i,
+    /(?:cambia(?:r)?(?:\s+el)?\s+nombre(?:\s+del\s+agente)?\s+(?:a|por))\s*["“]?([^"\n”]+)["”]?/i,
+    /(?:nombre(?:\s+del\s+agente)?|name)\s*[:=]\s*["“]?([^"\n”]+)["”]?/i,
+    /(?:set\s+name\s+to)\s*["“]?([^"\n”]+)["”]?/i,
+  ];
+  for (const pattern of patterns) {
+    const match = message.match(pattern);
+    if (match?.[1]) {
+      return match[1].trim().replace(/[.;,!?]+$/, "").trim();
+    }
   }
-  return match[1].trim();
+  return undefined;
+}
+
+function extractSoulFromMessage(message: string) {
+  const explicit = message.match(
+    /(?:soul(?:\.md)?|persona(?:lidad)?|personality)\s*[:=]\s*([\s\S]+)/i,
+  );
+  if (explicit?.[1]) {
+    return explicit[1].trim();
+  }
+  const personaCue = message.match(
+    /(?:eres|act[úu]a\s+como|comp[óo]rtate\s+como|you\s+are|act\s+as)\s+([\s\S]+)/i,
+  );
+  if (personaCue?.[1]) {
+    return personaCue[0].trim();
+  }
+  return undefined;
 }
 
 function extractSkillsFromMessage(message: string) {
@@ -198,6 +302,255 @@ function isSummaryIntent(message: string) {
     normalized.includes("all changes") ||
     normalized.includes("todos los cambios")
   );
+}
+
+function isWorkspaceInventoryIntent(message: string) {
+  const normalized = message.toLowerCase();
+  const asksAbout =
+    /\b(qué|que|cu[áa]les|cuantas|cuántas|lista(?:r|me)?|muestra(?:me)?|dime|describe|tell\s+me|list|show|what)\b/.test(
+      normalized,
+    );
+  const mentionsInventory =
+    /(skills?|habilidades?|automation(?:s)?|automatizaci[oó]n(?:es)?|workflow(?:s)?|integraci[oó]n(?:es)?|integration(?:s)?|conexi[oó]n(?:es)?|connection(?:s)?|api[\s_-]?key)/.test(
+      normalized,
+    );
+  if (asksAbout && mentionsInventory) {
+    return true;
+  }
+  return /\b(qué\s+(?:tengo|hay)|what\s+(?:do\s+i\s+have|is\s+available))\b/.test(normalized) && mentionsInventory;
+}
+
+const BUILDER_INSTRUCTION_KEYWORDS = [
+  "renombra", "rename", "cambia", "change", "set", "actualiza", "update",
+  "skill", "habilidad", "rol", "role", "soul", "persona", "personality",
+  "cron", "schedule", "agrega", "add", "quita", "remove", "elimina", "delete",
+  "configura", "configure", "habilita", "enable", "deshabilita", "disable",
+  "asigna", "assign", "conecta", "connect", "api_key", "apikey",
+  "lectura", "read", "escritura", "write", "canal", "channel",
+  "llamalo", "llámalo", "nombralo", "nómbralo",
+  "responsabilidad", "responsibility", "descripcion", "descripción", "description",
+];
+
+function isCasualConversationIntent(message: string) {
+  const trimmed = message.trim();
+  if (trimmed.length === 0) return false;
+  const normalized = trimmed.toLowerCase();
+  // Reserved branches handle these explicitly.
+  if (isSummaryIntent(message) || isWorkspaceInventoryIntent(message)) return false;
+  // If the message looks like a builder instruction (rename/skills/role/etc.),
+  // let the proposal pipeline handle it instead of chatting.
+  for (const keyword of BUILDER_INSTRUCTION_KEYWORDS) {
+    if (normalized.includes(keyword)) return false;
+  }
+  // Has KEY: VALUE pattern → likely a connection/credential, not casual chat.
+  if (/[A-Z][A-Z0-9_]{2,}\s*[:=]\s*\S{4,}/.test(trimmed)) return false;
+  // Single short word/acknowledgement → casual.
+  if (trimmed.length <= 12 && !trimmed.includes(":")) return true;
+  // Question form → casual.
+  if (/[?¿]/.test(trimmed)) return true;
+  // Greeting / small talk cues.
+  if (/^\s*(hola|hi|hey|buenos|buenas|gracias|thanks|thank you|ok|okay|claro|listo|perfecto|cool|sure)\b/.test(normalized)) {
+    return true;
+  }
+  return false;
+}
+
+async function answerConversationallyWithOpenRouter(
+  message: string,
+  agent: AgentRow,
+  workspaceSummary: WorkspaceBuilderSummary,
+): Promise<string | null> {
+  const apiKey = process.env.OPENROUTER_API_KEY?.trim();
+  if (!apiKey) return null;
+
+  const knowledgeScope = (agent.knowledge_scope as Record<string, unknown> | null) ?? {};
+  const role =
+    typeof knowledgeScope.legacy_role === "string"
+      ? String(knowledgeScope.legacy_role)
+      : agent.type;
+  const persona = (agent.soul_md ?? "").trim();
+
+  const systemPrompt = [
+    `Eres ${agent.name}, un agente del workspace Prisma con rol "${role}".`,
+    persona ? `Personalidad (SOUL.md):\n${persona}` : "Sin personalidad personalizada todavía.",
+    `Estás respondiendo dentro del builder de Operadores. El usuario te está hablando de manera conversacional (saludo, pregunta corta, agradecimiento, etc.) y NO te está pidiendo cambiar tu configuración.`,
+    `Responde en el mismo idioma del usuario, breve (1-3 oraciones), sin proponer cambios. Si te preguntan quién eres o qué haces, descríbete usando tu nombre, rol y responsabilidad. NO inventes funciones o integraciones que no existan.`,
+    `Contexto:`,
+    `- Responsabilidad: ${agent.description ?? "sin definir"}`,
+    `- Skills configuradas: ${(Array.isArray(agent.skills) ? agent.skills : []).join(", ") || "ninguna"}`,
+    `- Workflows del workspace: ${workspaceSummary.workflows.map((w) => w.name).join(", ") || "ninguno"}`,
+    `- Integraciones del workspace: ${workspaceSummary.integrations.map((i) => i.slug).join(", ") || "ninguna"}`,
+  ].join("\n");
+
+  const model = process.env.OPENROUTER_MODEL ?? "openai/gpt-4o-mini";
+  try {
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000",
+        "X-Title": "Prisma Agent Builder Chat",
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0.4,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: message },
+        ],
+      }),
+    });
+    if (!response.ok) return null;
+    const payload = (await response.json().catch(() => ({}))) as {
+      choices?: Array<{ message?: { content?: string } }>;
+    };
+    const content = payload.choices?.[0]?.message?.content?.trim();
+    return content && content.length > 0 ? content : null;
+  } catch {
+    return null;
+  }
+}
+
+function casualConversationFallback(message: string, agent: AgentRow) {
+  const normalized = message.trim().toLowerCase();
+  if (/^\s*(c[óo]mo te llamas|cu[áa]l es tu nombre|who are you|what'?s your name)/.test(normalized)) {
+    return `Soy ${agent.name}. ${agent.description ?? "Aún no tengo una responsabilidad definida."}`;
+  }
+  if (/^\s*(hola|hi|hey|buenos|buenas)/.test(normalized)) {
+    return `Hola, soy ${agent.name}. ¿En qué puedo ayudarte con la configuración?`;
+  }
+  if (/^\s*(gracias|thanks|thank you)/.test(normalized)) {
+    return "De nada. Avísame si quieres ajustar algo más del agente.";
+  }
+  if (/^\s*(ok|okay|claro|listo|perfecto|sure)/.test(normalized)) {
+    return "Perfecto. Cuando quieras seguimos con la configuración.";
+  }
+  return `Soy ${agent.name}. Si quieres ajustar mi configuración, dime por ejemplo "Renombra a ...", "Skills: ..." o "SOUL: ...".`;
+}
+
+function buildWorkspaceInventoryAnswer(
+  agent: AgentRow,
+  workspaceSummary: WorkspaceBuilderSummary,
+) {
+  const builtInEnabled = workspaceSummary.skills.builtIn.filter((skill) => skill.enabled);
+  const builtInDisabled = workspaceSummary.skills.builtIn.filter((skill) => !skill.enabled);
+  const localPromoted = workspaceSummary.skills.local.filter((skill) => skill.promoted);
+  const enabledWorkflows = workspaceSummary.workflows.filter((w) => w.enabled);
+  const disabledWorkflows = workspaceSummary.workflows.filter((w) => !w.enabled);
+
+  const apiCredentials =
+    typeof (agent.channel_config as Record<string, unknown> | null)?.apiCredentials === "object" &&
+    !Array.isArray((agent.channel_config as Record<string, unknown> | null)?.apiCredentials)
+      ? Object.keys((agent.channel_config as Record<string, unknown>).apiCredentials as Record<string, unknown>)
+      : [];
+
+  const lines: string[] = [];
+  lines.push(`Configuración del workspace para ${agent.name}:`);
+  lines.push("");
+  lines.push("Skills");
+  if (builtInEnabled.length > 0) {
+    lines.push(
+      `- Built-in activos (${builtInEnabled.length}): ${builtInEnabled.map((s) => s.slug).join(", ")}`,
+    );
+  } else {
+    lines.push("- Built-in activos: ninguno");
+  }
+  if (builtInDisabled.length > 0) {
+    lines.push(
+      `- Built-in deshabilitados (${builtInDisabled.length}): ${builtInDisabled.map((s) => s.slug).join(", ")}`,
+    );
+  }
+  if (localPromoted.length > 0) {
+    lines.push(`- Locales promovidas (${localPromoted.length}): ${localPromoted.map((s) => s.slug).join(", ")}`);
+  } else {
+    lines.push("- Locales promovidas: ninguna");
+  }
+
+  lines.push("");
+  lines.push("Automations");
+  if (workspaceSummary.workflows.length === 0) {
+    lines.push("- Sin workflows configurados");
+  } else {
+    if (enabledWorkflows.length > 0) {
+      lines.push(`- Activos (${enabledWorkflows.length}): ${enabledWorkflows.map((w) => w.name).join(", ")}`);
+    }
+    if (disabledWorkflows.length > 0) {
+      lines.push(`- Inactivos (${disabledWorkflows.length}): ${disabledWorkflows.map((w) => w.name).join(", ")}`);
+    }
+  }
+
+  lines.push("");
+  lines.push("Integraciones");
+  if (workspaceSummary.integrations.length === 0) {
+    lines.push("- Sin integraciones configuradas");
+  } else {
+    for (const integration of workspaceSummary.integrations) {
+      const provider = integration.provider ? ` (${integration.provider})` : "";
+      lines.push(`- ${integration.slug}${provider} — estado: ${integration.status}`);
+    }
+  }
+
+  lines.push("");
+  lines.push("Conexiones del agente");
+  lines.push(
+    apiCredentials.length > 0
+      ? `- ${apiCredentials.join(", ")}`
+      : "- Sin API keys configuradas",
+  );
+
+  return lines.join("\n");
+}
+
+function hasMappableUpdates(updates: BuilderProposal["updates"]) {
+  if (updates.name && updates.name.trim().length > 0) return true;
+  if (updates.role) return true;
+  if (updates.description !== undefined) return true;
+  if (updates.soulMd !== undefined) return true;
+  if (updates.skills !== undefined && updates.skills.length > 0) return true;
+  if (updates.cronJobs !== undefined) return true;
+  if (updates.connections && Object.keys(updates.connections).length > 0) return true;
+  if (updates.knowledgeScope) {
+    const scope = updates.knowledgeScope;
+    if (scope.read !== undefined || scope.write !== undefined || scope.channels !== undefined) return true;
+  }
+  return false;
+}
+
+function mergeProposals(primary: BuilderProposal, fallback: BuilderProposal): BuilderProposal {
+  const merged: BuilderProposal["updates"] = { ...primary.updates };
+  if ((!merged.name || merged.name.trim().length === 0) && fallback.updates.name) {
+    merged.name = fallback.updates.name;
+  }
+  if (!merged.role && fallback.updates.role) {
+    merged.role = fallback.updates.role;
+  }
+  if (merged.description === undefined && fallback.updates.description !== undefined) {
+    merged.description = fallback.updates.description;
+  }
+  if (merged.soulMd === undefined && fallback.updates.soulMd !== undefined) {
+    merged.soulMd = fallback.updates.soulMd;
+  }
+  if ((!merged.skills || merged.skills.length === 0) && fallback.updates.skills && fallback.updates.skills.length > 0) {
+    merged.skills = fallback.updates.skills;
+  }
+  if (merged.cronJobs === undefined && fallback.updates.cronJobs !== undefined) {
+    merged.cronJobs = fallback.updates.cronJobs;
+  }
+  if (
+    (!merged.connections || Object.keys(merged.connections).length === 0) &&
+    fallback.updates.connections &&
+    Object.keys(fallback.updates.connections).length > 0
+  ) {
+    merged.connections = fallback.updates.connections;
+  }
+  if (!merged.knowledgeScope && fallback.updates.knowledgeScope) {
+    merged.knowledgeScope = fallback.updates.knowledgeScope;
+  }
+  return {
+    assistantMessage: primary.assistantMessage || fallback.assistantMessage,
+    updates: merged,
+  };
 }
 
 function buildAgentSummary(agent: AgentRow) {
@@ -236,7 +589,11 @@ function buildAgentSummary(agent: AgentRow) {
   ].join("\n");
 }
 
-async function inferProposalWithOpenRouter(message: string, agent: AgentRow): Promise<BuilderProposal | null> {
+async function inferProposalWithOpenRouter(
+  message: string,
+  agent: AgentRow,
+  workspaceSummary: WorkspaceBuilderSummary,
+): Promise<BuilderProposal | null> {
   const apiKey = process.env.OPENROUTER_API_KEY?.trim();
   if (!apiKey) {
     return null;
@@ -276,11 +633,13 @@ async function inferProposalWithOpenRouter(message: string, agent: AgentRow): Pr
         {
           role: "system",
           content:
-            "You are a workspace agent-builder parser. Convert user intent into JSON updates for an agent configuration. Return JSON only. Allowed role values: intake_assistant, lead_qualifier, crm_updater, follow_up, ops_assistant, custom. Keep updates sparse: only include fields explicitly requested. For API keys/integrations, put them in updates.connections as KEY: VALUE. For cron jobs, use updates.cronJobs as a JSON array.",
+            "You are a workspace agent-builder parser. Convert user intent into JSON updates for an agent configuration. Return JSON only. Allowed role values: intake_assistant, lead_qualifier, crm_updater, follow_up, ops_assistant, custom. Keep updates sparse: only include fields explicitly requested. For API keys/integrations, put them in updates.connections as KEY: VALUE. For cron jobs, use updates.cronJobs as a JSON array.\n" +
+            "Persona note: when the user gives persona/voice/style feedback (\"talk shorter\", \"you are Jayme, a sales rep\", \"don't reply like that\"), update updates.soulMd by appending or rewriting the SOUL.md text — this maps to Hermes's Personality file ($HERMES_HOME/SOUL.md, see https://hermes-agent.nousresearch.com/docs/user-guide/features/personality). Treat soulMd as the agent's identity, not generic instructions.\n" +
+            "Workspace context awareness: a `workspaceSummary` is provided with the workspace's built-in skills, local skills, automations (workflows), and configured integrations. When the user references one of them by name (e.g. \"attach the gb-site skill\", \"hook into the daily-briefing workflow\", \"use my Close integration\"), include the matching slug in updates.skills, mention the workflow id in updates.description, or surface the integration slug in assistantMessage so the user knows what was matched. NEVER invent slugs that are not in the summary — if no match, include a short clarifying question in assistantMessage.",
         },
         {
           role: "user",
-          content: `Current agent:\n${JSON.stringify(currentContext, null, 2)}\n\nUser request:\n${message}\n\nReturn this exact JSON shape:\n{"assistantMessage":"...","updates":{"name":"?","role":"?","description":"?","soulMd":"?","skills":[],"knowledgeScope":{"read":[],"write":[],"channels":[]},"cronJobs":[],"connections":{"CLOSE_API_KEY":"..."}}}`,
+          content: `Current agent:\n${JSON.stringify(currentContext, null, 2)}\n\nWorkspace summary (use these slugs verbatim when referencing skills/workflows/integrations):\n${JSON.stringify(workspaceSummary, null, 2)}\n\nUser request:\n${message}\n\nReturn this exact JSON shape:\n{"assistantMessage":"...","updates":{"name":"?","role":"?","description":"?","soulMd":"?","skills":[],"knowledgeScope":{"read":[],"write":[],"channels":[]},"cronJobs":[],"connections":{"CLOSE_API_KEY":"..."}}}`,
         },
       ],
     }),
@@ -339,6 +698,7 @@ function inferProposalFallback(message: string): BuilderProposal {
   const role = extractRoleFromText(message);
   const inferredName = extractRenameIntent(message);
   const inferredSkills = extractSkillsFromMessage(message);
+  const inferredSoul = extractSoulFromMessage(message);
   const looksLikeResponsibility =
     normalized.includes("responsibility") ||
     normalized.includes("responsabilidad") ||
@@ -366,6 +726,7 @@ function inferProposalFallback(message: string): BuilderProposal {
       ...(looksLikeResponsibility ? { description: message.trim() } : {}),
       ...(role ? { role } : {}),
       ...(inferredSkills && inferredSkills.length > 0 ? { skills: inferredSkills } : {}),
+      ...(inferredSoul ? { soulMd: inferredSoul } : {}),
       ...(Object.keys(connections).length > 0 ? { connections } : {}),
     },
   };
@@ -453,6 +814,31 @@ export async function POST(request: Request, context: Context) {
     }
     const shouldApply = body.apply !== false;
 
+    const legacyBuilderTurnEnabled = process.env.PRISMA_BUILDER_TURN_LEGACY === "true";
+    if (!legacyBuilderTurnEnabled) {
+      // Operadores V2 now uses /api/chat + PATCH /agents/:id as the single source
+      // of truth. Keep this route as a short-lived compatibility response.
+      return Response.json(
+        {
+          applied: false,
+          appliedFields: [],
+          proposal: {},
+          assistantMessage:
+            "Este endpoint fue deprecado. Usa Operadores V2: chat en /api/chat y cambios estructurados en PATCH /api/workspaces/{workspaceSlug}/agents/{agentId}.",
+          migration: {
+            deprecated: true,
+            replacement: {
+              conversational: "/api/chat",
+              structuredUpdate: `/api/workspaces/${workspaceSlug}/agents/${agentId}`,
+            },
+            receivedMessage: message,
+            applyRequested: shouldApply,
+          },
+        },
+        { status: 410 },
+      );
+    }
+
     const supabase = requireSupabaseAdmin();
     const { data: agentRow, error: agentError } = await supabase
       .from("workspace_agents")
@@ -469,6 +855,8 @@ export async function POST(request: Request, context: Context) {
     }
 
     const typedAgent = agentRow as AgentRow;
+    const workspaceSummary = await loadWorkspaceBuilderSummary(authorization.membership.workspaceId);
+
     if (isSummaryIntent(message)) {
       return Response.json({
         assistantMessage: buildAgentSummary(typedAgent),
@@ -476,10 +864,37 @@ export async function POST(request: Request, context: Context) {
         applied: false,
         appliedFields: [],
         agent: buildWorkspaceAgentPayload(typedAgent),
+        workspaceSummary,
       });
     }
 
-    const proposal = (await inferProposalWithOpenRouter(message, typedAgent)) ?? inferProposalFallback(message);
+    if (isWorkspaceInventoryIntent(message)) {
+      return Response.json({
+        assistantMessage: buildWorkspaceInventoryAnswer(typedAgent, workspaceSummary),
+        proposal: {},
+        applied: false,
+        appliedFields: [],
+        agent: buildWorkspaceAgentPayload(typedAgent),
+        workspaceSummary,
+      });
+    }
+
+    if (isCasualConversationIntent(message)) {
+      const llmReply = await answerConversationallyWithOpenRouter(message, typedAgent, workspaceSummary);
+      const assistantMessage = llmReply ?? casualConversationFallback(message, typedAgent);
+      return Response.json({
+        assistantMessage,
+        proposal: {},
+        applied: false,
+        appliedFields: [],
+        agent: buildWorkspaceAgentPayload(typedAgent),
+        workspaceSummary,
+      });
+    }
+
+    const fallbackProposal = inferProposalFallback(message);
+    const llmProposal = await inferProposalWithOpenRouter(message, typedAgent, workspaceSummary);
+    const proposal = llmProposal ? mergeProposals(llmProposal, fallbackProposal) : fallbackProposal;
 
     if (!shouldApply) {
       return Response.json({
@@ -487,6 +902,7 @@ export async function POST(request: Request, context: Context) {
         proposal: proposal.updates,
         applied: false,
         appliedFields: [],
+        workspaceSummary,
       });
     }
 
@@ -564,13 +980,25 @@ export async function POST(request: Request, context: Context) {
     }
 
     if (Object.keys(update).length === 1) {
+      const trimmedAssistantMessage = proposal.assistantMessage?.trim() ?? "";
+      const hasInformationalAnswer =
+        trimmedAssistantMessage.length > 0 &&
+        !hasMappableUpdates(proposal.updates) &&
+        // Avoid reusing the generic fallback assistantMessage as a "real" answer.
+        !trimmedAssistantMessage.startsWith("Entendido. Guardé esta indicación") &&
+        !trimmedAssistantMessage.startsWith("Listo. Propuse cambios");
+
+      const assistantMessage = hasInformationalAnswer
+        ? trimmedAssistantMessage
+        : "No apliqué cambios persistidos en este turno. Intenta con instrucciones más directas (ej. \"Renombra a ...\", \"Cambia rol a ...\", \"Skills: ...\").";
+
       return Response.json({
-        assistantMessage:
-          "No apliqué cambios persistidos en este turno. Intenta con instrucciones más directas (ej. \"Renombra a ...\", \"Cambia rol a ...\", \"Skills: ...\").",
+        assistantMessage,
         proposal: proposal.updates,
         applied: false,
         appliedFields: [],
         agent: buildWorkspaceAgentPayload(typedAgent),
+        workspaceSummary,
       });
     }
 
@@ -618,6 +1046,7 @@ export async function POST(request: Request, context: Context) {
         issues: readiness.issues,
       },
       agent: buildWorkspaceAgentPayload(updatedAgentRow as AgentRow),
+      workspaceSummary,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to process builder turn.";

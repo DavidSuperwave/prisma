@@ -19,6 +19,9 @@ type AgentPayload = {
   write: string[];
   channels: string[];
   cronJobs: unknown[];
+  mcpToolsInclude?: string[];
+  skillsScope?: string[];
+  modelOverrides?: Record<string, unknown>;
   soulMd?: string | null;
   apiEndpoint?: string;
   containerName?: string;
@@ -30,6 +33,18 @@ type AgentPayload = {
     runtimeState?: string;
     message?: string;
   } | null;
+};
+
+type WorkspaceSkill = {
+  slug: string;
+  title: string;
+  description?: string;
+};
+
+type WorkflowSummary = {
+  id: string;
+  name: string;
+  enabled: boolean;
 };
 
 function parseCsvList(input: string) {
@@ -57,9 +72,13 @@ export default function AgentAdvancedSettingsPanel({
   const [isSavingDeployment, setIsSavingDeployment] = useState(false);
   const [isSavingRaw, setIsSavingRaw] = useState(false);
   const [isCheckingHealth, setIsCheckingHealth] = useState(false);
+  const [isConnectingIntegration, setIsConnectingIntegration] = useState(false);
   const [error, setError] = useState<string>("");
   const [success, setSuccess] = useState<string>("");
   const [agent, setAgent] = useState<AgentPayload | null>(null);
+  const [builtInSkills, setBuiltInSkills] = useState<WorkspaceSkill[]>([]);
+  const [localSkills, setLocalSkills] = useState<WorkspaceSkill[]>([]);
+  const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
 
   const [apiEndpoint, setApiEndpoint] = useState("");
   const [apiKey, setApiKey] = useState("");
@@ -70,9 +89,15 @@ export default function AgentAdvancedSettingsPanel({
   const [readCsv, setReadCsv] = useState("");
   const [writeCsv, setWriteCsv] = useState("");
   const [channelsCsv, setChannelsCsv] = useState("");
+  const [mcpToolsIncludeCsv, setMcpToolsIncludeCsv] = useState("");
+  const [skillsScopeCsv, setSkillsScopeCsv] = useState("");
   const [cronJobsJson, setCronJobsJson] = useState("[]");
+  const [modelOverridesJson, setModelOverridesJson] = useState("{}");
   const [channelConfigJson, setChannelConfigJson] = useState("{}");
   const [isActive, setIsActive] = useState(true);
+  const [vendorName, setVendorName] = useState("");
+  const [docsUrl, setDocsUrl] = useState("");
+  const [integrationApiKey, setIntegrationApiKey] = useState("");
 
   const runtimeMessage = useMemo(
     () => agent?.runtimeDiagnostics?.message ?? "Sin diagnóstico.",
@@ -104,9 +129,34 @@ export default function AgentAdvancedSettingsPanel({
         setReadCsv((loaded.read ?? []).join(", "));
         setWriteCsv((loaded.write ?? []).join(", "));
         setChannelsCsv((loaded.channels ?? []).join(", "));
+        setMcpToolsIncludeCsv((loaded.mcpToolsInclude ?? []).join(", "));
+        setSkillsScopeCsv((loaded.skillsScope ?? []).join(", "));
         setCronJobsJson(formatJson(loaded.cronJobs ?? []));
+        setModelOverridesJson(formatJson(loaded.modelOverrides ?? {}));
         setChannelConfigJson(formatJson(loaded.channelConfig ?? {}));
         setIsActive(loaded.status !== "paused");
+
+        const skillsResponse = await fetch(
+          `/api/workspaces/${workspaceSlug}/skills`,
+        );
+        if (skillsResponse.ok) {
+          const skillsPayload = (await skillsResponse.json().catch(() => ({}))) as {
+            builtIn?: WorkspaceSkill[];
+            local?: WorkspaceSkill[];
+          };
+          setBuiltInSkills(Array.isArray(skillsPayload.builtIn) ? skillsPayload.builtIn : []);
+          setLocalSkills(Array.isArray(skillsPayload.local) ? skillsPayload.local : []);
+        }
+
+        const workflowsResponse = await fetch(
+          `/api/workspaces/${workspaceSlug}/workflows`,
+        );
+        if (workflowsResponse.ok) {
+          const workflowsPayload = (await workflowsResponse.json().catch(() => ({}))) as {
+            workflows?: WorkflowSummary[];
+          };
+          setWorkflows(Array.isArray(workflowsPayload.workflows) ? workflowsPayload.workflows : []);
+        }
       } catch (caughtError) {
         setError(
           caughtError instanceof Error
@@ -184,6 +234,10 @@ export default function AgentAdvancedSettingsPanel({
       if (!channelConfig || typeof channelConfig !== "object" || Array.isArray(channelConfig)) {
         throw new Error("channelConfig debe ser un objeto JSON.");
       }
+      const modelOverrides = JSON.parse(modelOverridesJson);
+      if (!modelOverrides || typeof modelOverrides !== "object" || Array.isArray(modelOverrides)) {
+        throw new Error("modelOverrides debe ser un objeto JSON.");
+      }
 
       const response = await fetch(`/api/workspaces/${workspaceSlug}/agents/${agent.id}`, {
         method: "PATCH",
@@ -197,6 +251,9 @@ export default function AgentAdvancedSettingsPanel({
             write: parseCsvList(writeCsv),
             channels: parseCsvList(channelsCsv),
           },
+          mcpToolsInclude: parseCsvList(mcpToolsIncludeCsv),
+          skillsScope: parseCsvList(skillsScopeCsv),
+          modelOverrides,
           cronJobs,
           channelConfig,
           isActive,
@@ -248,6 +305,44 @@ export default function AgentAdvancedSettingsPanel({
       );
     } finally {
       setIsCheckingHealth(false);
+    }
+  }
+
+  async function runIntegrationWizard() {
+    if (!vendorName.trim() || !integrationApiKey.trim()) {
+      setError("vendorName y apiKey son obligatorios para conectar una integración.");
+      return;
+    }
+    setIsConnectingIntegration(true);
+    setError("");
+    setSuccess("");
+    try {
+      const response = await fetch(
+        `/api/workspaces/${workspaceSlug}/integrations/wizard`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            vendorName: vendorName.trim(),
+            docsUrl: docsUrl.trim() || undefined,
+            apiKey: integrationApiKey.trim(),
+          }),
+        },
+      );
+      const payload = (await response.json().catch(() => ({}))) as { error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "No se pudo crear la integración.");
+      }
+      setSuccess("Integración conectada. Se creó skill scaffold y credencial local para Hermes.");
+      setIntegrationApiKey("");
+    } catch (caughtError) {
+      setError(
+        caughtError instanceof Error
+          ? caughtError.message
+          : "No se pudo conectar la integración.",
+      );
+    } finally {
+      setIsConnectingIntegration(false);
     }
   }
 
@@ -377,10 +472,37 @@ export default function AgentAdvancedSettingsPanel({
           />
         </label>
         <label style={fieldStyle}>
+          MCP tools include (CSV)
+          <input
+            value={mcpToolsIncludeCsv}
+            onChange={(event) => setMcpToolsIncludeCsv(event.target.value)}
+            style={inputStyle}
+            placeholder="records.query, records.update, tasks.list"
+          />
+        </label>
+        <label style={fieldStyle}>
+          Skills scope (CSV)
+          <input
+            value={skillsScopeCsv}
+            onChange={(event) => setSkillsScopeCsv(event.target.value)}
+            style={inputStyle}
+            placeholder="prisma-records, prisma-tasks"
+          />
+        </label>
+        <label style={fieldStyle}>
           Cron jobs (JSON array)
           <textarea
             value={cronJobsJson}
             onChange={(event) => setCronJobsJson(event.target.value)}
+            rows={5}
+            style={textAreaStyle}
+          />
+        </label>
+        <label style={fieldStyle}>
+          modelOverrides (JSON object)
+          <textarea
+            value={modelOverridesJson}
+            onChange={(event) => setModelOverridesJson(event.target.value)}
             rows={5}
             style={textAreaStyle}
           />
@@ -410,6 +532,90 @@ export default function AgentAdvancedSettingsPanel({
             disabled={isSavingRaw}
           >
             {isSavingRaw ? "Guardando..." : "Guardar configuración avanzada"}
+          </button>
+        </div>
+      </section>
+
+      <section style={panelStyle}>
+        <h2 style={titleStyle}>Skills</h2>
+        <p style={copyStyle}>
+          Built-in skills vienen del tap de Prisma. skillsScope limita cuáles puede usar este agente.
+        </p>
+        <p style={metaStyle}>
+          Built-in: {builtInSkills.length} · Local: {localSkills.length}
+        </p>
+        <div style={skillsCloudStyle}>
+          {builtInSkills.map((skill) => (
+            <span key={`builtin-${skill.slug}`} style={skillChipStyle}>
+              {skill.slug}
+            </span>
+          ))}
+          {localSkills.map((skill) => (
+            <span key={`local-${skill.slug}`} style={localSkillChipStyle}>
+              {skill.slug}
+            </span>
+          ))}
+        </div>
+      </section>
+
+      <section style={panelStyle}>
+        <h2 style={titleStyle}>Automations</h2>
+        <p style={copyStyle}>
+          Esta vista refleja los workflows del workspace. `automation_schedule` crea jobs cron aquí.
+        </p>
+        <p style={metaStyle}>
+          Total: {workflows.length} · Activas: {workflows.filter((entry) => entry.enabled).length}
+        </p>
+        <div style={skillsCloudStyle}>
+          {workflows.slice(0, 12).map((workflow) => (
+            <span key={workflow.id} style={workflow.enabled ? skillChipStyle : localSkillChipStyle}>
+              {workflow.name}
+            </span>
+          ))}
+        </div>
+      </section>
+
+      <section style={panelStyle}>
+        <h2 style={titleStyle}>Connect an Integration</h2>
+        <p style={copyStyle}>
+          Crea integración `custom_api`, genera skill scaffold y proyecta credencial al HERMES_HOME.
+        </p>
+        <label style={fieldStyle}>
+          Vendor name
+          <input
+            value={vendorName}
+            onChange={(event) => setVendorName(event.target.value)}
+            style={inputStyle}
+            placeholder="Close, Apollo, Stripe, ..."
+          />
+        </label>
+        <label style={fieldStyle}>
+          Docs URL (opcional)
+          <input
+            value={docsUrl}
+            onChange={(event) => setDocsUrl(event.target.value)}
+            style={inputStyle}
+            placeholder="https://api.vendor.com/docs"
+          />
+        </label>
+        <label style={fieldStyle}>
+          API key
+          <input
+            type="password"
+            value={integrationApiKey}
+            onChange={(event) => setIntegrationApiKey(event.target.value)}
+            style={inputStyle}
+            placeholder="Pega tu API key"
+          />
+        </label>
+        <div style={actionsStyle}>
+          <button
+            type="button"
+            onClick={() => void runIntegrationWizard()}
+            style={primaryButtonStyle}
+            disabled={isConnectingIntegration}
+          >
+            {isConnectingIntegration ? "Conectando..." : "Conectar integración"}
           </button>
         </div>
       </section>
@@ -511,4 +717,22 @@ const errorStyle: React.CSSProperties = {
 const successStyle: React.CSSProperties = {
   margin: 0,
   color: "#10b981",
+};
+
+const skillsCloudStyle: React.CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  gap: 8,
+};
+
+const skillChipStyle: React.CSSProperties = {
+  border: "1px solid var(--giga-border)",
+  borderRadius: 999,
+  padding: "4px 10px",
+  fontSize: 12,
+};
+
+const localSkillChipStyle: React.CSSProperties = {
+  ...skillChipStyle,
+  borderColor: "var(--giga-primary)",
 };

@@ -1,4 +1,6 @@
 import { getCurrentAppUser } from "@/lib/auth";
+import { normalizeExtractionConstraint } from "@/lib/fieldExtraction";
+import { buildFieldPropertyBuilder, parseFieldOptionValues } from "@/lib/fieldPropertyBuilder";
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
 import { listWorkspaceMembershipsForUser } from "@/lib/workspaceStore";
 
@@ -18,6 +20,15 @@ type CreateFieldRequest = {
   options?: Record<string, unknown>;
   defaultValue?: string | null;
   sortOrder?: number;
+  extractionConfig?: {
+    sourceRef?: string | null;
+    promptTemplate?: string;
+    validationRule?: Record<string, unknown>;
+    confidenceThreshold?: number;
+    enabled?: boolean;
+    version?: number;
+    metadata?: Record<string, unknown>;
+  };
 };
 
 const allowedFieldTypes = new Set([
@@ -29,7 +40,9 @@ const allowedFieldTypes = new Set([
   "select",
   "relation",
   "file",
+  "image",
   "status",
+  "collection",
 ]);
 
 function requireSupabaseAdmin() {
@@ -69,7 +82,27 @@ async function authorizeWorkspaceAdmin(workspaceSlug: string) {
   return { user, membership };
 }
 
-function mapFieldRow(row: Record<string, unknown>) {
+function mapFieldRow(
+  row: Record<string, unknown>,
+  extractionConfig?: Record<string, unknown> | null,
+) {
+  const options = (row.options as Record<string, unknown>) ?? {};
+  const normalizedConstraint =
+    extractionConfig && typeof extractionConfig === "object" && !Array.isArray(extractionConfig)
+      ? {
+          ...extractionConfig,
+          metadata:
+            extractionConfig.metadata && typeof extractionConfig.metadata === "object" && !Array.isArray(extractionConfig.metadata)
+              ? extractionConfig.metadata
+              : {},
+          validationRule:
+            extractionConfig.validationRule &&
+            typeof extractionConfig.validationRule === "object" &&
+            !Array.isArray(extractionConfig.validationRule)
+              ? extractionConfig.validationRule
+              : {},
+        }
+      : null;
   return {
     id: String(row.id),
     workspaceId: String(row.workspace_id),
@@ -78,9 +111,16 @@ function mapFieldRow(row: Record<string, unknown>) {
     key: String(row.key),
     type: String(row.type),
     required: Boolean(row.required),
-    options: (row.options as Record<string, unknown>) ?? {},
+    options,
     defaultValue: row.default_value ? String(row.default_value) : null,
     sortOrder: Number(row.sort_order ?? 0),
+    propertyBuilder: buildFieldPropertyBuilder({
+      type: String(row.type),
+      required: Boolean(row.required),
+      options,
+      extractionValidationRule: (normalizedConstraint?.validationRule as Record<string, unknown> | undefined) ?? {},
+    }),
+    extractionConfig: normalizedConstraint,
   };
 }
 
@@ -97,10 +137,25 @@ export async function POST(request: Request, context: Context) {
     const name = payload.name?.trim();
     const key = (payload.key?.trim() || (name ? normalizeFieldKey(name) : "")).toLowerCase();
     const type = payload.type?.trim().toLowerCase();
-    const options = payload.options && typeof payload.options === "object" ? payload.options : {};
+    const options: Record<string, unknown> =
+      payload.options && typeof payload.options === "object" && !Array.isArray(payload.options)
+        ? (payload.options as Record<string, unknown>)
+        : {};
+    const normalizedOptions = {
+      ...options,
+      ...(type === "select" || type === "status"
+        ? { values: parseFieldOptionValues(options) }
+        : {}),
+    };
     const required = Boolean(payload.required);
     const defaultValue = payload.defaultValue === undefined ? null : payload.defaultValue;
     const sortOrder = Number.isFinite(payload.sortOrder) ? Number(payload.sortOrder) : null;
+    const extractionConfig =
+      payload.extractionConfig &&
+      typeof payload.extractionConfig === "object" &&
+      !Array.isArray(payload.extractionConfig)
+        ? payload.extractionConfig
+        : null;
 
     if (!objectId) {
       return Response.json({ error: "objectId is required." }, { status: 400 });
@@ -157,7 +212,7 @@ export async function POST(request: Request, context: Context) {
         key,
         type,
         required,
-        options,
+        options: normalizedOptions,
         default_value: defaultValue,
         sort_order: nextSortOrder,
       })
@@ -171,7 +226,78 @@ export async function POST(request: Request, context: Context) {
       throw new Error(createError.message);
     }
 
-    return Response.json({ field: mapFieldRow(createdField as Record<string, unknown>) }, { status: 201 });
+    let persistedExtractionConfig: Record<string, unknown> | null = null;
+    if (extractionConfig) {
+      const confidenceThreshold = Number(extractionConfig.confidenceThreshold ?? 0.7);
+      const normalizedConstraint = normalizeExtractionConstraint({
+        fieldName: name,
+        fieldType: type,
+        fieldOptions: options,
+        validationRule:
+          extractionConfig.validationRule &&
+          typeof extractionConfig.validationRule === "object" &&
+          !Array.isArray(extractionConfig.validationRule)
+            ? extractionConfig.validationRule
+            : {},
+        metadata:
+          extractionConfig.metadata &&
+          typeof extractionConfig.metadata === "object" &&
+          !Array.isArray(extractionConfig.metadata)
+            ? extractionConfig.metadata
+            : {},
+      });
+      const { data: configRow, error: configError } = await supabase
+        .from("field_extraction_configs")
+        .insert({
+          workspace_id: authorization.membership.workspaceId,
+          object_id: objectId,
+          field_id: String(createdField.id),
+          source_ref:
+            typeof extractionConfig.sourceRef === "string" && extractionConfig.sourceRef.trim().length > 0
+              ? extractionConfig.sourceRef.trim()
+              : null,
+          prompt_template:
+            typeof extractionConfig.promptTemplate === "string" ? extractionConfig.promptTemplate : "",
+          validation_rule: normalizedConstraint.validationRule,
+          confidence_threshold:
+            Number.isFinite(confidenceThreshold) && confidenceThreshold >= 0 && confidenceThreshold <= 1
+              ? confidenceThreshold
+              : 0.7,
+          enabled: extractionConfig.enabled !== false,
+          version:
+            Number.isInteger(extractionConfig.version) && Number(extractionConfig.version) > 0
+              ? Number(extractionConfig.version)
+              : 1,
+          metadata: normalizedConstraint.metadata,
+          created_by: authorization.user.id,
+          updated_by: authorization.user.id,
+        })
+        .select(
+          "id, source_ref, prompt_template, validation_rule, confidence_threshold, enabled, version, metadata, updated_at",
+        )
+        .maybeSingle();
+      if (configError && configError.code !== "42P01") {
+        throw new Error(configError.message);
+      }
+      if (configRow) {
+        persistedExtractionConfig = {
+          id: String(configRow.id),
+          sourceRef: configRow.source_ref ? String(configRow.source_ref) : null,
+          promptTemplate: String(configRow.prompt_template ?? ""),
+          validationRule: (configRow.validation_rule as Record<string, unknown>) ?? {},
+          confidenceThreshold: Number(configRow.confidence_threshold ?? 0.7),
+          enabled: Boolean(configRow.enabled),
+          version: Number(configRow.version ?? 1),
+          metadata: (configRow.metadata as Record<string, unknown>) ?? {},
+          updatedAt: String(configRow.updated_at),
+        };
+      }
+    }
+
+    return Response.json(
+      { field: mapFieldRow(createdField as Record<string, unknown>, persistedExtractionConfig) },
+      { status: 201 },
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to create field.";
     return Response.json({ error: message }, { status: 400 });

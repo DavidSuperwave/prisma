@@ -250,7 +250,15 @@ registerTool({
       const token = signProposal(proposal);
       return { ok: true, data: { proposal, confirmToken: token.token, expiresAt: token.expiresAt, dryRun: true } };
     }
-    if (typeof args.confirmToken !== "string" || !verifyProposal(args.confirmToken).ok) {
+    const proposal = {
+      action: "bindings.delete",
+      bindingId,
+      summary: `Delete binding “${binding.label}” (${binding.direction}).`,
+      targets: [bindingId],
+      diff: [{ id: bindingId, before: publicBinding(binding), after: null }],
+      count: 1,
+    };
+    if (typeof args.confirmToken !== "string" || !verifyProposal(args.confirmToken, proposal).ok) {
       return { ok: false, error: "Invalid or expired confirmToken.", status: 400 };
     }
     await deleteBinding(workspaceId, bindingId);
@@ -558,7 +566,14 @@ registerTool({
       return { ok: true, data: { proposal, confirmToken: token.token, expiresAt: token.expiresAt, dryRun: true } };
     }
     if (needsConfirm && !dryRun) {
-      if (typeof args.confirmToken !== "string" || !verifyProposal(args.confirmToken).ok) {
+      const proposal = {
+        action: "bindings.run_now",
+        bindingId,
+        summary: `Run binding “${binding.label}” (${binding.direction}).`,
+        targets: [bindingId],
+        count: 1,
+      };
+      if (typeof args.confirmToken !== "string" || !verifyProposal(args.confirmToken, proposal).ok) {
         return { ok: false, error: "Invalid or expired confirmToken.", status: 400 };
       }
     }

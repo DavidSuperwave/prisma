@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, type CSSProperties } from "react";
-import { ClipboardList, Trash2, X } from "lucide-react";
+import { ClipboardList, ImagePlus, Trash2, X } from "lucide-react";
 import type { PrismaWorkspaceField, PrismaWorkspaceRecord } from "@/lib/workspaceStore";
 import { getRecordFieldValue } from "@/lib/workspaceStore";
 import { Button } from "@/components/workspace/ui";
@@ -123,7 +123,7 @@ export function RecordDetailDrawer({
 
           <section style={sectionStyle}>
             <span style={labelStyle}>Campos</span>
-            {fields.map((field) => {
+            {fields.filter((field) => field.type !== "image").map((field) => {
               const value = record.data[field.key] ?? "";
               const options = parseSelectOptions(field);
               return (
@@ -240,17 +240,25 @@ export function RecordDetailDrawer({
                   </div>
                 )}
                 {canWrite ? (
-                  <AttachImageButton
-                    workspaceSlug={workspaceSlug}
-                    recordId={record.id}
-                    defaultPrompt={seed}
-                    label={currentImage ? "Cambiar imagen" : "Adjuntar imagen"}
-                    onSaved={(result) => {
-                      const url = result.publicUrl ?? result.signedUrl;
-                      if (!url) return;
-                      void save(imageField.key, url);
-                    }}
-                  />
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    <RecordImageUpload
+                      workspaceSlug={workspaceSlug}
+                      objectId={record.objectId}
+                      fieldId={imageField.id}
+                      onSaved={(url) => void save(imageField.key, url)}
+                    />
+                    <AttachImageButton
+                      workspaceSlug={workspaceSlug}
+                      recordId={record.id}
+                      defaultPrompt={seed}
+                      label={currentImage ? "Buscar otra imagen" : "Buscar imagen"}
+                      onSaved={(result) => {
+                        const url = result.publicUrl ?? result.signedUrl;
+                        if (!url) return;
+                        void save(imageField.key, url);
+                      }}
+                    />
+                  </div>
                 ) : null}
               </section>
             );
@@ -309,6 +317,64 @@ export function RecordDetailDrawer({
           ) : null}
         </div>
       </aside>
+    </div>
+  );
+}
+
+function RecordImageUpload({
+  workspaceSlug,
+  objectId,
+  fieldId,
+  onSaved,
+}: {
+  workspaceSlug: string;
+  objectId: string;
+  fieldId: string;
+  onSaved: (url: string) => void;
+}) {
+  const [isUploading, setIsUploading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function upload(file: File) {
+    setIsUploading(true);
+    setError(null);
+    try {
+      const formData = new FormData();
+      formData.set("file", file);
+      formData.set("objectId", objectId);
+      formData.set("fieldId", fieldId);
+      const response = await fetch(`/api/workspaces/${encodeURIComponent(workspaceSlug)}/field-uploads`, {
+        method: "POST",
+        body: formData,
+      });
+      const payload = (await response.json().catch(() => ({}))) as { publicUrl?: string; error?: string };
+      if (!response.ok || !payload.publicUrl) throw new Error(payload.error ?? "No se pudo subir la imagen.");
+      onSaved(payload.publicUrl);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "No se pudo subir la imagen.");
+    } finally {
+      setIsUploading(false);
+    }
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      <label style={uploadButtonStyle}>
+        <ImagePlus size={14} aria-hidden />
+        <span>{isUploading ? "Subiendo..." : "Subir foto"}</span>
+        <input
+          type="file"
+          accept="image/*"
+          disabled={isUploading}
+          onChange={(event) => {
+            const file = event.currentTarget.files?.[0];
+            event.currentTarget.value = "";
+            if (file) void upload(file);
+          }}
+          style={{ display: "none" }}
+        />
+      </label>
+      {error ? <span style={{ fontSize: 12, color: "#b91c1c" }}>{error}</span> : null}
     </div>
   );
 }
@@ -431,6 +497,22 @@ const emptyTextStyle: CSSProperties = {
   margin: 0,
   fontSize: 12,
   color: "var(--workspace-muted)",
+};
+
+const uploadButtonStyle: CSSProperties = {
+  minHeight: 34,
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: 8,
+  padding: "0 12px",
+  border: "1px dashed var(--workspace-border)",
+  borderRadius: "var(--radius-md)",
+  background: "var(--workspace-surface-muted, #f8f9fc)",
+  color: "var(--workspace-text)",
+  fontSize: 13,
+  fontWeight: 600,
+  cursor: "pointer",
 };
 
 const activityEmptyStyle: CSSProperties = {

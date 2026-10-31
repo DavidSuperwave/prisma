@@ -61,7 +61,9 @@ Use `.env.local` (copy from `.env.local.example`).
 
 Key groups:
 
-- Chat/runtime: `PRISMA_CHAT_PROVIDER`, `HERMES_API_BASE_URL`, `HERMES_API_KEY`, `OPENROUTER_API_KEY`
+- Chat/runtime: `PRISMA_CHAT_PROVIDER=hermes`, `HERMES_API_BASE_URL`, `HERMES_API_KEY`, `HERMES_MODEL`, `HERMES_IMAGE_MODEL`
+- Utility fallback (non user-visible): `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`
+- MCP auth: `PRISMA_MCP_JWT_SECRET` (required)
 - Supabase server: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
 - Supabase public auth: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` (or anon key)
 - Admin access: `PRISMA_PLATFORM_ADMIN_EMAILS`

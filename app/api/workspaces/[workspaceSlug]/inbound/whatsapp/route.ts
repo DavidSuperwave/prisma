@@ -10,6 +10,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
+import { buildPrismaSdrLeadMetadata } from "@/lib/sales/prismaSdrPlaybook";
 import { safeEmitEvent } from "@/lib/workflows/engine";
 
 type Context = {
@@ -38,6 +39,11 @@ export async function POST(request: Request, context: Context) {
     const inboundText = String(payload.message ?? payload.text ?? "").trim();
     const inboundFrom = String(payload.from ?? payload.contact?.phone ?? "").trim();
     const leadName = String(payload.name ?? payload.contact?.name ?? "").trim();
+    const sdrMetadata = buildPrismaSdrLeadMetadata({
+      from: inboundFrom || null,
+      message: inboundText || null,
+      payload,
+    });
 
     const leadsObjectId = await findLeadsObjectId(workspace.workspaceId);
     const leadRecordId = await createLeadRecord({
@@ -49,6 +55,9 @@ export async function POST(request: Request, context: Context) {
         status: "new",
         phone: inboundFrom || null,
         message: inboundText || null,
+        qualification_status: sdrMetadata.qualification_status,
+        qualification_playbook: sdrMetadata.sdr_playbook,
+        next_action: sdrMetadata.next_action,
         channel_payload: payload,
       },
     });
@@ -59,10 +68,7 @@ export async function POST(request: Request, context: Context) {
       type: "inbound_lead",
       title: "Inbound lead (WhatsApp)",
       metadata: {
-        channel: "whatsapp",
-        from: inboundFrom || null,
-        message: inboundText || null,
-        payload,
+        ...sdrMetadata,
       },
     });
 
@@ -74,9 +80,7 @@ export async function POST(request: Request, context: Context) {
         subject: "Inbound WhatsApp",
         body: inboundText || null,
         data: {
-          channel: "whatsapp",
-          from: inboundFrom || null,
-          payload,
+          ...sdrMetadata,
         },
       });
 
@@ -90,9 +94,14 @@ export async function POST(request: Request, context: Context) {
             id: leadRecordId,
             objectId: leadsObjectId,
             kind: "crm_people",
-            data: { phone: inboundFrom || null, message: inboundText || null },
+            data: {
+              phone: inboundFrom || null,
+              message: inboundText || null,
+              qualification_status: sdrMetadata.qualification_status,
+              next_action: sdrMetadata.next_action,
+            },
           },
-          extra: { from: inboundFrom, message: inboundText },
+          extra: sdrMetadata,
         });
       }
     }

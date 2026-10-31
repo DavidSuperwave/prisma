@@ -50,6 +50,43 @@ function isValidRole(raw: unknown) {
   return raw === "user" || raw === "assistant" || raw === "system" || raw === "tool";
 }
 
+function conversationRecencyScore(row: ConversationRow) {
+  const messageCount = Number(row.message_count ?? 0);
+  const lastMessageAtMs = row.last_message_at && Number.isFinite(Date.parse(row.last_message_at))
+    ? Date.parse(row.last_message_at)
+    : 0;
+  const updatedAtMs = Number.isFinite(Date.parse(row.updated_at))
+    ? Date.parse(row.updated_at)
+    : 0;
+  return { messageCount, lastMessageAtMs, updatedAtMs };
+}
+
+function preferConversationRow(a: ConversationRow, b: ConversationRow) {
+  const aScore = conversationRecencyScore(a);
+  const bScore = conversationRecencyScore(b);
+  if (aScore.messageCount !== bScore.messageCount) {
+    return aScore.messageCount > bScore.messageCount ? a : b;
+  }
+  if (aScore.lastMessageAtMs !== bScore.lastMessageAtMs) {
+    return aScore.lastMessageAtMs > bScore.lastMessageAtMs ? a : b;
+  }
+  return aScore.updatedAtMs >= bScore.updatedAtMs ? a : b;
+}
+
+function dedupeByRuntimeConversationId(rows: ConversationRow[]) {
+  const byRuntime = new Map<string, ConversationRow>();
+  for (const row of rows) {
+    const key = typeof row.runtime_conversation_id === "string" && row.runtime_conversation_id.trim().length > 0
+      ? row.runtime_conversation_id.trim()
+      : String(row.id);
+    const existing = byRuntime.get(key);
+    byRuntime.set(key, existing ? preferConversationRow(existing, row) : row);
+  }
+  return Array.from(byRuntime.values()).sort(
+    (left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at),
+  );
+}
+
 export async function GET(request: Request, context: Context) {
   try {
     const { workspaceSlug } = await context.params;
@@ -61,7 +98,7 @@ export async function GET(request: Request, context: Context) {
     const supabase = requireSupabaseAdmin();
     const searchParams = new URL(request.url).searchParams;
     const requestedAgentId = searchParams.get("agentId");
-    const requestedSource = searchParams.get("source");
+    const requestedSource = normalizeSource(searchParams.get("source"));
     const includeShared = searchParams.get("includeShared") === "true";
     const limitRaw = Number(searchParams.get("limit") ?? "40");
     const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 120) : 40;
@@ -93,9 +130,10 @@ export async function GET(request: Request, context: Context) {
     }
 
     const rows = (data ?? []) as ConversationRow[];
-    const visibleRows = includeShared
+    const visibleRowsRaw = includeShared
       ? rows.filter((row) => canAccessConversation(workspaceContext, row, includeShared))
       : rows;
+    const visibleRows = dedupeByRuntimeConversationId(visibleRowsRaw);
 
     const agentIds = Array.from(new Set(visibleRows.map((row) => String(row.agent_id))));
     const agentById = new Map<string, { id: string; name: string; type: string; status: string }>();
@@ -171,6 +209,26 @@ export async function POST(request: Request, context: Context) {
       ? payload.title.trim().slice(0, 120)
       : "Nuevo chat";
     const metadata = isRecord(payload.metadata) ? payload.metadata : {};
+    const runtimeConversationId = normalizeRuntimeConversationId(payload.runtimeConversationId);
+
+    const { data: existingConversation, error: existingConversationError } = await supabase
+      .from("workspace_conversations")
+      .select(
+        "id, workspace_id, agent_id, title, source, runtime_conversation_id, channel_type, channel_identity, metadata, agent_paused, message_count, last_message_at, created_by, created_at, updated_at",
+      )
+      .eq("workspace_id", workspaceContext.workspaceId)
+      .eq("runtime_conversation_id", runtimeConversationId)
+      .order("message_count", { ascending: false })
+      .order("last_message_at", { ascending: false })
+      .order("updated_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (existingConversationError) {
+      throw new Error(existingConversationError.message);
+    }
+    if (existingConversation) {
+      return Response.json({ conversation: mapConversation(existingConversation as ConversationRow) }, { status: 200 });
+    }
 
     const { data: insertedConversation, error: insertError } = await supabase
       .from("workspace_conversations")
@@ -179,7 +237,7 @@ export async function POST(request: Request, context: Context) {
         agent_id: agentId,
         title,
         source,
-        runtime_conversation_id: normalizeRuntimeConversationId(payload.runtimeConversationId),
+        runtime_conversation_id: runtimeConversationId,
         channel_type: payload.channelType?.trim() || null,
         channel_identity: payload.channelIdentity?.trim() || null,
         metadata,
@@ -188,13 +246,35 @@ export async function POST(request: Request, context: Context) {
       .select("id, workspace_id, agent_id, title, source, runtime_conversation_id, channel_type, channel_identity, metadata, agent_paused, message_count, last_message_at, created_by, created_at, updated_at")
       .single();
 
+    let conversation: ConversationRow;
+    let insertedNew = true;
     if (insertError) {
-      throw new Error(insertError.message);
+      if (insertError.code === "23505") {
+        const { data: existingRow, error: existingError } = await supabase
+          .from("workspace_conversations")
+          .select(
+            "id, workspace_id, agent_id, title, source, runtime_conversation_id, channel_type, channel_identity, metadata, agent_paused, message_count, last_message_at, created_by, created_at, updated_at",
+          )
+          .eq("workspace_id", workspaceContext.workspaceId)
+          .eq("runtime_conversation_id", runtimeConversationId)
+          .order("message_count", { ascending: false })
+          .order("last_message_at", { ascending: false })
+          .order("updated_at", { ascending: false })
+          .limit(1)
+          .single();
+        if (existingError || !existingRow) {
+          throw new Error(insertError.message);
+        }
+        conversation = existingRow as ConversationRow;
+        insertedNew = false;
+      } else {
+        throw new Error(insertError.message);
+      }
+    } else {
+      conversation = insertedConversation as ConversationRow;
     }
-
-    const conversation = insertedConversation as ConversationRow;
     const seedMessages = Array.isArray(payload.seedMessages) ? payload.seedMessages : [];
-    if (seedMessages.length > 0) {
+    if (insertedNew && seedMessages.length > 0) {
       const normalizedMessages = seedMessages
         .map((entry) => {
           const role = isValidRole(entry.role) ? entry.role : null;
@@ -230,7 +310,7 @@ export async function POST(request: Request, context: Context) {
       {
         conversation: mapConversation(conversation),
       },
-      { status: 201 },
+      { status: insertedNew ? 201 : 200 },
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to create conversation.";

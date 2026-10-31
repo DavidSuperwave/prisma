@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Paperclip, Send, Sparkles, X } from "lucide-react";
 import { consumeCompleteSseDataLines } from "@/lib/chatSseClient";
+import { stripInlineToolCallsFromText } from "@/lib/stripInlineToolCalls";
 
 export type OperatorAgentSummary = {
   id: string;
@@ -481,11 +482,11 @@ export function OperatorCopilotSidebar({
                 ? payload.text
                 : "";
           if (payload.type === "delta" && deltaPiece) {
-            assistantContent = `${assistantContent}${deltaPiece}`;
+            assistantContent = stripInlineToolCallsFromText(`${assistantContent}${deltaPiece}`);
             updateMessages((messages) =>
               messages.map((message) =>
                 message.id === assistantId
-                  ? { ...message, content: `${message.content}${deltaPiece}` }
+                  ? { ...message, content: assistantContent }
                   : message,
               ),
             );

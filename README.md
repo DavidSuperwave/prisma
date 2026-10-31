@@ -7,7 +7,7 @@ Spanish marketing homepage for PrismaProject with a reusable Noa-inspired layout
 - Next.js App Router
 - React
 - Plain CSS with Prisma brand tokens
-- hErmes/OpenRouter via a server-side API route
+- Hermes-first runtime via server-side API routes
 - Lucide icons
 
 ## Local development
@@ -28,12 +28,13 @@ Spanish marketing homepage for PrismaProject with a reusable Noa-inspired layout
 
 ## Environment variables
 
-- `PRISMA_CHAT_PROVIDER`: `auto` (default), `hermes`, or `openrouter`
-- `OPENROUTER_API_KEY`: required for OpenRouter mode
-- `OPENROUTER_MODEL`: optional, defaults to `openai/gpt-4o-mini`
+- `PRISMA_CHAT_PROVIDER`: set to `hermes` (required rollout default)
+- `OPENROUTER_API_KEY`: optional utility fallback only (strict JSON parse recovery, non user-visible)
+- `OPENROUTER_MODEL`: optional utility model
 - `HERMES_API_BASE_URL`: hErmes API server base URL (for example `http://localhost:8642`)
 - `HERMES_API_KEY`: required for hErmes mode
 - `HERMES_MODEL`: optional, defaults to `hermes-agent`
+- `HERMES_IMAGE_MODEL`: optional image-generation model override
 - `HERMES_DEFAULT_CONVERSATION`: optional conversation fallback for demo usage
 - `HERMES_DROPLET_HOST`: default target host label used by admin deployment records
 - `HERMES_IMAGE_REF`: pinned hErmes image reference for admin deployment records
@@ -75,16 +76,11 @@ Set `PRISMA_DISABLE_LOCAL_FALLBACK=true` in hardened environments to fail fast i
 
 ## Chat runtime mode
 
-`POST /api/chat` supports two upstream providers:
+`POST /api/chat` is Hermes-only (`/v1/responses`) for all user-visible turns.
 
-- `hErmes` (`/v1/responses`) for M0/M1 architecture validation and runtime integration
-- `OpenRouter` (`/api/v1/chat/completions`) for marketing demo compatibility
-
-Provider resolution:
-
-1. `PRISMA_CHAT_PROVIDER=hermes` -> force hErmes
-2. `PRISMA_CHAT_PROVIDER=openrouter` -> force OpenRouter
-3. `PRISMA_CHAT_PROVIDER=auto` -> hErmes when `HERMES_API_BASE_URL` + `HERMES_API_KEY` exist, else OpenRouter
+OpenRouter remains available only for explicit non user-visible utility helpers
+(for example strict-JSON fallback parsers). It should not be used for workspace
+chat, builder chat, title generation, or image generation.
 
 ## Host routing model
 

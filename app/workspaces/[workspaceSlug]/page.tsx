@@ -11,13 +11,13 @@ import { listAgentTemplates, listDashboardCardsForWorkspace } from "@/lib/platfo
 import { listDirectThreadsForUser, listMessagesForScope, listWorkspaceChannelsForUser } from "@/lib/teamChatStore";
 import { WorkspaceShell } from "@/components/workspace/WorkspaceShell";
 import {
-  ActivityPanel,
-  AgentOverviewPanel,
+  AgentsPanelV2,
   ChannelsPanel,
   ChatPanel,
   DatasetPanel,
   FieldsPanel,
   HomeOverviewPanel,
+  InboxPanel,
   ImportPanel,
   RecordDetailPanel,
   TeamChatPanel,
@@ -42,22 +42,27 @@ type PageProps = {
   }>;
 };
 
-function formatAgentSummary(agents: Array<{
-  id: string;
-  name: string;
-  type: "copilot" | "channel" | "worker";
-  status: "active" | "paused" | "deploying" | "error";
-  description: string | null;
-  apiEndpoint: string;
-  apiKey: string;
-  skills: string[];
-  knowledgeScope: Record<string, unknown>;
-  cronJobs: unknown[];
-  channelConfig: Record<string, unknown>;
-  memoryLimitMb: number;
-  soulMd: string | null;
-  containerName: string;
-}>) {
+function formatAgentSummary(
+  agents: Array<{
+    id: string;
+    name: string;
+    type: "copilot" | "channel" | "worker";
+    status: "active" | "paused" | "deploying" | "error";
+    description: string | null;
+    apiEndpoint: string;
+    apiKey: string;
+    skills: string[];
+    mcpToolsInclude?: string[] | null;
+    knowledgeScope: Record<string, unknown>;
+    cronJobs: unknown[];
+    channelConfig: Record<string, unknown>;
+    memoryLimitMb: number;
+    soulMd: string | null;
+    containerName: string;
+    updatedAt: string;
+  }>,
+  primaryCopilotId: string | null = null,
+) {
   return agents.map((agent) => ({
     id: agent.id,
     name: agent.name,
@@ -69,16 +74,20 @@ function formatAgentSummary(agents: Array<{
     status: agent.status,
     description: agent.description,
     tools: agent.skills,
+    mcpToolsInclude: Array.isArray(agent.mcpToolsInclude) ? agent.mcpToolsInclude : [],
     read:
       Array.isArray(agent.knowledgeScope.read) ? (agent.knowledgeScope.read as string[]) : [],
     write:
       Array.isArray(agent.knowledgeScope.write) ? (agent.knowledgeScope.write as string[]) : [],
     channels:
       Array.isArray(agent.knowledgeScope.channels) ? (agent.knowledgeScope.channels as string[]) : [],
+    surfaces:
+      Array.isArray(agent.knowledgeScope.surfaces) ? (agent.knowledgeScope.surfaces as string[]) : [],
     cronJobs: agent.cronJobs,
     channelConfig: agent.channelConfig,
     memoryLabel: agent.memoryLimitMb > 0 ? "Activada" : "Desactivada",
     soulMd: agent.soulMd,
+    updatedAt: agent.updatedAt,
     runtimeLabel: agent.containerName,
     apiEndpoint: agent.apiEndpoint,
     apiKey: "",
@@ -87,10 +96,15 @@ function formatAgentSummary(agents: Array<{
       typeof agent.knowledgeScope.last_health_check_at === "string"
         ? agent.knowledgeScope.last_health_check_at
         : null,
+    lastHealthStatus:
+      typeof agent.knowledgeScope.last_health_status === "string"
+        ? agent.knowledgeScope.last_health_status
+        : null,
     lastCronRunAt:
       typeof agent.knowledgeScope.last_cron_run_at === "string"
         ? agent.knowledgeScope.last_cron_run_at
         : null,
+    isPrimaryCopilot: primaryCopilotId !== null && primaryCopilotId === agent.id,
   }));
 }
 
@@ -606,6 +620,15 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
     );
   }
 
+  if (selectedTab === "inbox") {
+    content = (
+      <InboxPanel
+        workspaceSlug={snapshot.workspace.subdomain}
+        currentUserEmail={user.email}
+      />
+    );
+  }
+
   if (selectedTab === "record" && selectedRecord) {
     content = (
       <RecordDetailPanel
@@ -647,23 +670,32 @@ export default async function WorkspaceDetailPage({ params, searchParams }: Page
   }
 
   if (selectedTab === "agents") {
+    const workspaceMetadata =
+      snapshot.workspace.metadata && typeof snapshot.workspace.metadata === "object" && !Array.isArray(snapshot.workspace.metadata)
+        ? (snapshot.workspace.metadata as Record<string, unknown>)
+        : {};
+    const primaryCopilotIdForTab =
+      typeof workspaceMetadata.primary_copilot_agent_id === "string"
+        ? workspaceMetadata.primary_copilot_agent_id
+        : null;
     content = (
-      <>
-        <AgentOverviewPanel
-          workspaceId={snapshot.workspace.id}
-          workspaceSlug={snapshot.workspace.subdomain}
-          currentRole={membership.role}
-          currentUserEmail={user.email}
-          agentLimit={snapshot.workspace.agentLimit}
-          agentTemplates={agentTemplates}
-          agents={formatAgentSummary(snapshot.agents)}
-        />
-        <ActivityPanel
-          workspaceSlug={snapshot.workspace.subdomain}
-          agents={snapshot.agents}
-          initialActivity={snapshot.activity}
-        />
-      </>
+      <AgentsPanelV2
+        workspaceId={snapshot.workspace.id}
+        workspaceSlug={snapshot.workspace.subdomain}
+        userId={user.id}
+        currentRole={membership.role}
+        currentUserEmail={user.email}
+        agentLimit={snapshot.workspace.agentLimit}
+        agentTemplates={agentTemplates.map((template) => ({
+          id: template.id,
+          name: template.name,
+          description: template.description ?? null,
+          type: template.type,
+          category: template.category ?? null,
+        }))}
+        agents={formatAgentSummary(snapshot.agents, primaryCopilotIdForTab)}
+        primaryAgentId={primaryCopilotIdForTab}
+      />
     );
   }
 

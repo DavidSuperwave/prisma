@@ -17,11 +17,23 @@ export type IntakeAsset = {
   publicUrl?: string
 }
 
+export type IntakeLeadStatus = 'new' | 'contacted' | 'workspace_created' | 'rejected'
+export type IntakeLifecycleStatus = 'submitted' | 'paid' | 'reviewing' | 'ready_to_publish' | 'published'
+
 export type IntakeSubmission = {
   id: string
   workspaceId?: string
   projectId?: string
-  lifecycleStatus: 'submitted' | 'paid' | 'reviewing' | 'ready_to_publish' | 'published'
+  lifecycleStatus: IntakeLifecycleStatus
+  status: IntakeLeadStatus
+  leadScore: number
+  fullName: string
+  email: string
+  businessLocation: string
+  reason: string
+  brandAssets: string[]
+  adminNotes?: string
+  referralSource?: string
   businessName: string
   contactName: string
   contactEmail: string
@@ -45,7 +57,17 @@ export type IntakeSubmission = {
 type CreateIntakeInput = Omit<
   IntakeSubmission,
   | 'lifecycleStatus'
+  | 'contactName'
+  | 'contactEmail'
+  | 'industry'
+  | 'serviceDescription'
   | 'paymentStatus'
+  | 'socialLinks'
+  | 'assets'
+  | 'whatsappNumber'
+  | 'primaryColor'
+  | 'toneGuidance'
+  | 'notes'
   | 'stripeCheckoutSessionId'
   | 'stripePaymentIntentId'
   | 'paidAt'
@@ -53,9 +75,95 @@ type CreateIntakeInput = Omit<
   | 'updatedAt'
 >
 
+type CreateIntakeSubmissionInput = Pick<
+  CreateIntakeInput,
+  | 'id'
+  | 'fullName'
+  | 'businessName'
+  | 'email'
+  | 'businessLocation'
+  | 'reason'
+  | 'brandAssets'
+  | 'leadScore'
+  | 'status'
+  | 'websiteUrl'
+  | 'referralSource'
+  | 'adminNotes'
+>
+
+type UpdateLeadInput = {
+  status?: IntakeLeadStatus
+  adminNotes?: string
+  workspaceId?: string
+  projectId?: string
+}
+
+type UpdateProvisioningInput = {
+  lifecycleStatus?: IntakeSubmission['lifecycleStatus']
+  status?: IntakeLeadStatus
+  workspaceId?: string
+  projectId?: string
+}
+
 type UpdatePaymentInput = {
   checkoutSessionId?: string
   paymentIntentId?: string
+}
+
+const LEAD_STATUSES: IntakeLeadStatus[] = ['new', 'contacted', 'workspace_created', 'rejected']
+const LIFECYCLE_STATUSES: IntakeLifecycleStatus[] = ['submitted', 'paid', 'reviewing', 'ready_to_publish', 'published']
+
+function normalizeLeadStatus(value: unknown): IntakeLeadStatus {
+  if (typeof value === 'string' && LEAD_STATUSES.includes(value as IntakeLeadStatus)) {
+    return value as IntakeLeadStatus
+  }
+
+  if (value === 'paid' || value === 'reviewing' || value === 'ready_to_publish') {
+    return 'contacted'
+  }
+  if (value === 'published') {
+    return 'workspace_created'
+  }
+  return 'new'
+}
+
+function normalizeLifecycleStatus(value: unknown): IntakeLifecycleStatus {
+  if (typeof value === 'string' && LIFECYCLE_STATUSES.includes(value as IntakeLifecycleStatus)) {
+    return value as IntakeLifecycleStatus
+  }
+  return 'submitted'
+}
+
+function asStringArray(value: unknown) {
+  if (!Array.isArray(value)) {
+    return []
+  }
+  return value.map((entry) => String(entry)).filter(Boolean)
+}
+
+function normalizeInt(value: unknown) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Math.max(0, Math.floor(value))
+  }
+  if (typeof value === 'string') {
+    const parsed = Number.parseInt(value, 10)
+    return Number.isFinite(parsed) ? Math.max(0, parsed) : 0
+  }
+  return 0
+}
+
+function normalizeOptionalText(value: unknown) {
+  if (typeof value !== 'string') {
+    return undefined
+  }
+  const trimmed = value.trim()
+  return trimmed ? trimmed : undefined
+}
+
+function normalizeRequiredText(primary: unknown, fallback = '') {
+  const fromPrimary = normalizeOptionalText(primary)
+  if (fromPrimary) return fromPrimary
+  return fallback
 }
 
 const dataPath = path.join(process.cwd(), '.data', 'intake-submissions.json')
@@ -84,6 +192,15 @@ function toRow(record: IntakeSubmission) {
     workspace_id: record.workspaceId ?? null,
     project_id: record.projectId ?? null,
     lifecycle_status: record.lifecycleStatus,
+    status: record.status,
+    lead_score: record.leadScore,
+    full_name: record.fullName,
+    email: record.email,
+    business_location: record.businessLocation,
+    reason: record.reason,
+    brand_assets: record.brandAssets,
+    admin_notes: record.adminNotes ?? null,
+    referral_source: record.referralSource ?? null,
     business_name: record.businessName,
     contact_name: record.contactName,
     contact_email: record.contactEmail,
@@ -106,45 +223,87 @@ function toRow(record: IntakeSubmission) {
 }
 
 function fromRow(row: Record<string, unknown>): IntakeSubmission {
+  const fullName = normalizeRequiredText(row.full_name, normalizeRequiredText(row.contact_name))
+  const email = normalizeRequiredText(row.email, normalizeRequiredText(row.contact_email))
+  const businessLocation = normalizeRequiredText(row.business_location, normalizeRequiredText(row.industry))
+  const reason = normalizeRequiredText(row.reason, normalizeRequiredText(row.service_description))
+  const websiteUrl = normalizeOptionalText(row.website_url)
+  const status = normalizeLeadStatus(row.status ?? row.lifecycle_status)
+  const lifecycleStatus = normalizeLifecycleStatus(row.lifecycle_status)
+  const brandAssets = asStringArray(row.brand_assets)
+  const socialLinks = (row.social_links as IntakeSocialLinks) ?? {}
+  const assets = (row.assets as IntakeAsset[]) ?? []
+
   return {
     id: String(row.id),
     workspaceId: row.workspace_id ? String(row.workspace_id) : undefined,
     projectId: row.project_id ? String(row.project_id) : undefined,
-    lifecycleStatus:
-      row.lifecycle_status === 'paid' ||
-      row.lifecycle_status === 'reviewing' ||
-      row.lifecycle_status === 'ready_to_publish' ||
-      row.lifecycle_status === 'published'
-        ? row.lifecycle_status
-        : 'submitted',
-    businessName: String(row.business_name ?? ''),
-    contactName: String(row.contact_name ?? ''),
-    contactEmail: String(row.contact_email ?? ''),
-    whatsappNumber: String(row.whatsapp_number ?? ''),
-    websiteUrl: row.website_url ? String(row.website_url) : undefined,
-    industry: String(row.industry ?? ''),
-    primaryColor: row.primary_color ? String(row.primary_color) : undefined,
-    serviceDescription: String(row.service_description ?? ''),
-    toneGuidance: row.tone_guidance ? String(row.tone_guidance) : undefined,
-    notes: row.notes ? String(row.notes) : undefined,
-    socialLinks: (row.social_links as IntakeSocialLinks) ?? {},
-    assets: (row.assets as IntakeAsset[]) ?? [],
+    lifecycleStatus,
+    status,
+    leadScore: normalizeInt(row.lead_score),
+    fullName,
+    email,
+    businessLocation,
+    reason,
+    brandAssets,
+    adminNotes: normalizeOptionalText(row.admin_notes),
+    referralSource: normalizeOptionalText(row.referral_source),
+    businessName: normalizeRequiredText(row.business_name),
+    contactName: normalizeRequiredText(row.contact_name, fullName),
+    contactEmail: normalizeRequiredText(row.contact_email, email),
+    whatsappNumber: normalizeRequiredText(row.whatsapp_number),
+    websiteUrl,
+    industry: normalizeRequiredText(row.industry, businessLocation),
+    primaryColor: normalizeOptionalText(row.primary_color),
+    serviceDescription: normalizeRequiredText(row.service_description, reason),
+    toneGuidance: normalizeOptionalText(row.tone_guidance),
+    notes: normalizeOptionalText(row.notes),
+    socialLinks,
+    assets,
     paymentStatus: row.payment_status === 'paid' ? 'paid' : 'pending',
-    stripeCheckoutSessionId: row.stripe_checkout_session_id ? String(row.stripe_checkout_session_id) : undefined,
-    stripePaymentIntentId: row.stripe_payment_intent_id ? String(row.stripe_payment_intent_id) : undefined,
-    paidAt: row.paid_at ? String(row.paid_at) : undefined,
+    stripeCheckoutSessionId: normalizeOptionalText(row.stripe_checkout_session_id),
+    stripePaymentIntentId: normalizeOptionalText(row.stripe_payment_intent_id),
+    paidAt: normalizeOptionalText(row.paid_at),
     createdAt: String(row.created_at ?? nowIso()),
     updatedAt: String(row.updated_at ?? nowIso()),
   }
 }
 
-export async function createIntakeSubmission(input: CreateIntakeInput) {
+export async function createIntakeSubmission(input: CreateIntakeSubmissionInput) {
+  const createdAt = nowIso()
+  const defaultStatus = input.status ?? 'new'
   const record: IntakeSubmission = {
-    ...input,
+    id: input.id,
+    workspaceId: undefined,
+    projectId: undefined,
     lifecycleStatus: 'submitted',
+    status: defaultStatus,
+    leadScore: normalizeInt(input.leadScore),
+    fullName: input.fullName,
+    email: input.email,
+    businessLocation: input.businessLocation,
+    reason: input.reason,
+    brandAssets: input.brandAssets,
+    adminNotes: input.adminNotes,
+    referralSource: input.referralSource,
+    businessName: input.businessName,
+    contactName: input.fullName,
+    contactEmail: input.email,
+    whatsappNumber: '',
+    websiteUrl: input.websiteUrl,
+    industry: input.businessLocation,
+    primaryColor: undefined,
+    serviceDescription: input.reason,
+    toneGuidance: undefined,
+    notes: undefined,
+    socialLinks: {},
+    assets: [],
     paymentStatus: 'pending',
-    createdAt: nowIso(),
-    updatedAt: nowIso(),
+    stripeCheckoutSessionId: undefined,
+    stripePaymentIntentId: undefined,
+    paidAt: undefined,
+    createdAt,
+    updatedAt: createdAt,
   }
 
   const supabase = getSupabaseAdmin()
@@ -188,6 +347,47 @@ export async function listIntakeSubmissions() {
   return [...records].sort((a, b) => (a.createdAt > b.createdAt ? -1 : 1))
 }
 
+export async function updateIntakeLead(id: string, input: UpdateLeadInput) {
+  const updatedAt = nowIso()
+  const nextStatus = input.status ?? (input.workspaceId || input.projectId ? 'workspace_created' : undefined)
+  const supabase = getSupabaseAdmin()
+  if (supabase) {
+    const { data, error } = await supabase
+      .from('intake_submissions')
+      .update({
+        status: nextStatus ?? undefined,
+        admin_notes: input.adminNotes ?? undefined,
+        workspace_id: input.workspaceId ?? undefined,
+        project_id: input.projectId ?? undefined,
+        updated_at: updatedAt,
+      })
+      .eq('id', id)
+      .select()
+      .maybeSingle()
+
+    if (!error && data) {
+      return fromRow(data)
+    }
+  }
+
+  const records = await readLocalStore()
+  const idx = records.findIndex((entry) => entry.id === id)
+  if (idx < 0) {
+    return null
+  }
+
+  records[idx] = {
+    ...records[idx],
+    status: nextStatus ?? records[idx].status,
+    adminNotes: input.adminNotes ?? records[idx].adminNotes,
+    workspaceId: input.workspaceId ?? records[idx].workspaceId,
+    projectId: input.projectId ?? records[idx].projectId,
+    updatedAt,
+  }
+  await writeLocalStore(records)
+  return records[idx]
+}
+
 export async function markIntakeAsPaid(id: string, update: UpdatePaymentInput) {
   const updatedAt = nowIso()
   const paidAt = nowIso()
@@ -198,6 +398,7 @@ export async function markIntakeAsPaid(id: string, update: UpdatePaymentInput) {
       .update({
         lifecycle_status: 'paid',
         payment_status: 'paid',
+        status: 'contacted',
         stripe_checkout_session_id: update.checkoutSessionId ?? null,
         stripe_payment_intent_id: update.paymentIntentId ?? null,
         paid_at: paidAt,
@@ -222,6 +423,7 @@ export async function markIntakeAsPaid(id: string, update: UpdatePaymentInput) {
     ...records[idx],
     lifecycleStatus: 'paid',
     paymentStatus: 'paid',
+    status: records[idx].status === 'new' ? 'contacted' : records[idx].status,
     stripeCheckoutSessionId: update.checkoutSessionId ?? records[idx].stripeCheckoutSessionId,
     stripePaymentIntentId: update.paymentIntentId ?? records[idx].stripePaymentIntentId,
     paidAt,
@@ -231,21 +433,16 @@ export async function markIntakeAsPaid(id: string, update: UpdatePaymentInput) {
   return records[idx]
 }
 
-export async function updateIntakeProvisioningStatus(
-  id: string,
-  input: {
-    lifecycleStatus?: IntakeSubmission['lifecycleStatus']
-    workspaceId?: string
-    projectId?: string
-  },
-) {
+export async function updateIntakeProvisioningStatus(id: string, input: UpdateProvisioningInput) {
   const updatedAt = nowIso()
+  const computedStatus = input.status ?? (input.workspaceId || input.projectId ? 'workspace_created' : undefined)
   const supabase = getSupabaseAdmin()
   if (supabase) {
     const { data, error } = await supabase
       .from('intake_submissions')
       .update({
         lifecycle_status: input.lifecycleStatus ?? undefined,
+        status: computedStatus ?? undefined,
         workspace_id: input.workspaceId ?? undefined,
         project_id: input.projectId ?? undefined,
         updated_at: updatedAt,
@@ -268,6 +465,7 @@ export async function updateIntakeProvisioningStatus(
   records[idx] = {
     ...records[idx],
     lifecycleStatus: input.lifecycleStatus ?? records[idx].lifecycleStatus,
+    status: computedStatus ?? records[idx].status,
     workspaceId: input.workspaceId ?? records[idx].workspaceId,
     projectId: input.projectId ?? records[idx].projectId,
     updatedAt,

@@ -1,0 +1,652 @@
+# Prisma — Admin Dashboard & Workspace System Master Spec
+
+**Version:** 1.0  
+**Date:** April 19, 2026  
+**Repo:** github.com/DavidSuperwave/prisma  
+**Scope:** Admin dashboard, intake form, workspace management, credit-based billing, settings tab with clearance levels
+
+---
+
+## Table of Contents
+
+1. System Architecture Overview
+2. Intake Form (Public Lead Capture)
+3. Admin Dashboard Pages
+4. Credit-Based Billing System
+5. Workspace Settings Tab
+6. Full Database Schema (Migrations)
+7. File Structure to Add
+8. Build Order Recommendation
+
+---
+
+## 1. System Architecture Overview
+
+Two fully separated systems that share one database:
+
+- **Intake/Form system** → public-facing pre-qualification form at `/intake`. Stores submissions in `intake_submissions`. Admin sees read-only lead records.
+- **Workspace system** → admin creates and manages client workspaces, agents, billing, and permissions. Independent of the form until manually wired.
+
+**Stack confirmed in repo:** Next.js (App Router), TypeScript, Supabase (auth + postgres + storage), Vercel, Hermes-first runtime via shared endpoint (current default), OpenRouter utility fallback, Stripe for billing.
+
+**Existing tables in Supabase (from m1 foundation):** `workspaces`, `workspace_members`, `workspace_agents`, `workspace_objects`, `workspace_fields`, `workspace_views`, `records`, `agent_activity`, `agent_events`.
+
+---
+
+## 2. Intake Form (Public Lead Capture)
+
+Lives at `/app/intake/page.tsx` — already scaffolded.
+
+### Form Fields
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `full_name` | text | yes | "Nombre completo" |
+| `business_name` | text | yes | "¿Qué negocio tienes?" |
+| `website_url` | text | **no** | Placeholder: "Si no tienes, déjalo en blanco" |
+| `business_location` | text | yes | "Ubicación del negocio" |
+| `reason` | textarea | yes | "¿Por qué quieres actualizar o crear tu sitio web?" |
+| `brand_assets` | multi-select | yes | Checkboxes: Logo / Colores / Fotos / Ninguno |
+| `email` | email | yes | Auto-creates user shell on submit |
+
+### Lead Scoring (server-side, admin-only view)
+
+Compute `lead_score` on submission:
+- Has website → +1 (established business)
+- Has brand assets (not "Ninguno") → +2
+- Major MX metro (CDMX, Monterrey, Guadalajara) → +1
+- Reason mentions "actualizar" → +1 upsell flag
+
+Color bands: 0–1 Red, 2–3 Yellow, 4+ Green.
+
+### API Route
+
+`app/api/intake/route.ts` — POST handler that validates, scores, stores, and optionally triggers admin email notification via Resend.
+
+---
+
+## 3. Admin Dashboard Pages
+
+Structure under `/app/admin/(dashboard)/`:
+
+### 3.1 `/admin/(dashboard)/leads`
+- Table of all `intake_submissions`
+- Columns: name, business, location, date, lead score (color badge), status
+- Status values: `new | contacted | workspace_created | rejected`
+- Row actions: expand full details, "Create Workspace" (pre-fills modal), "Send Invite", "Reject"
+- Bulk actions: select multiple → bulk status update, bulk invite, bulk reject
+- Search + filter by status, score, location, date
+- CSV export
+
+### 3.2 `/admin/(dashboard)/workspaces`
+- List view: workspace name + logo, client email, agent count, agent status indicators, Docker health, OpenRouter credit bar, hosting status, onboarding progress bar
+- Quick actions per row: "Login as Client" (impersonation), "Add Agent", "View Details"
+- "Create Workspace" modal — fields: name, logo upload, client email, agent count (1–10, default 3), plan tier, send invite toggle
+
+### 3.3 `/admin/(dashboard)/workspaces/[id]`
+Tabs:
+- **Overview** — health score, onboarding checklist, recent activity
+- **Users** — list members, invite, remove, impersonate
+- **Agents** — deployed agents, status, Docker containers, deploy new
+- **Infrastructure** — droplet health, memory/CPU, Vercel deployment status
+- **Credits & Usage** — token consumption bar, breakdown by agent and by model
+- **Billing** — Stripe subscription, MRR from this workspace, add/remove agents
+- **Settings** — full settings panel (see Section 5)
+- **Audit Log** — who did what, when
+
+### 3.4 `/admin/(dashboard)/billing`
+**Revenue (MRR) tracking from Stripe API:**
+- Active subscriptions, MRR total, churn rate, new signups this month
+- Landing page hosting MRR (separate line)
+- Agent add-on revenue
+
+**Cost tracking:**
+| Cost Center | Source |
+|---|---|
+| OpenRouter API | OpenRouter key usage API |
+| DigitalOcean | DO billing API |
+| Vercel | Vercel usage API |
+| Supabase | Manual/API |
+
+**P/L summary widget:** `MRR − Total Costs = Net Margin`
+
+### 3.5 `/admin/(dashboard)/dashboard` (Home)
+- Top-line metrics: MRR, active workspaces, active agents, total credits consumed this month
+- **Upsell Signal Feed** — workspaces near plan limit, high engagement, ready to upgrade
+- **Churn Risk Alerts** — agents offline 3+ days, client inactive 2+ weeks, credits depleted
+- **Daily Digest** — leads overnight, alerts, capacity warnings
+
+---
+
+## 4. Credit-Based Billing System
+
+### Pricing Model
+
+- **Base:** $250/month per agent (Stripe subscription, quantity-based)
+- **Included credits:** 50,000 tokens per agent per month
+- **Overage:** billed at end of cycle via Stripe Metered Billing
+- **Landing page hosting:** separate MRR line item per workspace
+
+### Plan Tiers
+
+| Plan | Agents | Included Credits | Price/mo |
+|---|---|---|---|
+| Starter | 1 | 50K tokens | $250 |
+| Growth | 3 | 150K tokens | $650 |
+| Pro | 5 | 250K tokens | $999 |
+| Custom | 1–10 | Negotiated | Custom |
+
+### Stripe Setup
+
+**Product 1 — Agent Subscription**
+- Recurring, $250/unit/month, quantity = agent_count
+- Update via: `stripe.subscriptions.update({ items: [{ id, quantity }] })`
+
+**Product 2 — Credit Overage (Metered)**
+- Recurring, metered, aggregated sum
+- Price: $0.10 per 1,000 overage tokens
+- Report via Stripe Billing Meters: `stripe.billing.meterEvents.create({ event_name, payload: { stripe_customer_id, value } })`
+
+**Product 3 — Landing Page Hosting**
+- Recurring flat rate, separate subscription item per workspace
+
+### Usage Logging Flow
+
+Every OpenRouter call in `hermes-sidecar` or any agent route must call `lib/billing/logUsage.ts`:
+
+```typescript
+// lib/billing/logUsage.ts
+export async function logAgentUsage({
+  workspaceId,
+  agentId,
+  userId,
+  model,
+  usage,   // { prompt_tokens, completion_tokens }
+  costUsd
+}: LogUsageParams) {
+  const totalTokens = usage.prompt_tokens + usage.completion_tokens
+  
+  await supabaseAdmin.from('credit_usage_events').insert({
+    workspace_id: workspaceId,
+    agent_id: agentId,
+    user_id: userId,
+    model,
+    prompt_tokens: usage.prompt_tokens,
+    completion_tokens: usage.completion_tokens,
+    total_tokens: totalTokens,
+    cost_usd: costUsd,
+  })
+  
+  await reportToStripeMetered(workspaceId, totalTokens)
+}
+```
+
+### Credit Usage UI (per workspace)
+Credits This Period
+████████████░░░░░░ 68,200 / 100,000 tokens
+$6.82 / $10.00 included
+⚠️ Overage begins at 100,000 tokens
+
+By Agent Tokens Cost
+Agent 1 (Sales) 45,100 $4.51
+Agent 2 (Support) 23,100 $2.31
+
+By Model Tokens Cost
+gpt-4o 55,000 $5.50
+claude-3.5 13,200 $1.32
+
+text
+
+### Usage Alerts (Supabase Edge Function, daily cron)
+
+- If workspace > 80% of credits → admin alert + optional client heads-up email
+- If workspace > 100% → overage notification email to client
+- Prevents surprise bills and payment disputes
+
+---
+
+## 5. Workspace Settings Tab
+
+Lives at `/app/workspaces/[id]/settings` and `/app/admin/(dashboard)/workspaces/[id]/settings`.
+
+Inspired by the Intraplex demo (clearance levels, siloed teams, simplified mode for non-technical clients).
+
+### 5.1 Tab: General
+
+**Workspace Admin sees:**
+- Workspace name, logo, primary color
+- Language (ES / EN)
+- Timezone
+- Subdomain (read-only)
+
+**Super Admin additionally:**
+- Internal notes (private)
+- Stripe customer ID (link)
+- "Suspend Workspace" toggle
+- Linked intake submission
+
+### 5.2 Tab: Members & Roles
+
+Uses existing `workspace_members` table with roles `admin | operator | viewer`.
+
+| Role | Permissions |
+|---|---|
+| Admin | Full workspace access, invite, settings |
+| Operator | Use agents, view data, no settings |
+| Viewer | Read-only dashboards/reports |
+
+**Actions:** invite by email (Supabase magic link), change role, remove member, resend/cancel pending invites.
+
+**Super Admin additionally:** "Login as user" impersonation, force-remove, see login timestamps.
+
+### 5.3 Tab: Clearance & Permissions (Key New Feature)
+
+**Clearance Levels (per user):**
+
+| Level | Name | Access |
+|---|---|---|
+| 1 | Public | General info, landing page data |
+| 2 | Internal | Agent conversations, basic reports |
+| 3 | Confidential | Full CRM, all records |
+| 4 | Restricted | Integrations + billing + everything |
+
+Each data object, agent, or view gets a minimum clearance requirement. Users below that level see nothing (completely hidden).
+
+**Feature Flags (Super Admin controls per workspace):**
+- `can_use_agents`
+- `can_view_billing`
+- `can_invite_members`
+- `can_create_automations`
+- `can_export_data`
+- `can_access_connectors`
+- `simplified_mode` (hides advanced UI)
+- `max_members`
+- `max_agents`
+
+**Workspace Admin scoped controls:**
+- Per-member sidebar visibility toggles
+- Per-agent user access
+- Simplified Mode toggle for non-technical team members
+
+### 5.4 Tab: Agent Controls
+
+**Workspace Admin:**
+- List agents, toggle on/off, edit name/description
+- Set which users can interact with each agent (clearance-based)
+
+**Super Admin additionally:**
+- Change model per agent (cost management)
+- Set max tokens per agent per day
+- Enable/disable agent skills
+- Deploy new agent button
+- View container name + droplet assignment
+
+### 5.5 Tab: Data & Connectors
+
+**Workspace Admin** (if `can_access_connectors = true`):
+- Connected sources list
+- Add connector (simplified wizard or advanced)
+- Knowledge bases
+- Disconnect/re-sync
+
+**Super Admin additionally:**
+- Raw connector config (vault-stored credentials)
+- Connection health + error logs
+- Storage usage
+
+**Simplified Mode:** only shows "Connected Files" upload + list. No DB connectors.
+
+### 5.6 Tab: Appearance
+Brand colors, logo, language, landing page preview, custom domain (Pro plan only).
+
+### 5.7 Tab: Audit Log
+
+**Workspace Admin sees:**
+- Chronological log: user, action, timestamp, resource
+- Risk level badge (Low/Medium/High)
+- Filter by user, date, action type
+- CSV export
+
+**Super Admin additionally:** cross-workspace audit view, flag entries.
+
+### 5.8 Tab: Billing & Plan (Super Admin Only)
+Plan tier, MRR, credit usage meter, Stripe subscription status, add/remove agents, change plan, cancel with grace period.
+
+---
+
+## 6. Full Database Schema (Migrations)
+
+### 6.1 `20260420_000003_intake_submissions.sql`
+
+```sql
+CREATE TABLE public.intake_submissions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  full_name TEXT NOT NULL,
+  business_name TEXT NOT NULL,
+  website_url TEXT,
+  business_location TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  brand_assets TEXT[],
+  email TEXT NOT NULL,
+  lead_score INTEGER DEFAULT 0,
+  status TEXT DEFAULT 'new' CHECK (status IN ('new','contacted','workspace_created','rejected')),
+  admin_notes TEXT,
+  referral_source TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_intake_submissions_status ON public.intake_submissions(status, created_at DESC);
+CREATE INDEX idx_intake_submissions_email ON public.intake_submissions(email);
+
+ALTER TABLE public.workspaces
+  ADD COLUMN IF NOT EXISTS intake_submission_id UUID REFERENCES public.intake_submissions(id) ON DELETE SET NULL;
+```
+
+### 6.2 `20260420_000004_credits_and_billing.sql`
+
+```sql
+-- Credit allocations per workspace
+CREATE TABLE public.workspace_credit_allocations (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id UUID NOT NULL REFERENCES public.workspaces(id) ON DELETE CASCADE,
+  credits_included INTEGER NOT NULL DEFAULT 50000,
+  credits_per_agent INTEGER NOT NULL DEFAULT 50000,
+  reset_day INTEGER DEFAULT 1,
+  overage_rate NUMERIC(10,6) DEFAULT 0.000100,
+  stripe_meter_id TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Usage events
+CREATE TABLE public.credit_usage_events (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id UUID NOT NULL REFERENCES public.workspaces(id) ON DELETE CASCADE,
+  agent_id UUID REFERENCES public.workspace_agents(id) ON DELETE SET NULL,
+  user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+  model TEXT NOT NULL,
+  prompt_tokens INTEGER NOT NULL DEFAULT 0,
+  completion_tokens INTEGER NOT NULL DEFAULT 0,
+  total_tokens INTEGER NOT NULL DEFAULT 0,
+  cost_usd NUMERIC(10,6) NOT NULL DEFAULT 0,
+  event_type TEXT DEFAULT 'agent_call',
+  metadata JSONB DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_credit_usage_workspace_created ON public.credit_usage_events(workspace_id, created_at DESC);
+CREATE INDEX idx_credit_usage_agent ON public.credit_usage_events(agent_id, created_at DESC);
+CREATE INDEX idx_credit_usage_user ON public.credit_usage_events(user_id, created_at DESC);
+
+-- Monthly usage summaries
+CREATE TABLE public.workspace_usage_summaries (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id UUID NOT NULL REFERENCES public.workspaces(id) ON DELETE CASCADE,
+  billing_period_start DATE NOT NULL,
+  billing_period_end DATE NOT NULL,
+  total_tokens BIGINT DEFAULT 0,
+  total_cost_usd NUMERIC(10,4) DEFAULT 0,
+  included_credits INTEGER DEFAULT 0,
+  overage_tokens BIGINT DEFAULT 0,
+  overage_cost_usd NUMERIC(10,4) DEFAULT 0,
+  stripe_usage_record_id TEXT,
+  finalized BOOLEAN DEFAULT FALSE,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(workspace_id, billing_period_start)
+);
+
+-- Stripe billing config
+CREATE TABLE public.workspace_billing (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id UUID NOT NULL UNIQUE REFERENCES public.workspaces(id) ON DELETE CASCADE,
+  stripe_customer_id TEXT,
+  stripe_subscription_id TEXT,
+  stripe_metered_subscription_item_id TEXT,
+  agent_count INTEGER DEFAULT 1,
+  plan_base_price_cents INTEGER DEFAULT 25000,
+  hosting_price_cents INTEGER DEFAULT 0,
+  status TEXT DEFAULT 'active' CHECK (status IN ('active','past_due','cancelled','trialing')),
+  trial_ends_at TIMESTAMPTZ,
+  current_period_start TIMESTAMPTZ,
+  current_period_end TIMESTAMPTZ,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+```
+
+### 6.3 `20260420_000005_feature_flags_and_clearance.sql`
+
+```sql
+-- Feature flags per workspace
+CREATE TABLE public.workspace_feature_flags (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id UUID NOT NULL UNIQUE REFERENCES public.workspaces(id) ON DELETE CASCADE,
+  can_use_agents BOOLEAN DEFAULT TRUE,
+  can_view_billing BOOLEAN DEFAULT FALSE,
+  can_invite_members BOOLEAN DEFAULT TRUE,
+  can_create_automations BOOLEAN DEFAULT FALSE,
+  can_export_data BOOLEAN DEFAULT TRUE,
+  can_access_connectors BOOLEAN DEFAULT FALSE,
+  simplified_mode BOOLEAN DEFAULT TRUE,
+  max_members INTEGER DEFAULT 3,
+  max_agents INTEGER DEFAULT 1,
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Clearance + visibility per member
+ALTER TABLE public.workspace_members
+  ADD COLUMN IF NOT EXISTS clearance_level INTEGER DEFAULT 2 CHECK (clearance_level BETWEEN 1 AND 4),
+  ADD COLUMN IF NOT EXISTS visible_sections TEXT[] DEFAULT ARRAY['dashboard','agents','records'];
+
+-- Minimum clearance per data object
+ALTER TABLE public.workspace_objects
+  ADD COLUMN IF NOT EXISTS min_clearance_level INTEGER DEFAULT 1;
+
+ALTER TABLE public.workspace_agents
+  ADD COLUMN IF NOT EXISTS min_clearance_level INTEGER DEFAULT 1,
+  ADD COLUMN IF NOT EXISTS allowed_user_ids UUID[] DEFAULT ARRAY[]::UUID[];
+```
+
+### 6.4 `20260420_000006_audit_log.sql`
+
+```sql
+CREATE TABLE public.workspace_audit_log (
+  id BIGSERIAL PRIMARY KEY,
+  workspace_id UUID NOT NULL REFERENCES public.workspaces(id) ON DELETE CASCADE,
+  user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+  action TEXT NOT NULL,
+  resource_type TEXT,
+  resource_id TEXT,
+  risk_level TEXT DEFAULT 'low' CHECK (risk_level IN ('low','medium','high')),
+  metadata JSONB DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_audit_workspace_created ON public.workspace_audit_log(workspace_id, created_at DESC);
+CREATE INDEX idx_audit_user_created ON public.workspace_audit_log(user_id, created_at DESC);
+CREATE INDEX idx_audit_risk ON public.workspace_audit_log(workspace_id, risk_level, created_at DESC);
+```
+
+### 6.5 `20260420_000007_admin_system.sql`
+
+```sql
+-- Super admin roles
+CREATE TABLE public.super_admins (
+  user_id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  role TEXT NOT NULL DEFAULT 'super_admin' CHECK (role IN ('super_admin','onboarding','support','billing')),
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Admin action audit log
+CREATE TABLE public.admin_audit_log (
+  id BIGSERIAL PRIMARY KEY,
+  admin_user_id UUID NOT NULL REFERENCES auth.users(id),
+  target_workspace_id UUID REFERENCES public.workspaces(id) ON DELETE SET NULL,
+  target_user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+  action TEXT NOT NULL,
+  metadata JSONB DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Workspace templates
+CREATE TABLE public.workspace_templates (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL,
+  vertical TEXT,
+  description TEXT,
+  agent_configs JSONB NOT NULL DEFAULT '[]'::jsonb,
+  default_objects JSONB NOT NULL DEFAULT '[]'::jsonb,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+```
+
+---
+
+## 7. File Structure to Add
+app/
+admin/
+(dashboard)/
+dashboard/page.tsx ← home: KPIs, signals, alerts
+leads/page.tsx ← intake leads table
+workspaces/
+page.tsx ← workspaces list
+[id]/
+page.tsx ← overview
+users/page.tsx
+agents/page.tsx
+infrastructure/page.tsx
+credits/page.tsx
+billing/page.tsx
+settings/page.tsx
+audit/page.tsx
+dashboard-billing/page.tsx ← P/L dashboard
+templates/page.tsx ← workspace templates
+api/
+intake/route.ts ← form POST handler
+admin/
+workspaces/route.ts
+workspaces/[id]/route.ts
+workspaces/[id]/impersonate/route.ts
+billing/route.ts
+credits/report/route.ts ← Hermes usage aggregation → Stripe
+workspaces/
+[id]/
+settings/page.tsx ← client-facing settings
+components/
+admin/
+LeadTable.tsx
+LeadRow.tsx
+WorkspaceCreateModal.tsx
+WorkspaceCard.tsx
+AgentStatusBadge.tsx
+OpenRouterUsageBar.tsx
+DockerStatusWidget.tsx
+PLSummaryCard.tsx
+UpsellSignalFeed.tsx
+ChurnRiskAlerts.tsx
+ImpersonateButton.tsx
+settings/
+GeneralTab.tsx
+MembersTab.tsx
+ClearanceTab.tsx
+AgentControlsTab.tsx
+ConnectorsTab.tsx
+AppearanceTab.tsx
+AuditLogTab.tsx
+BillingTab.tsx
+FeatureFlagToggle.tsx
+lib/
+billing/
+logUsage.ts
+reportToStripe.ts
+computeOverage.ts
+admin/
+impersonate.ts
+audit.ts
+clearance/
+checkAccess.ts ← central clearance resolver
+supabase/
+migrations/
+20260420_000003_intake_submissions.sql
+20260420_000004_credits_and_billing.sql
+20260420_000005_feature_flags_and_clearance.sql
+20260420_000006_audit_log.sql
+20260420_000007_admin_system.sql
+functions/
+daily-usage-alerts/index.ts ← Edge Function cron
+daily-admin-digest/index.ts ← morning email to David
+
+text
+
+---
+
+## 8. Build Order Recommendation
+
+Ship in this order for maximum early value:
+
+**Week 1 — Foundation**
+1. Run all 5 migrations
+2. Build `/app/intake/page.tsx` + API route + lead scoring
+3. Build `/admin/(dashboard)/leads` table with filters + bulk actions
+4. Daily digest email Edge Function
+
+**Week 2 — Workspace Management**
+5. `WorkspaceCreateModal` + workspaces list view
+6. "Login as Client" impersonation flow
+7. Workspace detail page (overview + users + agents tabs)
+8. Audit logging wired into all admin actions
+
+**Week 3 — Billing**
+9. `lib/billing/logUsage.ts` + hermes-sidecar integration
+10. Stripe product setup (base + metered + hosting)
+11. Credits & Usage tab with bar chart + per-agent/per-model breakdown
+12. Daily usage alerts Edge Function
+13. Billing/P&L dashboard
+
+**Week 4 — Settings & Clearance**
+14. Settings tabs: General, Members, Agent Controls, Appearance
+15. Feature flags system + Super Admin toggle UI
+16. Clearance levels + `checkAccess.ts` resolver
+17. Connectors tab (Simplified Mode first, advanced later)
+18. Audit log tab for clients
+
+**Week 5 — Polish & Growth Tools**
+19. Upsell Signal Feed + Churn Risk Alerts
+20. Workspace Templates for vertical-specific deploys
+21. CSV exports everywhere
+22. Client health score computation
+
+---
+
+## Appendix: Environment Variables Needed
+
+Add to `.env.local.example`:
+Stripe
+STRIPE_SECRET_KEY=
+STRIPE_WEBHOOK_SECRET=
+STRIPE_PRICE_AGENT_BASE= # $250/mo recurring
+STRIPE_PRICE_OVERAGE_METERED= # metered tokens
+STRIPE_PRICE_HOSTING= # landing page hosting
+
+OpenRouter
+OPENROUTER_API_KEY=
+OPENROUTER_PROVISIONING_KEY=
+
+DigitalOcean (for droplet health)
+DO_API_TOKEN=
+
+Vercel (for deployment status)
+VERCEL_API_TOKEN=
+
+Resend (for admin alerts + client emails)
+RESEND_API_KEY=
+ADMIN_ALERT_EMAIL=david@superwave.io
+
+Supabase
+SUPABASE_SERVICE_ROLE_KEY= # required for impersonation
+
+text
+
+---
+
+**End of Spec.** Hand this to Cursor with: *"Read `docs/specdashboard` and build in the order specified in Section 8. Start with Week 1 Task 1 (run migrations) and stop after each task for review."*
